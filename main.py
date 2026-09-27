@@ -96,20 +96,17 @@ def _build_keyboard(chat_id: int, user_id: int, page: int) -> InlineKeyboardMark
             )
         rows.append(row)
 
-    nav_row = []
-    if page > 0:
-        nav_row.append(
-            InlineKeyboardButton("« Previous", callback_data=f"{CB_PAGE}:{chat_id}:{user_id}:{page - 1}")
-        )
-    if page < TOTAL_PAGES - 1:
-        nav_row.append(
-            InlineKeyboardButton("Next »", callback_data=f"{CB_PAGE}:{chat_id}:{user_id}:{page + 1}")
-        )
-    if nav_row:
-        rows.append(nav_row)
+    # Previous and Next always shown together, like the Duke bot reference.
+    prev_page = page - 1 if page > 0 else page
+    next_page = page + 1 if page < TOTAL_PAGES - 1 else page
+    rows.append(
+        [
+            InlineKeyboardButton("« Previous", callback_data=f"{CB_PAGE}:{chat_id}:{user_id}:{prev_page}"),
+            InlineKeyboardButton("Next »", callback_data=f"{CB_PAGE}:{chat_id}:{user_id}:{next_page}"),
+        ]
+    )
 
     rows.append([InlineKeyboardButton("✅ Confirm", callback_data=f"{CB_CONFIRM}:{chat_id}:{user_id}")])
-    rows.append([InlineKeyboardButton("✖ Cancel", callback_data=f"{CB_CANCEL}:{chat_id}:{user_id}")])
 
     return InlineKeyboardMarkup(rows)
 
@@ -217,29 +214,22 @@ async def cb_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await query.answer("Only group admins can do this.", show_alert=True)
         return
 
-    _PAGES[key] = page
-    target_name = (await context.bot.get_chat_member(chat_id, user_id)).user.mention_html()
-    await query.edit_message_text(
-        _caption(target_name, page),
-        parse_mode=ParseMode.HTML,
-        reply_markup=_build_keyboard(chat_id, user_id, page),
-    )
-    await query.answer()
-
-
-async def cb_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    _, _, chat_id, user_id = query.data.split(":")
-    chat_id, user_id = int(chat_id), int(user_id)
-    key = _session_key(chat_id, user_id)
-
-    if not await _actor_is_admin(update, context, chat_id):
-        await query.answer("Only group admins can do this.", show_alert=True)
+    if page == _PAGES.get(key, 0):
+        # already on this page (edge of Previous/Next) — nothing to redraw
+        await query.answer()
         return
 
-    _SESSIONS.pop(key, None)
-    _PAGES.pop(key, None)
-    await query.edit_message_text("Promotion cancelled.")
+    _PAGES[key] = page
+    target_name = (await context.bot.get_chat_member(chat_id, user_id)).user.mention_html()
+    try:
+        await query.edit_message_text(
+            _caption(target_name, page),
+            parse_mode=ParseMode.HTML,
+            reply_markup=_build_keyboard(chat_id, user_id, page),
+        )
+    except BadRequest as e:
+        if "not modified" not in str(e).lower():
+            raise
     await query.answer()
 
 
@@ -333,7 +323,6 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(cb_toggle, pattern=rf"^{CB_TOGGLE}:"))
     application.add_handler(CallbackQueryHandler(cb_page, pattern=rf"^{CB_PAGE}:"))
     application.add_handler(CallbackQueryHandler(cb_confirm, pattern=rf"^{CB_CONFIRM}:"))
-    application.add_handler(CallbackQueryHandler(cb_cancel, pattern=rf"^{CB_CANCEL}:"))
 
     logger.info("Bot starting (polling)...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
@@ -341,4 +330,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-              
+    
