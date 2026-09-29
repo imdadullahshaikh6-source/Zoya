@@ -25,11 +25,21 @@ _SAFE_NAME_CHARS = set(
 )
 
 
+
 def _safe_name(name: str) -> str:
-    decomposed = unicodedata.normalize("NFKD", name or "")
-    cleaned = "".join(ch for ch in decomposed if ch in _SAFE_NAME_CHARS)
+    """Preserve stylish Unicode names and remove invisible controls."""
+    name = unicodedata.normalize("NFC", name or "")
+
+    cleaned = "".join(
+        ch for ch in name
+        if unicodedata.category(ch) not in ("Cc", "Cs", "Co")
+        and ch not in "\u200e\u200f\u202a\u202b\u202c\u202d\u202e"
+    )
+
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    return cleaned or "Someone"
+
+    return cleaned[:80] or "Someone"
+            
 
 HELP_TXT = (
     "<b>✦ stickers</b>\n\n"
@@ -55,6 +65,32 @@ def _initials(name: str) -> str:
     if not parts:
         return "?"
     return (parts[0][0] + (parts[1][0] if len(parts) > 1 else "")).upper()
+
+
+def _quote_font(size: int, bold: bool = False):
+    """Load a proper scalable font for quote stickers."""
+    paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+        if bold else
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"
+        if bold else
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+
+        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf"
+        if bold else
+        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+    ]
+
+    for path in paths:
+        try:
+            return ImageFont.truetype(path, size=size)
+        except (OSError, ValueError):
+            continue
+
+    return ImageFont.load_default()
+            
 
 
 def _fit_512(img: Image.Image) -> Image.Image:
@@ -108,58 +144,222 @@ async def _avatar(ctx, user, size=84) -> Image.Image:
 
 
 async def build_quote_sticker(ctx, src_msg, sender) -> io.BytesIO:
-    name = _safe_name(sender.full_name)[:28]
-    text = src_msg.text or src_msg.caption or "[media]"
 
-    W = 512  # design at the final sticker width so text never gets shrunk afterwards
-    outer_pad = 20
-    avatar_size = 100
-    gap = 14
-    pad = 24  # inner bubble padding
+async def build_quote_sticker(ctx, src_msg, sender) -> io.BytesIO:
+    name = _safe_name(sender.full_name)
 
-    try:
-        font_name = ImageFont.load_default(size=36)
-        font_text = ImageFont.load_default(size=42)
-    except TypeError:
-        font_name = font_text = ImageFont.load_default()
+    text = src_msg.text or src_msg.caption or "[Media]"
 
-    bubble_x = outer_pad + avatar_size + gap
-    bubble_w = W - bubble_x - outer_pad
-    text_w = bubble_w - pad * 2
+    # ---------- CANVAS ----------
+    W, H = 512, 512
 
-    probe = ImageDraw.Draw(Image.new("RGB", (10, 10)))
-    lines = _wrap(probe, text, font_text, text_w)
-    line_h = font_text.getbbox("Ag")[3] + 16
-    name_h = font_name.getbbox("Ag")[3] + 18
-    body_h = line_h * len(lines)
-    bubble_h = name_h + body_h + pad * 2
-    H = max(avatar_size, bubble_h) + outer_pad * 2
+    img = Image.new(
+        "RGBA",
+        (W, H),
+        (0, 0, 0, 0)
+    )
 
-    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    by = (H - bubble_h) // 2
-    draw.rounded_rectangle((bubble_x, by, bubble_x + bubble_w, by + bubble_h), radius=28, fill=(24, 37, 51, 240))
 
-    # name: faux-bold (drawn twice, offset by 1px) so it pops against the bubble
-    name_color = _color_for(sender.id)
-    name_x, name_y = bubble_x + pad, by + pad - 2
-    draw.text((name_x + 1, name_y), name, font=font_name, fill=name_color)
-    draw.text((name_x, name_y), name, font=font_name, fill=name_color)
+    # ---------- COLORS ----------
+    accent = _color_for(sender.id)
+    white = (255, 255, 255, 255)
 
-    ty = by + pad + name_h
-    for ln in lines:
-        draw.text((bubble_x + pad, ty), ln, font=font_text, fill=(255, 255, 255))
-        ty += line_h
+    bubble_color = (24, 34, 50, 248)
+    border_color = (80, 100, 130, 210)
 
-    avatar = await _avatar(ctx, sender, avatar_size)
-    img.paste(avatar, (outer_pad, (H - avatar_size) // 2), avatar)
+    # ---------- BUBBLE ----------
+    bx, by = 108, 72
+    bw, bh = 382, 368
+    radius = 32
 
-    img = _fit_512(img)  # width is already 512, so this only scales down very long quotes
+    # Soft shadow
+    draw.rounded_rectangle(
+        (
+            bx + 5,
+            by + 8,
+            bx + bw + 5,
+            by + bh + 8
+        ),
+        radius=radius,
+        fill=(0, 0, 0, 90)
+    )
+
+    # Main bubble
+    draw.rounded_rectangle(
+        (bx, by, bx + bw, by + bh),
+        radius=radius,
+        fill=bubble_color,
+        outline=border_color,
+        width=2
+    )
+
+    # Colored accent line
+    draw.rounded_rectangle(
+        (bx + 2, by + 25, bx + 9, by + bh - 25),
+        radius=5,
+        fill=accent
+    )
+
+    # ---------- AVATAR ----------
+    avatar_size = 92
+
+    avatar = await _avatar(
+        ctx,
+        sender,
+        avatar_size
+    )
+
+    ax, ay = 22, 98
+
+    # Avatar border
+    draw.ellipse(
+        (
+            ax - 4,
+            ay - 4,
+            ax + avatar_size + 4,
+            ay + avatar_size + 4
+        ),
+        fill=white
+    )
+
+    img.paste(
+        avatar,
+        (ax, ay),
+        avatar
+    )
+
+    draw = ImageDraw.Draw(img)
+
+    # ---------- USERNAME ----------
+    name_x = bx + 30
+    name_y = by + 29
+
+    name_font_size = 27
+    max_name_width = bw - 58
+
+    name_font = _quote_font(
+        name_font_size,
+        bold=True
+    )
+
+    # Shrink only if username is too long.
+    while (
+        draw.textlength(name, font=name_font) > max_name_width
+        and name_font_size > 15
+    ):
+        name_font_size -= 1
+
+        name_font = _quote_font(
+            name_font_size,
+            bold=True
+        )
+
+    # Shadow behind name
+    draw.text(
+        (name_x + 1, name_y + 2),
+        name,
+        font=name_font,
+        fill=(0, 0, 0, 150)
+    )
+
+    # Actual username
+    draw.text(
+        (name_x, name_y),
+        name,
+        font=name_font,
+        fill=accent
+    )
+
+    # ---------- DIVIDER ----------
+    divider_y = by + 84
+
+    draw.line(
+        (
+            bx + 28,
+            divider_y,
+            bx + bw - 28,
+            divider_y
+        ),
+        fill=(100, 120, 150, 150),
+        width=2
+    )
+
+    # ---------- MESSAGE TEXT ----------
+    text_x = bx + 29
+    text_y = divider_y + 24
+
+    text_width = bw - 58
+    available_height = 218
+
+    font_size = 28
+
+    while font_size >= 16:
+        font_text = _quote_font(
+            font_size,
+            bold=False
+        )
+
+        lines = _wrap(
+            draw,
+            text,
+            font_text,
+            text_width,
+            max_lines=6
+        )
+
+        bbox = font_text.getbbox("Ag")
+        line_height = bbox[3] - bbox[1] + 12
+
+        total_height = len(lines) * line_height
+
+        if total_height <= available_height:
+            break
+
+        font_size -= 1
+
+    # Render each line
+    for line in lines:
+        draw.text(
+            (text_x, text_y),
+            line,
+            font=font_text,
+            fill=white
+        )
+
+        text_y += line_height
+
+    # ---------- FOOTER ----------
+    footer_font = _quote_font(15)
+
+    draw.text(
+        (
+            bx + 29,
+            by + bh - 38
+        ),
+        "ZOYA  •  QUOTE",
+        font=footer_font,
+        fill=(175, 190, 210, 255)
+    )
+
+    # ---------- EXPORT ----------
+    # Keep original Telegram sticker resizing logic.
+    img = _fit_512(img)
+
     out = io.BytesIO()
     out.name = "quote.webp"
-    img.save(out, "WEBP")
+
+    img.save(
+        out,
+        "WEBP",
+        quality=95,
+        method=6
+    )
+
     out.seek(0)
+
     return out
+            
 
 
 async def _quote_and_send(update, ctx, as_reply: bool):
