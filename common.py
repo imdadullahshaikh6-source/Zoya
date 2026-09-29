@@ -65,7 +65,7 @@ async def say(ctx, chat_id, text, kb=None, reply_to=None):
 
 
 # ───────────────────── ROSE-STYLE BUTTON PARSER ─────────────────────
-BTN_RE = re.compile(r"\[([^\]]+)\]\(buttonurl://([^)]+)\)", re.I)
+BTN_RE = re.compile(r"\[([^\]]+)\]\(\s*buttonurl:\s*/{0,2}\s*([^)]+)\)", re.I)
 
 
 def parse_buttons(raw: str):
@@ -256,4 +256,4 @@ def human_delta(seconds: float) -> str:
     if not parts:
         parts.append(f"{seconds}s")
     return " ".join(parts[:2])
-  
+    
