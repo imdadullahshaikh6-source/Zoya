@@ -16,7 +16,7 @@ import afk
 import ban
 import database as dbase
 import welcome
-from common import B, T, log, say, sc
+from common import B, T, log, mention, say, sc
 
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(name)s | %(message)s", level=logging.INFO)
 
@@ -63,7 +63,7 @@ def add_me_url(username: str) -> str:
 
 def home_page(user, ctx):
     me = ctx.application.bot_data["me"]
-    text = T(START_TXT, m=f'<a href="tg://user?id={user.id}">{user.full_name or user.id}</a>')
+    text = T(START_TXT, m=mention(user))
     rows = [
         [B("📜 Command", "help:main", style="primary")],
         [B("👑 Support", url=SUPPORT_URL, style="primary"), B("➕ Add Me", url=add_me_url(me.username), style="success")],
