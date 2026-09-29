@@ -92,39 +92,51 @@ async def _avatar(ctx, user, size=84) -> Image.Image:
 async def build_quote_sticker(ctx, src_msg, sender) -> io.BytesIO:
     name = (sender.full_name or "Unknown")[:28]
     text = src_msg.text or src_msg.caption or "[media]"
-    pad = 22
+
+    W = 512  # design at the final sticker width so text never gets shrunk afterwards
+    outer_pad = 20
+    avatar_size = 100
+    gap = 14
+    pad = 24  # inner bubble padding
+
     try:
-        font_name = ImageFont.load_default(size=28)
-        font_text = ImageFont.load_default(size=32)
+        font_name = ImageFont.load_default(size=36)
+        font_text = ImageFont.load_default(size=42)
     except TypeError:
         font_name = font_text = ImageFont.load_default()
 
-    probe = ImageDraw.Draw(Image.new("RGB", (10, 10)))
-    avatar_size = 84
-    text_w = 420
-    lines = _wrap(probe, text, font_text, text_w)
-    line_h = font_text.getbbox("Ag")[3] + 12
-    name_h = font_name.getbbox("Ag")[3] + 14
-    body_h = line_h * len(lines)
-    bubble_w = text_w + pad * 2
-    bubble_h = name_h + body_h + pad * 2
-    w = avatar_size + 20 + bubble_w + pad
-    h = max(avatar_size, bubble_h) + pad * 2
+    bubble_x = outer_pad + avatar_size + gap
+    bubble_w = W - bubble_x - outer_pad
+    text_w = bubble_w - pad * 2
 
-    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    probe = ImageDraw.Draw(Image.new("RGB", (10, 10)))
+    lines = _wrap(probe, text, font_text, text_w)
+    line_h = font_text.getbbox("Ag")[3] + 16
+    name_h = font_name.getbbox("Ag")[3] + 18
+    body_h = line_h * len(lines)
+    bubble_h = name_h + body_h + pad * 2
+    H = max(avatar_size, bubble_h) + outer_pad * 2
+
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    bx, by = avatar_size + 20 + pad // 2, pad
-    draw.rounded_rectangle((bx, by, bx + bubble_w, by + bubble_h), radius=24, fill=(24, 37, 51, 235))
-    draw.text((bx + pad, by + pad - 4), name, font=font_name, fill=_color_for(sender.id))
+    by = (H - bubble_h) // 2
+    draw.rounded_rectangle((bubble_x, by, bubble_x + bubble_w, by + bubble_h), radius=28, fill=(24, 37, 51, 240))
+
+    # name: faux-bold (drawn twice, offset by 1px) so it pops against the bubble
+    name_color = _color_for(sender.id)
+    name_x, name_y = bubble_x + pad, by + pad - 2
+    draw.text((name_x + 1, name_y), name, font=font_name, fill=name_color)
+    draw.text((name_x, name_y), name, font=font_name, fill=name_color)
+
     ty = by + pad + name_h
     for ln in lines:
-        draw.text((bx + pad, ty), ln, font=font_text, fill=(230, 230, 230))
+        draw.text((bubble_x + pad, ty), ln, font=font_text, fill=(255, 255, 255))
         ty += line_h
 
     avatar = await _avatar(ctx, sender, avatar_size)
-    img.paste(avatar, (pad // 2, (h - avatar_size) // 2), avatar)
+    img.paste(avatar, (outer_pad, (H - avatar_size) // 2), avatar)
 
-    img = _fit_512(img)
+    img = _fit_512(img)  # width is already 512, so this only scales down very long quotes
     out = io.BytesIO()
     out.name = "quote.webp"
     img.save(out, "WEBP")
@@ -232,3 +244,4 @@ def register(app):
     dual_command(app, "q", q_cmd)
     dual_command(app, "qr", qr_cmd)
     dual_command(app, "kang", kang_cmd)
+            
