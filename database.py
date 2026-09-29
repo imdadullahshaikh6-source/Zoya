@@ -18,6 +18,7 @@ async def init(uri: str, name: str):
     await _db.users.create_index("username")
     await _db.moderation.create_index([("chat_id", 1), ("user_id", 1)])
     await _db.warns.create_index([("chat_id", 1), ("user_id", 1)])
+    await _db.members.create_index("chat_id")
     log.info("MongoDB connected (db: %s)", name)
 
 
@@ -113,4 +114,33 @@ async def warn_get(chat_id: int, user_id: int):
 
 async def warn_clear(chat_id: int, user_id: int):
     await _db.warns.delete_one({"_id": _mid(chat_id, user_id)})
-    
+
+
+# ───────── chat members seen (for .waifu / .couple games) ─────────
+async def mark_member(chat_id: int, user_id: int, name: str):
+    await _db.members.update_one(
+        {"_id": f"{chat_id}:{user_id}"},
+        {"$set": {"chat_id": chat_id, "user_id": user_id, "name": name}},
+        upsert=True,
+    )
+
+
+async def random_members(chat_id: int, count: int):
+    cursor = _db.members.aggregate([
+        {"$match": {"chat_id": chat_id}},
+        {"$sample": {"size": count}},
+    ])
+    return [doc async for doc in cursor]
+
+
+# ───────── kang packs (one growing sticker pack per user) ─────────
+async def kang_get(user_id: int):
+    return await _db.kangs.find_one({"_id": user_id})
+
+
+async def kang_set(user_id: int, name: str, count: int, part: int | None = None):
+    fields = {"name": name, "count": count}
+    if part is not None:
+        fields["part"] = part
+    await _db.kangs.update_one({"_id": user_id}, {"$set": fields}, upsert=True)
+            
