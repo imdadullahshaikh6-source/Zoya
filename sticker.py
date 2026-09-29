@@ -14,32 +14,18 @@ from telegram.error import TelegramError
 import database as dbase
 from common import T, dual_command, esc, say
 
-# Fancy display names often use decorative Unicode (math-style bold letters,
-# overlines, carets, fullwidth letters...) that most fonts can't render, which
-# shows up as tofu boxes. NFKD-normalizing folds styled letters like "𝙕𝙤𝙮𝙖"
-# back to plain "Zoya", and we then drop anything still outside a safe set —
-# so a name is either shown cleanly or trimmed, never boxes.
-_SAFE_NAME_CHARS = set(
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 "
-    ".,!?'\"-_()&@#$%*+/:;~"
-)
-
-
 
 def _safe_name(name: str) -> str:
     """Preserve stylish Unicode names and remove invisible controls."""
     name = unicodedata.normalize("NFC", name or "")
-
     cleaned = "".join(
         ch for ch in name
         if unicodedata.category(ch) not in ("Cc", "Cs", "Co")
         and ch not in "\u200e\u200f\u202a\u202b\u202c\u202d\u202e"
     )
-
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned[:40] or "User"
 
-    return cleaned[:80] or "Someone"
-            
 
 HELP_TXT = (
     "<b>✦ stickers</b>\n\n"
@@ -56,7 +42,16 @@ EMOJI_RE = re.compile(r"^[\U0001F000-\U0001FAFF\u2600-\u27BF\u2190-\u21FF\u2B00-
 
 
 def _color_for(seed: int):
-    palette = [(230, 126, 34), (155, 89, 182), (52, 152, 219), (231, 76, 60), (26, 188, 156), (241, 196, 15)]
+    palette = [
+        (255, 136, 94),   # Orange-Red
+        (225, 112, 85),   # Coral
+        (253, 121, 168),  # Pink
+        (108, 92, 231),   # Violet
+        (0, 206, 201),    # Cyan
+        (9, 132, 227),    # Blue
+        (0, 184, 148),    # Green
+        (254, 202, 87)    # Gold
+    ]
     return palette[seed % len(palette)]
 
 
@@ -67,296 +62,198 @@ def _initials(name: str) -> str:
     return (parts[0][0] + (parts[1][0] if len(parts) > 1 else "")).upper()
 
 
-def _quote_font(size: int, bold: bool = False):
-    """Load a proper scalable font for quote stickers."""
+def _get_font(size: int, bold: bool = False):
+    """Load a proper font with robust fallbacks across environments."""
     paths = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-        if bold else
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-
-        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"
-        if bold else
-        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-
-        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf"
-        if bold else
-        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+        # Linux standard fonts
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf" if bold else "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+        # Windows standard fonts
+        "C:\\Windows\\Fonts\\arialbd.ttf" if bold else "C:\\Windows\\Fonts\\arial.ttf",
+        "C:\\Windows\\Fonts\\segoeui.ttf",
     ]
-
     for path in paths:
         try:
             return ImageFont.truetype(path, size=size)
-        except (OSError, ValueError):
+        except Exception:
             continue
-
-    return ImageFont.load_default()
-            
+    try:
+        return ImageFont.load_default(size=size)
+    except Exception:
+        return ImageFont.load_default()
 
 
 def _fit_512(img: Image.Image) -> Image.Image:
-    """Telegram static stickers need the longest side to be exactly 512px."""
+    """Telegram static stickers require the longest side to be exactly 512px."""
     w, h = img.size
     scale = MAX_SIDE / max(w, h)
-    return img.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.LANCZOS)
+    new_w = max(1, round(w * scale))
+    new_h = max(1, round(h * scale))
+    return img.resize((new_w, new_h), Image.LANCZOS)
 
 
-def _wrap(draw, text, font, max_w):
-    words = text.split() or [""]
-    lines, cur = [], ""
-    for w in words:
-        trial = (cur + " " + w).strip()
-        if draw.textlength(trial, font=font) <= max_w:
-            cur = trial
-        else:
-            if cur:
-                lines.append(cur)
-            cur = w
-    if cur:
-        lines.append(cur)
-    return lines[:8] or [""]
+def _wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_w: int):
+    """Wrap message text properly into lines."""
+    paragraphs = text.split("\n")
+    lines = []
+    for para in paragraphs:
+        if not para.strip():
+            lines.append("")
+            continue
+        words = para.split(" ")
+        cur = ""
+        for w in words:
+            trial = (cur + " " + w).strip() if cur else w
+            if draw.textlength(trial, font=font) <= max_w:
+                cur = trial
+            else:
+                if cur:
+                    lines.append(cur)
+                # Handle single word exceeding max width
+                if draw.textlength(w, font=font) > max_w:
+                    sub = ""
+                    for ch in w:
+                        if draw.textlength(sub + ch, font=font) <= max_w:
+                            sub += ch
+                        else:
+                            lines.append(sub)
+                            sub = ch
+                    cur = sub
+                else:
+                    cur = w
+        if cur:
+            lines.append(cur)
+    return lines[:12] or [""]
 
 
-async def _avatar(ctx, user, size=84) -> Image.Image:
+async def _avatar(ctx, user, size: int = 100) -> Image.Image:
     try:
         photos = await ctx.bot.get_user_profile_photos(user.id, limit=1)
         if photos.photos:
             tgfile = await ctx.bot.get_file(photos.photos[0][-1].file_id)
             raw = await tgfile.download_as_bytearray()
-            im = Image.open(io.BytesIO(bytes(raw))).convert("RGBA").resize((size, size))
+            im = Image.open(io.BytesIO(bytes(raw))).convert("RGBA").resize((size, size), Image.LANCZOS)
             mask = Image.new("L", (size, size), 0)
             ImageDraw.Draw(mask).ellipse((0, 0, size, size), fill=255)
             im.putalpha(mask)
             return im
-    except (TelegramError, OSError):
+    except Exception:
         pass
+
+    # Fallback to initials circle
     im = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(im)
     d.ellipse((0, 0, size, size), fill=_color_for(user.id))
-    try:
-        f = ImageFont.load_default(size=size // 2)
-    except TypeError:
-        f = ImageFont.load_default()
+    f = _get_font(int(size * 0.42), bold=True)
     initials = _initials(_safe_name(user.full_name))
     bbox = d.textbbox((0, 0), initials, font=f)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    d.text(((size - tw) / 2 - bbox[0], (size - th) / 2 - bbox[1]), initials, font=f, fill=(255, 255, 255))
+    d.text(((size - tw) / 2 - bbox[0], (size - th) / 2 - bbox[1]), initials, font=f, fill=(255, 255, 255, 255))
     return im
 
 
 async def build_quote_sticker(ctx, src_msg, sender) -> io.BytesIO:
     name = _safe_name(sender.full_name)
-
     text = src_msg.text or src_msg.caption or "[Media]"
 
-    # ---------- CANVAS ----------
-    W, H = 512, 512
+    # Setup dummy canvas for measuring
+    dummy_img = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+    measure_draw = ImageDraw.Draw(dummy_img)
 
-    img = Image.new(
-        "RGBA",
-        (W, H),
-        (0, 0, 0, 0)
-    )
+    # Styling & Fonts
+    name_font = _get_font(34, bold=True)
+    text_font = _get_font(30, bold=False)
+    accent_color = _color_for(sender.id)
 
+    # Word wrap text
+    max_text_w = 560
+    lines = _wrap_text(measure_draw, text, text_font, max_text_w)
+
+    # Calculate dimensions
+    name_w = measure_draw.textlength(name, font=name_font)
+    text_w = max((measure_draw.textlength(l, font=text_font) for l in lines), default=120)
+
+    content_w = max(name_w, text_w, 140)
+    padding_x = 34
+    padding_y = 26
+    bubble_w = int(content_w + (padding_x * 2) + 20)
+
+    # Calculate text lines height
+    sample_bbox = text_font.getbbox("Ag")
+    line_h = (sample_bbox[3] - sample_bbox[1]) + 14
+    body_h = len(lines) * line_h
+
+    name_bbox = name_font.getbbox("Ag")
+    name_h = name_bbox[3] - name_bbox[1]
+
+    bubble_h = padding_y + name_h + 16 + body_h + padding_y
+
+    avatar_size = 100
+    bubble_h = max(bubble_h, avatar_size + 20)
+
+    # Canvas spacing
+    canvas_w = avatar_size + 26 + bubble_w + 30
+    canvas_h = bubble_h + 40
+
+    img = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    # ---------- COLORS ----------
-    accent = _color_for(sender.id)
-    white = (255, 255, 255, 255)
+    # Bubble Position
+    bx = avatar_size + 22
+    by = 16
 
-    bubble_color = (24, 34, 50, 248)
-    border_color = (80, 100, 130, 210)
-
-    # ---------- BUBBLE ----------
-    bx, by = 108, 72
-    bw, bh = 382, 368
-    radius = 32
-
-    # Soft shadow
+    # Shadow
     draw.rounded_rectangle(
-        (
-            bx + 5,
-            by + 8,
-            bx + bw + 5,
-            by + bh + 8
-        ),
-        radius=radius,
-        fill=(0, 0, 0, 90)
+        (bx + 4, by + 6, bx + bubble_w + 4, by + bubble_h + 6),
+        radius=26,
+        fill=(0, 0, 0, 70)
     )
 
-    # Main bubble
+    # Bubble Background
+    bubble_bg = (24, 30, 42, 245)
+    border_color = (65, 82, 105, 180)
     draw.rounded_rectangle(
-        (bx, by, bx + bw, by + bh),
-        radius=radius,
-        fill=bubble_color,
+        (bx, by, bx + bubble_w, by + bubble_h),
+        radius=26,
+        fill=bubble_bg,
         outline=border_color,
         width=2
     )
 
-    # Colored accent line
+    # Accent Strip inside bubble
     draw.rounded_rectangle(
-        (bx + 2, by + 25, bx + 9, by + bh - 25),
-        radius=5,
-        fill=accent
+        (bx + 6, by + 18, bx + 12, by + bubble_h - 18),
+        radius=3,
+        fill=accent_color
     )
 
-    # ---------- AVATAR ----------
-    avatar_size = 92
-
-    avatar = await _avatar(
-        ctx,
-        sender,
-        avatar_size
-    )
-
-    ax, ay = 22, 98
-
-    # Avatar border
-    draw.ellipse(
-        (
-            ax - 4,
-            ay - 4,
-            ax + avatar_size + 4,
-            ay + avatar_size + 4
-        ),
-        fill=white
-    )
-
-    img.paste(
-        avatar,
-        (ax, ay),
-        avatar
-    )
+    # Avatar
+    avatar = await _avatar(ctx, sender, avatar_size)
+    ay = by + bubble_h - avatar_size  # Aligned towards the bottom edge like TG
+    img.paste(avatar, (10, ay), avatar)
 
     draw = ImageDraw.Draw(img)
 
-    # ---------- USERNAME ----------
-    name_x = bx + 30
-    name_y = by + 29
+    # Sender Name
+    tx = bx + padding_x + 6
+    ty = by + padding_y - 4
+    draw.text((tx, ty), name, font=name_font, fill=accent_color)
 
-    name_font_size = 27
-    max_name_width = bw - 58
-
-    name_font = _quote_font(
-        name_font_size,
-        bold=True
-    )
-
-    # Shrink only if username is too long.
-    while (
-        draw.textlength(name, font=name_font) > max_name_width
-        and name_font_size > 15
-    ):
-        name_font_size -= 1
-
-        name_font = _quote_font(
-            name_font_size,
-            bold=True
-        )
-
-    # Shadow behind name
-    draw.text(
-        (name_x + 1, name_y + 2),
-        name,
-        font=name_font,
-        fill=(0, 0, 0, 150)
-    )
-
-    # Actual username
-    draw.text(
-        (name_x, name_y),
-        name,
-        font=name_font,
-        fill=accent
-    )
-
-    # ---------- DIVIDER ----------
-    divider_y = by + 84
-
-    draw.line(
-        (
-            bx + 28,
-            divider_y,
-            bx + bw - 28,
-            divider_y
-        ),
-        fill=(100, 120, 150, 150),
-        width=2
-    )
-
-    # ---------- MESSAGE TEXT ----------
-    text_x = bx + 29
-    text_y = divider_y + 24
-
-    text_width = bw - 58
-    available_height = 218
-
-    font_size = 28
-
-    while font_size >= 16:
-        font_text = _quote_font(
-            font_size,
-            bold=False
-        )
-
-        lines = _wrap(
-    draw,
-    text,
-    font_text,
-    text_width
-)[:6]
-
-        bbox = font_text.getbbox("Ag")
-        line_height = bbox[3] - bbox[1] + 12
-
-        total_height = len(lines) * line_height
-
-        if total_height <= available_height:
-            break
-
-        font_size -= 1
-
-    # Render each line
+    # Message Text
+    curr_y = ty + name_h + 16
     for line in lines:
-        draw.text(
-            (text_x, text_y),
-            line,
-            font=font_text,
-            fill=white
-        )
+        draw.text((tx, curr_y), line, font=text_font, fill=(255, 255, 255, 255))
+        curr_y += line_h
 
-        text_y += line_height
-
-    # ---------- FOOTER ----------
-    footer_font = _quote_font(15)
-
-    draw.text(
-        (
-            bx + 29,
-            by + bh - 38
-        ),
-        "ZOYA  •  QUOTE",
-        font=footer_font,
-        fill=(175, 190, 210, 255)
-    )
-
-    # ---------- EXPORT ----------
-    # Keep original Telegram sticker resizing logic.
+    # Resize to exact Telegram 512px sticker rule
     img = _fit_512(img)
 
     out = io.BytesIO()
     out.name = "quote.webp"
-
-    img.save(
-        out,
-        "WEBP",
-        quality=95,
-        method=6
-    )
-
+    img.save(out, "WEBP", quality=95, method=6)
     out.seek(0)
-
     return out
-            
 
 
 async def _quote_and_send(update, ctx, as_reply: bool):
@@ -368,7 +265,7 @@ async def _quote_and_send(update, ctx, as_reply: bool):
     sender = src.from_user or msg.from_user
     try:
         out = await build_quote_sticker(ctx, src, sender)
-    except Exception as e:  # image generation is best-effort, never crash the bot
+    except Exception as e:
         await say(ctx, chat.id, T("couldn't build that sticker:") + f" {esc(e)}", reply_to=msg.message_id)
         return
     kwargs = {"reply_to_message_id": src.message_id} if as_reply else {}
@@ -382,6 +279,10 @@ async def q_cmd(update, ctx):
 async def qr_cmd(update, ctx):
     await _quote_and_send(update, ctx, as_reply=True)
 
+
+# =====================================================================
+# KANG COMMANDS (UNTOUCHED)
+# =====================================================================
 
 async def _photo_to_sticker_file(ctx, photo):
     tgfile = await ctx.bot.get_file(photo.file_id)
@@ -459,4 +360,4 @@ def register(app):
     dual_command(app, "q", q_cmd)
     dual_command(app, "qr", qr_cmd)
     dual_command(app, "kang", kang_cmd)
-            
+                
