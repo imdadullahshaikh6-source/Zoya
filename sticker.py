@@ -2,11 +2,19 @@
 .q / .qr  — render the replied-to message as a quote sticker
 .kang     — steal a replied sticker/photo into the user's own auto-growing pack
             (the pack is created once per user and reused on every later .kang;
-            if it fills up, a new part is created automatically)."""
-import io
-import re
-import unicodedata 
+            if it fills up, a new part is started automatically).
 
+Fonts are bundled in ./fonts (DejaVu Sans) so rendering never depends on
+whatever fonts happen to be installed on the server — DejaVu covers Latin,
+Cyrillic, Greek, and the IPA/phonetic "small caps" block that most fancy
+Telegram-name generators use, so stylised display names render properly
+instead of showing missing-glyph boxes."""
+import io
+import os
+import re
+import unicodedata
+
+from fontTools.ttLib import TTFont
 from PIL import Image, ImageDraw, ImageFont
 from telegram import InputSticker
 from telegram.error import TelegramError
@@ -14,137 +22,100 @@ from telegram.error import TelegramError
 import database as dbase
 from common import T, dual_command, esc, say
 
+HELP_TXT = (
+    "<b>✦ stickers</b>\n\n"
+    "/q (or .q) — reply to any message to turn it into a quote sticker\n"
+    "/qr (or .qr) — same, but sent as a reply to the original message\n"
+    "/kang (or .kang) [emoji] — reply to a sticker or photo to add it to your "
+    "own sticker pack. the pack is created the first time and reused after that — "
+    "every later .kang just adds to it (a new part is started automatically if it fills up)."
+)
+COMMANDS = [("q", "Quote a message as a sticker"), ("kang", "Steal a sticker into your pack")]
 
-def _clean_text(text: str) -> str:
-    if not text:
-        return ""
-    text = unicodedata.normalize("NFKD", text)
-    substitutions = {
-        "╰": "-", "╯": "-", "╭": "-", "╮": "-",
-        "‹": "<", "›": ">", "«": "<", "»": ">",
-        "•": "·", "✦": "*", "★": "*", "☆": "*",
-        "—": "-", "―": "-", "–": "-",
-        "“": '"', "”": '"', "’": "'", "‘": "'",
-        "Λ": "A", "λ": "a"
-    }
-    for k, v in substitutions.items():
-        text = text.replace(k, v)
+MAX_SIDE = 512
+EMOJI_RE = re.compile(r"^[\U0001F000-\U0001FAFF\u2600-\u27BF\u2190-\u21FF\u2B00-\u2BFF]+$")
 
-    cleaned_list = []
-    for ch in text:
-        cp = ord(ch)
-        cat = unicodedata.category(ch)
-        if cat in ("Cc", "Cs", "Cf"):
-            continue
-        if (0x1F000 <= cp <= 0x1FAFF) or (0x2600 <= cp <= 0x27BF) or (0x2B00 <= cp <= 0x2BFF) or (0x1F300 <= cp <= 0x1F9FF):
-            continue
-        if cp < 128 or cat.startswith(("L", "M", "N", "P", "Z", "S")):
-            cleaned_list.append(ch)
-
-    return re.sub(r"\s+", " ", "".join(cleaned_list)).strip()
+FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
+FONT_REGULAR = os.path.join(FONT_DIR, "DejaVuSans.ttf")
+FONT_BOLD = os.path.join(FONT_DIR, "DejaVuSans-Bold.ttf")
 
 
-# ============================================================
-# FIXED STICKER QUOTE CODE (KANG NOT TOUCHED)
-# ============================================================
-
-def _clean_text(text: str) -> str:
-    """Stylish math/greek/fancy characters ko 100% readable banata hai taaki boxes na banein."""
-    if not text:
-        return ""
-    # Unicode NFKD normalize fullwidth & stylized letters
-    text = unicodedata.normalize("NFKD", text)
-
-    # Stylistic and Greek/Cyrillic homoglyphs mapping
-    char_map = {
-        "╰": "-", "╯": "-", "╭": "-", "╮": "-",
-        "‹": "<", "›": ">", "«": "<", "»": ">",
-        "•": "·", "✦": "*", "★": "*", "☆": "*",
-        "—": "-", "―": "-", "–": "-",
-        "“": '"', "”": '"', "’": "'", "‘": "'",
-        "Λ": "A", "λ": "a", "∆": "A", "Δ": "A",
-        "Ι": "I", "І": "I",
-        "Т": "T", "Τ": "T",
-        "С": "C",
-        "Н": "H", "Η": "H", "н": "h",
-        "А": "A", "В": "B", "Е": "E", "К": "K", "М": "M", "О": "O", "Р": "P", "Х": "X"
-    }
-    for k, v in char_map.items():
-        text = text.replace(k, v)
-
-    # Filter out anything that isn't standard printable character
-    res = []
-    for ch in text:
-        cp = ord(ch)
-        if 32 <= cp <= 126:
-            res.append(ch)
-        else:
-            dec = unicodedata.normalize("NFKD", ch).encode("ascii", "ignore").decode("ascii")
-            if dec:
-                res.append(dec)
-
-    out = "".join(res)
-    return re.sub(r"\s+", " ", out).strip()
-
-
-def _safe_name(name: str) -> str:
-    res = _clean_text(name)
-    return res[:30] if res else "User"
-
-
-def _quote_font(size: int, bold: bool = False):
-    paths = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf" if bold else "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
-        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-        "C:\\Windows\\Fonts\\arialbd.ttf" if bold else "C:\\Windows\\Fonts\\arial.ttf",
-    ]
-    for path in paths:
-        try:
-            return ImageFont.truetype(path, size=size)
-        except Exception:
-            continue
+def _load_font(bold: bool, size: int):
+    path = FONT_BOLD if bold else FONT_REGULAR
     try:
-        return ImageFont.load_default(size=size)
+        return ImageFont.truetype(path, size)
+    except OSError:
+        try:
+            return ImageFont.load_default(size=size)
+        except TypeError:
+            return ImageFont.load_default()
+
+
+# Real glyph coverage, read straight from each font's cmap table — checking
+# via rendered-mask bounding boxes is unreliable because a missing-glyph
+# "tofu" box also has a non-empty bbox, so that trick can't tell a real
+# character from a placeholder box. Loaded once at import time.
+def _cmap_of(path):
+    try:
+        return set(TTFont(path, fontNumber=0, lazy=True).getBestCmap())
     except Exception:
-        return ImageFont.load_default()
+        return set()
+
+
+_CMAP = {False: _cmap_of(FONT_REGULAR), True: _cmap_of(FONT_BOLD)}
+
+# Zero-width/control/combining-mark characters render invisibly or misalign
+# even when the font technically has a glyph for them, so they're dropped too.
+_DROP_CATEGORIES = {"Cf", "Cc", "Co", "Cs", "Mn", "Me"}
+
+
+def _renderable(bold: bool, text: str, fallback: str = "") -> str:
+    # NFKD first: folds "fancy" letters built from compatibility blocks (bold/
+    # italic/fullwidth Unicode math letters, e.g. "𝙕𝙤𝙮𝙖") back to plain ASCII,
+    # while leaving true decorative marks (overlines, carets, ...) untouched.
+    cmap = _CMAP[bold]
+    out = []
+    for ch in unicodedata.normalize("NFKD", text or ""):
+        if unicodedata.category(ch) in _DROP_CATEGORIES:
+            continue
+        if ch in (" ", "\n", "\t") or ord(ch) in cmap:
+            out.append(ch)
+    cleaned = re.sub(r"\s+", " ", "".join(out)).strip()
+    return cleaned or fallback
+
+
+def _color_for(seed: int):
+    palette = [(230, 126, 34), (155, 89, 182), (52, 152, 219), (231, 76, 60), (26, 188, 156), (241, 196, 15)]
+    return palette[seed % len(palette)]
+
+
+def _initials(name: str) -> str:
+    words = re.findall(r"[A-Za-z]+", name or "")
+    if not words:
+        return "?"
+    return (words[0][0] + (words[1][0] if len(words) > 1 else "")).upper()
 
 
 def _fit_512(img: Image.Image) -> Image.Image:
+    """Telegram static stickers need the longest side to be exactly 512px."""
     w, h = img.size
     scale = MAX_SIDE / max(w, h)
     return img.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.LANCZOS)
 
 
 def _wrap(draw, text, font, max_w):
-    paragraphs = text.split("\n")
-    lines = []
-    for para in paragraphs:
-        if not para.strip():
-            lines.append("")
-            continue
-        words = para.split(" ")
-        cur = ""
-        for w in words:
-            trial = (cur + " " + w).strip() if cur else w
-            if draw.textlength(trial, font=font) <= max_w:
-                cur = trial
-            else:
-                if cur:
-                    lines.append(cur)
-                if draw.textlength(w, font=font) > max_w:
-                    sub = ""
-                    for ch in w:
-                        if draw.textlength(sub + ch, font=font) <= max_w:
-                            sub += ch
-                        else:
-                            lines.append(sub)
-                            sub = ch
-                    cur = sub
-                else:
-                    cur = w
-        if cur:
-            lines.append(cur)
+    words = text.split() or [""]
+    lines, cur = [], ""
+    for w in words:
+        trial = (cur + " " + w).strip()
+        if draw.textlength(trial, font=font) <= max_w:
+            cur = trial
+        else:
+            if cur:
+                lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
     return lines[:8] or [""]
 
 
@@ -154,19 +125,18 @@ async def _avatar(ctx, user, size=100) -> Image.Image:
         if photos.photos:
             tgfile = await ctx.bot.get_file(photos.photos[0][-1].file_id)
             raw = await tgfile.download_as_bytearray()
-            im = Image.open(io.BytesIO(bytes(raw))).convert("RGBA").resize((size, size), Image.LANCZOS)
+            im = Image.open(io.BytesIO(bytes(raw))).convert("RGBA").resize((size, size))
             mask = Image.new("L", (size, size), 0)
             ImageDraw.Draw(mask).ellipse((0, 0, size, size), fill=255)
             im.putalpha(mask)
             return im
-    except Exception:
+    except (TelegramError, OSError):
         pass
-
     im = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(im)
     d.ellipse((0, 0, size, size), fill=_color_for(user.id))
-    f = _quote_font(int(size * 0.42), bold=True)
-    initials = _initials(_safe_name(user.full_name))
+    f = _load_font(True, size // 2)
+    initials = _initials(_renderable(True, user.full_name, "?"))
     bbox = d.textbbox((0, 0), initials, font=f)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
     d.text(((size - tw) / 2 - bbox[0], (size - th) / 2 - bbox[1]), initials, font=f, fill=(255, 255, 255))
@@ -174,94 +144,49 @@ async def _avatar(ctx, user, size=100) -> Image.Image:
 
 
 async def build_quote_sticker(ctx, src_msg, sender) -> io.BytesIO:
-    name = _safe_name(sender.full_name)
-    raw_text = src_msg.text or src_msg.caption or "[Media]"
-    text = _clean_text(raw_text)
-
-    dummy = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
-    d = ImageDraw.Draw(dummy)
-
-    name_font = _quote_font(38, bold=True)
-    text_font = _quote_font(40, bold=False)
-    accent = _color_for(sender.id)
-
-    max_w = 400
-    lines = _wrap(d, text, text_font, max_w)
-
-    name_w = d.textlength(name, font=name_font)
-    text_w = max((d.textlength(l, font=text_font) for l in lines), default=140)
-
-    # Padding inside text area
-    pad_left = 32
-    pad_right = 32
-    pad_top = 22
-    pad_bottom = 26
-
-    content_w = max(name_w, text_w, 160)
-    bubble_w = int(content_w + pad_left + pad_right)
-
-    name_bbox = name_font.getbbox("Ag")
-    name_h = name_bbox[3] - name_bbox[1]
-
-    sample_bbox = text_font.getbbox("Ag")
-    line_h = (sample_bbox[3] - sample_bbox[1]) + 14
-    body_h = len(lines) * line_h
-
+    W = 512  # design at the final sticker width so text never gets shrunk afterwards
+    outer_pad = 20
     avatar_size = 100
-    bubble_h = max(avatar_size + 14, pad_top + name_h + 10 + body_h + pad_bottom)
+    gap = 14
+    pad = 24
 
-    # Avatar placed safely on the LEFT side of the bubble (NO OVERLAP)
-    ax = 14
-    bx = ax + avatar_size + 16  # Bubble starts strictly AFTER avatar
-    by = 12
+    font_name = _load_font(True, 34)
+    font_text = _load_font(False, 40)
 
-    canvas_w = bx + bubble_w + 20
-    canvas_h = bubble_h + 26
+    name = _renderable(True, sender.full_name, "Someone")[:28]
+    raw_text = src_msg.text or src_msg.caption or "[media]"
+    text = _renderable(False, raw_text, "[unsupported characters]")
 
-    img = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+    bubble_x = outer_pad + avatar_size + gap
+    bubble_w = W - bubble_x - outer_pad
+    text_w = bubble_w - pad * 2
+
+    probe = ImageDraw.Draw(Image.new("RGB", (10, 10)))
+    lines = _wrap(probe, text, font_text, text_w)
+    line_h = font_text.getbbox("Ag")[3] + 16
+    name_h = font_name.getbbox("Ag")[3] + 18
+    body_h = line_h * len(lines)
+    bubble_h = name_h + body_h + pad * 2
+    H = max(avatar_size, bubble_h) + outer_pad * 2
+
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
+    by = (H - bubble_h) // 2
+    draw.rounded_rectangle((bubble_x, by, bubble_x + bubble_w, by + bubble_h), radius=28, fill=(24, 37, 51, 240))
 
-    radius = min(36, bubble_h // 2)
+    draw.text((bubble_x + pad, by + pad - 2), name, font=font_name, fill=_color_for(sender.id))
+    ty = by + pad + name_h
+    for ln in lines:
+        draw.text((bubble_x + pad, ty), ln, font=font_text, fill=(255, 255, 255))
+        ty += line_h
 
-    # Soft Shadow behind bubble
-    draw.rounded_rectangle(
-        (bx + 3, by + 5, bx + bubble_w + 3, by + bubble_h + 5),
-        radius=radius,
-        fill=(0, 0, 0, 75)
-    )
-
-    # Bubble Body
-    bubble_bg = (28, 22, 38, 245)
-    draw.rounded_rectangle(
-        (bx, by, bx + bubble_w, by + bubble_h),
-        radius=radius,
-        fill=bubble_bg
-    )
-
-    # Avatar pasted clearly separated on the left
     avatar = await _avatar(ctx, sender, avatar_size)
-    ay = by + (bubble_h - avatar_size) // 2
-    img.paste(avatar, (ax, ay), avatar)
+    img.paste(avatar, (outer_pad, (H - avatar_size) // 2), avatar)
 
-    draw = ImageDraw.Draw(img)
-
-    # Render Name clearly inside bubble
-    tx = bx + pad_left
-    ty = by + pad_top
-    draw.text((tx, ty), name, font=name_font, fill=accent)
-
-    # Render Message Text lines clearly
-    curr_y = ty + name_h + 10
-    for line in lines:
-        draw.text((tx, curr_y), line, font=text_font, fill=(255, 255, 255, 255))
-        curr_y += line_h
-
-    # Resize to exact Telegram 512px rule
     img = _fit_512(img)
-
     out = io.BytesIO()
     out.name = "quote.webp"
-    img.save(out, "WEBP", quality=95, method=6)
+    img.save(out, "WEBP")
     out.seek(0)
     return out
 
@@ -275,7 +200,7 @@ async def _quote_and_send(update, ctx, as_reply: bool):
     sender = src.from_user or msg.from_user
     try:
         out = await build_quote_sticker(ctx, src, sender)
-    except Exception as e:
+    except Exception as e:  # image generation is best-effort, never crash the bot
         await say(ctx, chat.id, T("couldn't build that sticker:") + f" {esc(e)}", reply_to=msg.message_id)
         return
     kwargs = {"reply_to_message_id": src.message_id} if as_reply else {}
@@ -288,11 +213,7 @@ async def q_cmd(update, ctx):
 
 async def qr_cmd(update, ctx):
     await _quote_and_send(update, ctx, as_reply=True)
-            
 
-# =====================================================================
-# KANG COMMANDS (UNTOUCHED)
-# =====================================================================
 
 async def _photo_to_sticker_file(ctx, photo):
     tgfile = await ctx.bot.get_file(photo.file_id)
@@ -370,4 +291,4 @@ def register(app):
     dual_command(app, "q", q_cmd)
     dual_command(app, "qr", qr_cmd)
     dual_command(app, "kang", kang_cmd)
-    
+                          
