@@ -5,7 +5,7 @@
             if it fills up, a new part is created automatically)."""
 import io
 import re
-import unicodedata
+import unicodedata 
 
 from PIL import Image, ImageDraw, ImageFont
 from telegram import InputSticker
@@ -16,10 +16,8 @@ from common import T, dual_command, esc, say
 
 
 def _clean_text(text: str) -> str:
-    """Stylish unicode aur special symbols ko clean karta hai taaki [X] tofu boxes na banein."""
     if not text:
         return ""
-    # Fancy math styles (jaise 𝐈, 𝐼, 𝓘, Ｉ) ko standard letters me fold karta hai
     text = unicodedata.normalize("NFKD", text)
     substitutions = {
         "╰": "-", "╯": "-", "╭": "-", "╮": "-",
@@ -32,24 +30,26 @@ def _clean_text(text: str) -> str:
     for k, v in substitutions.items():
         text = text.replace(k, v)
 
-    cleaned = []
+    cleaned_list = []
     for ch in text:
         cp = ord(ch)
         cat = unicodedata.category(ch)
         if cat in ("Cc", "Cs", "Cf"):
             continue
-        # Drop unsupported emojis/symbols jo standard linux fonts me ⛝ cross box banate hain
         if (0x1F000 <= cp <= 0x1FAFF) or (0x2600 <= cp <= 0x27BF) or (0x2B00 <= cp <= 0x2BFF) or (0x1F300 <= cp <= 0x1F9FF):
             continue
         if cp < 128 or cat.startswith(("L", "M", "N", "P", "Z", "S")):
-            cleaned.append(ch)
+            cleaned_list.append(ch)
 
-    return re.sub(r"\s+", " ", "".join(cleaned)).strip()
-            
+    return re.sub(r"\s+", " ", "".join(cleaned_list)).strip()
 
 
 def _safe_name(name: str) -> str:
-    return cleaned[:30] or "User"
+    res = _clean_text(name)
+    return res[:30] if res else "User"
+            
+
+
 
 
 HELP_TXT = (
