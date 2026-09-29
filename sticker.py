@@ -195,57 +195,60 @@ async def build_quote_sticker(ctx, src_msg, sender) -> io.BytesIO:
     raw_text = src_msg.text or src_msg.caption or "[Media]"
     text = _clean_text(raw_text)
 
-    # Measuring canvas
+    # Measurement dummy
     dummy = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
     d = ImageDraw.Draw(dummy)
 
-    name_font = _quote_font(32, bold=True)
-    text_font = _quote_font(34, bold=False)
+    # Large prominent fonts
+    name_font = _quote_font(52, bold=True)
+    text_font = _quote_font(54, bold=False)
     accent = _color_for(sender.id)
 
-    max_w = 460
+    max_w = 680
     lines = _wrap(d, text, text_font, max_w)
 
     name_w = d.textlength(name, font=name_font)
-    text_w = max((d.textlength(l, font=text_font) for l in lines), default=140)
+    text_w = max((d.textlength(l, font=text_font) for l in lines), default=220)
 
-    # Dynamic sizes (text ke mutabiq shrink hoga)
-    pad_left = 56
-    pad_right = 38
-    pad_top = 20
-    pad_bottom = 24
+    # Spacing and layout
+    pad_left = 100
+    pad_right = 50
+    pad_top = 32
+    pad_bottom = 36
 
-    content_w = max(name_w, text_w, 160)
+    content_w = max(name_w, text_w, 240)
     bubble_w = int(content_w + pad_left + pad_right)
 
     name_bbox = name_font.getbbox("Ag")
     name_h = name_bbox[3] - name_bbox[1]
 
     sample_bbox = text_font.getbbox("Ag")
-    line_h = (sample_bbox[3] - sample_bbox[1]) + 14
+    line_h = (sample_bbox[3] - sample_bbox[1]) + 18
     body_h = len(lines) * line_h
 
-    avatar_size = 90
-    bubble_h = max(avatar_size + 14, pad_top + name_h + 10 + body_h + pad_bottom)
+    # Bada circular avatar
+    avatar_size = 145
+    bubble_h = max(avatar_size + 24, pad_top + name_h + 16 + body_h + pad_bottom)
 
-    canvas_w = bubble_w + 50
+    # Canvas bounds
+    canvas_w = bubble_w + 70
     canvas_h = bubble_h + 30
 
     img = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    bx = 36
+    bx = 45
     by = 12
-    radius = min(36, bubble_h // 2)
+    radius = min(50, bubble_h // 2)
 
-    # Drop Shadow
+    # Soft Shadow
     draw.rounded_rectangle(
-        (bx + 3, by + 5, bx + bubble_w + 3, by + bubble_h + 5),
+        (bx + 4, by + 6, bx + bubble_w + 4, by + bubble_h + 6),
         radius=radius,
         fill=(0, 0, 0, 75)
     )
 
-    # Dark Violet/Purple Theme Bubble
+    # Dark Violet chat bubble
     bubble_bg = (28, 22, 38, 245)
     draw.rounded_rectangle(
         (bx, by, bx + bubble_w, by + bubble_h),
@@ -253,26 +256,26 @@ async def build_quote_sticker(ctx, src_msg, sender) -> io.BytesIO:
         fill=bubble_bg
     )
 
-    # Avatar Overlapping on Top-Left
+    # Big Avatar (Vertically Centered on Left Edge)
     avatar = await _avatar(ctx, sender, avatar_size)
-    ax = bx - 26
-    ay = by + 2
+    ax = bx - 42
+    ay = by + (bubble_h - avatar_size) // 2
     img.paste(avatar, (ax, ay), avatar)
 
     draw = ImageDraw.Draw(img)
 
-    # Sender Name
+    # Name rendering
     tx = bx + pad_left
     ty = by + pad_top
     draw.text((tx, ty), name, font=name_font, fill=accent)
 
-    # Message Text
-    curr_y = ty + name_h + 10
+    # Message text rendering
+    curr_y = ty + name_h + 16
     for line in lines:
         draw.text((tx, curr_y), line, font=text_font, fill=(255, 255, 255, 255))
         curr_y += line_h
 
-    # Resize to exact 512px rule
+    # Auto-scale to full 512px
     img = _fit_512(img)
 
     out = io.BytesIO()
@@ -280,6 +283,7 @@ async def build_quote_sticker(ctx, src_msg, sender) -> io.BytesIO:
     img.save(out, "WEBP", quality=95, method=6)
     out.seek(0)
     return out
+            
 
 
 async def _quote_and_send(update, ctx, as_reply: bool):
