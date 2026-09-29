@@ -144,8 +144,6 @@ async def _avatar(ctx, user, size=84) -> Image.Image:
 
 
 async def build_quote_sticker(ctx, src_msg, sender) -> io.BytesIO:
-
-async def build_quote_sticker(ctx, src_msg, sender) -> io.BytesIO:
     name = _safe_name(sender.full_name)
 
     text = src_msg.text or src_msg.caption or "[Media]"
@@ -301,12 +299,11 @@ async def build_quote_sticker(ctx, src_msg, sender) -> io.BytesIO:
         )
 
         lines = _wrap(
-            draw,
-            text,
-            font_text,
-            text_width,
-            max_lines=6
-        )
+    draw,
+    text,
+    font_text,
+    text_width
+)[:6]
 
         bbox = font_text.getbbox("Ag")
         line_height = bbox[3] - bbox[1] + 12
