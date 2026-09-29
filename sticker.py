@@ -5,6 +5,7 @@
             if it fills up, a new part is created automatically)."""
 import io
 import re
+import unicodedata
 
 from PIL import Image, ImageDraw, ImageFont
 from telegram import InputSticker
@@ -12,6 +13,23 @@ from telegram.error import TelegramError
 
 import database as dbase
 from common import T, dual_command, esc, say
+
+# Fancy display names often use decorative Unicode (math-style bold letters,
+# overlines, carets, fullwidth letters...) that most fonts can't render, which
+# shows up as tofu boxes. NFKD-normalizing folds styled letters like "𝙕𝙤𝙮𝙖"
+# back to plain "Zoya", and we then drop anything still outside a safe set —
+# so a name is either shown cleanly or trimmed, never boxes.
+_SAFE_NAME_CHARS = set(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 "
+    ".,!?'\"-_()&@#$%*+/:;~"
+)
+
+
+def _safe_name(name: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", name or "")
+    cleaned = "".join(ch for ch in decomposed if ch in _SAFE_NAME_CHARS)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned or "Someone"
 
 HELP_TXT = (
     "<b>✦ stickers</b>\n\n"
@@ -82,7 +100,7 @@ async def _avatar(ctx, user, size=84) -> Image.Image:
         f = ImageFont.load_default(size=size // 2)
     except TypeError:
         f = ImageFont.load_default()
-    initials = _initials(user.full_name)
+    initials = _initials(_safe_name(user.full_name))
     bbox = d.textbbox((0, 0), initials, font=f)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
     d.text(((size - tw) / 2 - bbox[0], (size - th) / 2 - bbox[1]), initials, font=f, fill=(255, 255, 255))
@@ -90,7 +108,7 @@ async def _avatar(ctx, user, size=84) -> Image.Image:
 
 
 async def build_quote_sticker(ctx, src_msg, sender) -> io.BytesIO:
-    name = (sender.full_name or "Unknown")[:28]
+    name = _safe_name(sender.full_name)[:28]
     text = src_msg.text or src_msg.caption or "[media]"
 
     W = 512  # design at the final sticker width so text never gets shrunk afterwards
