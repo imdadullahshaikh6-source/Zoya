@@ -16,22 +16,34 @@ from common import T, dual_command, esc, say
 
 
 def _clean_text(text: str) -> str:
-    """Unicode normalizer jo stylish fonts ko clean readable banata hai bina boxes ke."""
     if not text:
         return ""
-    # Mathematical styled characters (bold, script, monospace etc.) ko base letters me convert karta hai
-    normalized = unicodedata.normalize("NFKD", text)
-    # Control / invisible characters ko remove karta hai
-    cleaned = "".join(
-        ch for ch in normalized
-        if unicodedata.category(ch) not in ("Cc", "Cs", "Cf")
-    )
-    return cleaned.strip()
+    # Fancy math styles (e.g. 𝐈, 𝐼, 𝓘) ko standard letters me fold karta hai
+    text = unicodedata.normalize("NFKD", text)
+    # Special stylish characters ko replace/clean karta hai
+    char_map = {
+        "Λ": "A", "λ": "a", "‹": "<", "›": ">", "╰": "-", "╯": "-",
+        "•": "·", "✦": "*", "—": "-", "―": "-", "“": '"', "”": '"'
+    }
+    for k, v in char_map.items():
+        text = text.replace(k, v)
+    
+    # Non-printable controls aur symbols jo fonts me box bante hain unhe drop karta hai
+    res = []
+    for ch in text:
+        cat = unicodedata.category(ch)
+        if cat in ("Cc", "Cs", "Cf"):
+            continue
+        # Drop unsupported/broken symbol fonts to prevent cross boxes
+        if 0x1F000 <= ord(ch) <= 0x1FAFF:
+            continue
+        res.append(ch)
+    return re.sub(r"\s+", " ", "".join(res)).strip()
 
 
 def _safe_name(name: str) -> str:
     cleaned = _clean_text(name)
-    return cleaned[:35] or "User"
+    return cleaned[:30] or "User"
 
 
 HELP_TXT = (
@@ -224,23 +236,93 @@ async def build_quote_sticker(ctx, src_msg, sender) -> io.BytesIO:
     # Overlapping Avatar on Top-Left
     avatar = await _avatar(ctx, sender, avatar_size)
     ax = bx - 35
-    ay = by - 8
+async def build_quote_sticker(ctx, src_msg, sender) -> io.BytesIO:
+    name = _safe_name(sender.full_name)
+    raw_text = src_msg.text or src_msg.caption or "[Media]"
+    text = _clean_text(raw_text)
+
+    # Dummy draw for accurate font measurement
+    dummy = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+    d = ImageDraw.Draw(dummy)
+
+    name_font = _get_font(34, bold=True)
+    text_font = _get_font(36, bold=False)
+    accent = _color_for(sender.id)
+
+    # Bubble text width
+    max_w = 460
+    lines = _wrap_text(d, text, text_font, max_w)
+
+    name_w = d.textlength(name, font=name_font)
+    text_w = max((d.textlength(l, font=text_font) for l in lines), default=120)
+
+    # Dynamic sizes matching example image
+    pad_left = 64
+    pad_right = 36
+    pad_top = 22
+    pad_bottom = 26
+
+    content_w = max(name_w, text_w, 180)
+    bubble_w = int(content_w + pad_left + pad_right)
+
+    name_bbox = name_font.getbbox("Ag")
+    name_h = name_bbox[3] - name_bbox[1]
+
+    sample_bbox = text_font.getbbox("Ag")
+    line_h = (sample_bbox[3] - sample_bbox[1]) + 14
+    body_h = len(lines) * line_h
+
+    bubble_h = pad_top + name_h + 12 + body_h + pad_bottom
+
+    avatar_size = 96
+    bubble_h = max(bubble_h, avatar_size + 10)
+
+    # Canvas
+    canvas_w = bubble_w + 60
+    canvas_h = bubble_h + 30
+
+    img = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    bx = 38
+    by = 12
+    radius = min(36, bubble_h // 2)
+
+    # Soft Shadow
+    draw.rounded_rectangle(
+        (bx + 3, by + 5, bx + bubble_w + 3, by + bubble_h + 5),
+        radius=radius,
+        fill=(0, 0, 0, 75)
+    )
+
+    # Bubble Background (Dark Violet / Telegram Dark Theme)
+    bubble_bg = (30, 20, 42, 245)
+    draw.rounded_rectangle(
+        (bx, by, bx + bubble_w, by + bubble_h),
+        radius=radius,
+        fill=bubble_bg
+    )
+
+    # Overlapping Avatar on Top-Left
+    avatar = await _avatar(ctx, sender, avatar_size)
+    ax = bx - 28
+    ay = by + 2
     img.paste(avatar, (ax, ay), avatar)
 
     draw = ImageDraw.Draw(img)
 
-    # Sender Name
+    # Name rendering
     tx = bx + pad_left
     ty = by + pad_top
     draw.text((tx, ty), name, font=name_font, fill=accent)
 
-    # Message Lines
-    curr_y = ty + name_h + 16
+    # Message lines rendering
+    curr_y = ty + name_h + 12
     for line in lines:
         draw.text((tx, curr_y), line, font=text_font, fill=(255, 255, 255, 255))
         curr_y += line_h
 
-    # Resize to standard sticker size
+    # Resize to exact Telegram 512px sticker rule
     img = _fit_512(img)
 
     out = io.BytesIO()
