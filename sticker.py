@@ -16,33 +16,39 @@ from common import T, dual_command, esc, say
 
 
 def _clean_text(text: str) -> str:
+    """Stylish unicode aur special symbols ko clean karta hai taaki [X] tofu boxes na banein."""
     if not text:
         return ""
-    # Fancy math styles (e.g. 𝐈, 𝐼, 𝓘) ko standard letters me fold karta hai
+    # Fancy math styles (jaise 𝐈, 𝐼, 𝓘, Ｉ) ko standard letters me fold karta hai
     text = unicodedata.normalize("NFKD", text)
-    # Special stylish characters ko replace/clean karta hai
-    char_map = {
-        "Λ": "A", "λ": "a", "‹": "<", "›": ">", "╰": "-", "╯": "-",
-        "•": "·", "✦": "*", "—": "-", "―": "-", "“": '"', "”": '"'
+    substitutions = {
+        "╰": "-", "╯": "-", "╭": "-", "╮": "-",
+        "‹": "<", "›": ">", "«": "<", "»": ">",
+        "•": "·", "✦": "*", "★": "*", "☆": "*",
+        "—": "-", "―": "-", "–": "-",
+        "“": '"', "”": '"', "’": "'", "‘": "'",
+        "Λ": "A", "λ": "a"
     }
-    for k, v in char_map.items():
+    for k, v in substitutions.items():
         text = text.replace(k, v)
-    
-    # Non-printable controls aur symbols jo fonts me box bante hain unhe drop karta hai
-    res = []
+
+    cleaned = []
     for ch in text:
+        cp = ord(ch)
         cat = unicodedata.category(ch)
         if cat in ("Cc", "Cs", "Cf"):
             continue
-        # Drop unsupported/broken symbol fonts to prevent cross boxes
-        if 0x1F000 <= ord(ch) <= 0x1FAFF:
+        # Drop unsupported emojis/symbols jo standard linux fonts me ⛝ cross box banate hain
+        if (0x1F000 <= cp <= 0x1FAFF) or (0x2600 <= cp <= 0x27BF) or (0x2B00 <= cp <= 0x2BFF) or (0x1F300 <= cp <= 0x1F9FF):
             continue
-        res.append(ch)
-    return re.sub(r"\s+", " ", "".join(res)).strip()
+        if cp < 128 or cat.startswith(("L", "M", "N", "P", "Z", "S")):
+            cleaned.append(ch)
+
+    return re.sub(r"\s+", " ", "".join(cleaned)).strip()
+            
 
 
 def _safe_name(name: str) -> str:
-    cleaned = _clean_text(name)
     return cleaned[:30] or "User"
 
 
@@ -100,14 +106,34 @@ def _get_font(size: int, bold: bool = False):
     except Exception:
         return ImageFont.load_default()
 
+def _quote_font(size: int, bold: bool = False):
+    """System font loader with fallback."""
+    paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf" if bold else "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/GoogleSans-Bold.ttf" if bold else "/usr/share/fonts/GoogleSans-Regular.ttf",
+        "C:\\Windows\\Fonts\\arialbd.ttf" if bold else "C:\\Windows\\Fonts\\arial.ttf",
+    ]
+    for path in paths:
+        try:
+            return ImageFont.truetype(path, size=size)
+        except Exception:
+            continue
+    try:
+        return ImageFont.load_default(size=size)
+    except Exception:
+        return ImageFont.load_default()
+
 
 def _fit_512(img: Image.Image) -> Image.Image:
+    """Telegram static sticker requirement."""
     w, h = img.size
     scale = MAX_SIDE / max(w, h)
     return img.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.LANCZOS)
 
 
-def _wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_w: int):
+def _wrap(draw, text, font, max_w):
     paragraphs = text.split("\n")
     lines = []
     for para in paragraphs:
@@ -139,7 +165,7 @@ def _wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, 
     return lines[:10] or [""]
 
 
-async def _avatar(ctx, user, size: int = 140) -> Image.Image:
+async def _avatar(ctx, user, size=90) -> Image.Image:
     try:
         photos = await ctx.bot.get_user_profile_photos(user.id, limit=1)
         if photos.photos:
@@ -150,17 +176,17 @@ async def _avatar(ctx, user, size: int = 140) -> Image.Image:
             ImageDraw.Draw(mask).ellipse((0, 0, size, size), fill=255)
             im.putalpha(mask)
             return im
-    except Exception:
+    except (TelegramError, OSError):
         pass
 
     im = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(im)
     d.ellipse((0, 0, size, size), fill=_color_for(user.id))
-    f = _get_font(int(size * 0.42), bold=True)
+    f = _quote_font(int(size * 0.42), bold=True)
     initials = _initials(_safe_name(user.full_name))
     bbox = d.textbbox((0, 0), initials, font=f)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    d.text(((size - tw) / 2 - bbox[0], (size - th) / 2 - bbox[1]), initials, font=f, fill=(255, 255, 255, 255))
+    d.text(((size - tw) / 2 - bbox[0], (size - th) / 2 - bbox[1]), initials, font=f, fill=(255, 255, 255))
     return im
 
 
@@ -169,100 +195,27 @@ async def build_quote_sticker(ctx, src_msg, sender) -> io.BytesIO:
     raw_text = src_msg.text or src_msg.caption or "[Media]"
     text = _clean_text(raw_text)
 
-    # Dummy draw measurement
+    # Measuring canvas
     dummy = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
     d = ImageDraw.Draw(dummy)
 
-    # Clean fonts
-    name_font = _get_font(36, bold=True)
-    text_font = _get_font(38, bold=False)
+    name_font = _quote_font(32, bold=True)
+    text_font = _quote_font(34, bold=False)
     accent = _color_for(sender.id)
 
-    max_w = 620
-    lines = _wrap_text(d, text, text_font, max_w)
-
-    name_w = d.textlength(name, font=name_font)
-    text_w = max((d.textlength(l, font=text_font) for l in lines), default=160)
-
-    # Padding and proportions
-    pad_left = 68
-    pad_right = 50
-    pad_top = 28
-    pad_bottom = 32
-
-    content_w = max(name_w, text_w, 200)
-    bubble_w = int(content_w + pad_left + pad_right)
-
-    name_bbox = name_font.getbbox("Ag")
-    name_h = name_bbox[3] - name_bbox[1]
-
-    sample_bbox = text_font.getbbox("Ag")
-    line_h = (sample_bbox[3] - sample_bbox[1]) + 18
-    body_h = len(lines) * line_h
-
-    bubble_h = pad_top + name_h + 16 + body_h + pad_bottom
-
-    avatar_size = 110
-    # Minimum bubble height matches avatar proportions
-    bubble_h = max(bubble_h, avatar_size + 14)
-
-    # Canvas dimensions
-    canvas_w = bubble_w + 80
-    canvas_h = bubble_h + 50
-
-    img = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-
-    # Bubble coordinates (Avatar overlaps left-top side like example)
-    bx = 45
-    by = 22
-    radius = min(48, bubble_h // 2)
-
-    # Soft Shadow
-    draw.rounded_rectangle(
-        (bx + 4, by + 6, bx + bubble_w + 4, by + bubble_h + 6),
-        radius=radius,
-        fill=(0, 0, 0, 75)
-    )
-
-    # Bubble Body (Dark Telegram Theme Style)
-    bubble_bg = (28, 22, 38, 245)
-    draw.rounded_rectangle(
-        (bx, by, bx + bubble_w, by + bubble_h),
-        radius=radius,
-        fill=bubble_bg
-    )
-
-    # Overlapping Avatar on Top-Left
-    avatar = await _avatar(ctx, sender, avatar_size)
-    ax = bx - 35
-async def build_quote_sticker(ctx, src_msg, sender) -> io.BytesIO:
-    name = _safe_name(sender.full_name)
-    raw_text = src_msg.text or src_msg.caption or "[Media]"
-    text = _clean_text(raw_text)
-
-    # Dummy draw for accurate font measurement
-    dummy = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
-    d = ImageDraw.Draw(dummy)
-
-    name_font = _get_font(34, bold=True)
-    text_font = _get_font(36, bold=False)
-    accent = _color_for(sender.id)
-
-    # Bubble text width
     max_w = 460
-    lines = _wrap_text(d, text, text_font, max_w)
+    lines = _wrap(d, text, text_font, max_w)
 
     name_w = d.textlength(name, font=name_font)
-    text_w = max((d.textlength(l, font=text_font) for l in lines), default=120)
+    text_w = max((d.textlength(l, font=text_font) for l in lines), default=140)
 
-    # Dynamic sizes matching example image
-    pad_left = 64
-    pad_right = 36
-    pad_top = 22
-    pad_bottom = 26
+    # Dynamic sizes (text ke mutabiq shrink hoga)
+    pad_left = 56
+    pad_right = 38
+    pad_top = 20
+    pad_bottom = 24
 
-    content_w = max(name_w, text_w, 180)
+    content_w = max(name_w, text_w, 160)
     bubble_w = int(content_w + pad_left + pad_right)
 
     name_bbox = name_font.getbbox("Ag")
@@ -272,57 +225,54 @@ async def build_quote_sticker(ctx, src_msg, sender) -> io.BytesIO:
     line_h = (sample_bbox[3] - sample_bbox[1]) + 14
     body_h = len(lines) * line_h
 
-    bubble_h = pad_top + name_h + 12 + body_h + pad_bottom
+    avatar_size = 90
+    bubble_h = max(avatar_size + 14, pad_top + name_h + 10 + body_h + pad_bottom)
 
-    avatar_size = 96
-    bubble_h = max(bubble_h, avatar_size + 10)
-
-    # Canvas
-    canvas_w = bubble_w + 60
+    canvas_w = bubble_w + 50
     canvas_h = bubble_h + 30
 
     img = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    bx = 38
+    bx = 36
     by = 12
     radius = min(36, bubble_h // 2)
 
-    # Soft Shadow
+    # Drop Shadow
     draw.rounded_rectangle(
         (bx + 3, by + 5, bx + bubble_w + 3, by + bubble_h + 5),
         radius=radius,
         fill=(0, 0, 0, 75)
     )
 
-    # Bubble Background (Dark Violet / Telegram Dark Theme)
-    bubble_bg = (30, 20, 42, 245)
+    # Dark Violet/Purple Theme Bubble
+    bubble_bg = (28, 22, 38, 245)
     draw.rounded_rectangle(
         (bx, by, bx + bubble_w, by + bubble_h),
         radius=radius,
         fill=bubble_bg
     )
 
-    # Overlapping Avatar on Top-Left
+    # Avatar Overlapping on Top-Left
     avatar = await _avatar(ctx, sender, avatar_size)
-    ax = bx - 28
+    ax = bx - 26
     ay = by + 2
     img.paste(avatar, (ax, ay), avatar)
 
     draw = ImageDraw.Draw(img)
 
-    # Name rendering
+    # Sender Name
     tx = bx + pad_left
     ty = by + pad_top
     draw.text((tx, ty), name, font=name_font, fill=accent)
 
-    # Message lines rendering
-    curr_y = ty + name_h + 12
+    # Message Text
+    curr_y = ty + name_h + 10
     for line in lines:
         draw.text((tx, curr_y), line, font=text_font, fill=(255, 255, 255, 255))
         curr_y += line_h
 
-    # Resize to exact Telegram 512px sticker rule
+    # Resize to exact 512px rule
     img = _fit_512(img)
 
     out = io.BytesIO()
@@ -354,7 +304,7 @@ async def q_cmd(update, ctx):
 
 async def qr_cmd(update, ctx):
     await _quote_and_send(update, ctx, as_reply=True)
-
+    
 
 # =====================================================================
 # KANG COMMANDS (UNTOUCHED)
