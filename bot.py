@@ -15,6 +15,8 @@ import admin
 import afk
 import ban
 import database as dbase
+import fun
+import sticker
 import welcome
 from common import B, T, log, mention, say, sc
 
@@ -44,12 +46,15 @@ PAGES = {
     "admin": ("👮 Admin", admin.HELP_TXT),
     "afk": ("💤 AFK", afk.HELP_TXT),
     "mod": ("🛡 Moderation", ban.HELP_TXT),
+    "extra": ("🎁 Extra", sticker.HELP_TXT + "\n\n" + fun.HELP_TXT),
 }
 ALIASES = {
     "welcome": "greet", "greetings": "greet", "greet": "greet",
     "admin": "admin", "promote": "admin",
     "afk": "afk",
     "mod": "mod", "moderation": "mod", "ban": "mod", "mute": "mod", "warn": "mod",
+    "extra": "extra", "sticker": "extra", "stickers": "extra", "q": "extra",
+    "kang": "extra", "waifu": "extra", "couple": "extra", "fun": "extra",
 }
 
 
@@ -178,14 +183,23 @@ async def on_error(update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 _seen: dict = {}
+_seen_member: dict = {}
 
 
 async def _track_usernames(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Caches username -> id from every group message, so /promote @user, .ban @user
-    etc. work even if that user has never DMed the bot. Runs before commands, cheap:
-    only writes to Mongo when a username is new or changed."""
-    u = update.effective_user
-    if u and u.username and not u.is_bot and _seen.get(u.id) != u.username:
+    etc. work even if that user has never DMed the bot. Also records group membership
+    (for .waifu / .couple). Runs before commands, cheap: only writes to Mongo when
+    something is new or changed."""
+    u, chat = update.effective_user, update.effective_chat
+    if not u or u.is_bot:
+        return
+    if chat and chat.type != ChatType.PRIVATE:
+        key = (chat.id, u.id)
+        if _seen_member.get(key) != u.first_name:
+            _seen_member[key] = u.first_name
+            await dbase.mark_member(chat.id, u.id, u.first_name)
+    if u.username and _seen.get(u.id) != u.username:
         _seen[u.id] = u.username
         await dbase.save_user(u.id, u.first_name, u.username)
 
@@ -194,7 +208,7 @@ async def post_init(app: Application):
     await dbase.init(MONGO_URI, DB_NAME)
     app.bot_data["me"] = await app.bot.get_me()
     cmds = [("start", "Start the bot"), ("help", "Show commands")]
-    for mod in (welcome, admin, afk, ban):
+    for mod in (welcome, admin, afk, ban, sticker, fun):
         cmds += mod.COMMANDS
     await app.bot.set_my_commands(cmds)
     log.info("Started as @%s", app.bot_data["me"].username)
@@ -219,6 +233,8 @@ def main():
     admin.register(app)
     afk.register(app)
     ban.register(app)
+    sticker.register(app)
+    fun.register(app)
 
     app.add_error_handler(on_error)
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
