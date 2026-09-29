@@ -44,75 +44,59 @@ def _clean_text(text: str) -> str:
     return re.sub(r"\s+", " ", "".join(cleaned_list)).strip()
 
 
+# ============================================================
+# FIXED STICKER QUOTE CODE (KANG NOT TOUCHED)
+# ============================================================
+
+def _clean_text(text: str) -> str:
+    """Stylish math/greek/fancy characters ko 100% readable banata hai taaki boxes na banein."""
+    if not text:
+        return ""
+    # Unicode NFKD normalize fullwidth & stylized letters
+    text = unicodedata.normalize("NFKD", text)
+
+    # Stylistic and Greek/Cyrillic homoglyphs mapping
+    char_map = {
+        "╰": "-", "╯": "-", "╭": "-", "╮": "-",
+        "‹": "<", "›": ">", "«": "<", "»": ">",
+        "•": "·", "✦": "*", "★": "*", "☆": "*",
+        "—": "-", "―": "-", "–": "-",
+        "“": '"', "”": '"', "’": "'", "‘": "'",
+        "Λ": "A", "λ": "a", "∆": "A", "Δ": "A",
+        "Ι": "I", "І": "I",
+        "Т": "T", "Τ": "T",
+        "С": "C",
+        "Н": "H", "Η": "H", "н": "h",
+        "А": "A", "В": "B", "Е": "E", "К": "K", "М": "M", "О": "O", "Р": "P", "Х": "X"
+    }
+    for k, v in char_map.items():
+        text = text.replace(k, v)
+
+    # Filter out anything that isn't standard printable character
+    res = []
+    for ch in text:
+        cp = ord(ch)
+        if 32 <= cp <= 126:
+            res.append(ch)
+        else:
+            dec = unicodedata.normalize("NFKD", ch).encode("ascii", "ignore").decode("ascii")
+            if dec:
+                res.append(dec)
+
+    out = "".join(res)
+    return re.sub(r"\s+", " ", out).strip()
+
+
 def _safe_name(name: str) -> str:
     res = _clean_text(name)
     return res[:30] if res else "User"
-            
 
-
-
-
-HELP_TXT = (
-    "<b>✦ stickers</b>\n\n"
-    "/q (or .q) — reply to any message to turn it into a quote sticker\n"
-    "/qr (or .qr) — same, but sent as a reply to the original message\n"
-    "/kang (or .kang) [emoji] — reply to a sticker or photo to add it to your "
-    "own sticker pack. the pack is created the first time and reused after that — "
-    "every later .kang just adds to it (a new part is started automatically if it fills up)."
-)
-COMMANDS = [("q", "Quote a message as a sticker"), ("kang", "Steal a sticker into your pack")]
-
-MAX_SIDE = 512
-EMOJI_RE = re.compile(r"^[\U0001F000-\U0001FAFF\u2600-\u27BF\u2190-\u21FF\u2B00-\u2BFF]+$")
-
-
-def _color_for(seed: int):
-    palette = [
-        (255, 110, 180),  # Pinkish / Magenta
-        (255, 140, 100),  # Coral
-        (130, 200, 255),  # Sky Blue
-        (170, 130, 255),  # Violet
-        (90, 230, 160),   # Light Green
-        (255, 215, 100),  # Warm Gold
-    ]
-    return palette[seed % len(palette)]
-
-
-def _initials(name: str) -> str:
-    parts = [p for p in (name or "").split() if p]
-    if not parts:
-        return "?"
-    return (parts[0][0] + (parts[1][0] if len(parts) > 1 else "")).upper()
-
-
-def _get_font(size: int, bold: bool = False):
-    """Broad font support with standard linux/android/windows fallbacks."""
-    paths = [
-        # Linux standard
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf" if bold else "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
-        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-        # Windows
-        "C:\\Windows\\Fonts\\segoeuib.ttf" if bold else "C:\\Windows\\Fonts\\segoeui.ttf",
-        "C:\\Windows\\Fonts\\arialbd.ttf" if bold else "C:\\Windows\\Fonts\\arial.ttf",
-    ]
-    for p in paths:
-        try:
-            return ImageFont.truetype(p, size=size)
-        except Exception:
-            continue
-    try:
-        return ImageFont.load_default(size=size)
-    except Exception:
-        return ImageFont.load_default()
 
 def _quote_font(size: int, bold: bool = False):
-    """System font loader with fallback."""
     paths = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf" if bold else "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
         "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-        "/usr/share/fonts/GoogleSans-Bold.ttf" if bold else "/usr/share/fonts/GoogleSans-Regular.ttf",
         "C:\\Windows\\Fonts\\arialbd.ttf" if bold else "C:\\Windows\\Fonts\\arial.ttf",
     ]
     for path in paths:
@@ -127,7 +111,6 @@ def _quote_font(size: int, bold: bool = False):
 
 
 def _fit_512(img: Image.Image) -> Image.Image:
-    """Telegram static sticker requirement."""
     w, h = img.size
     scale = MAX_SIDE / max(w, h)
     return img.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.LANCZOS)
@@ -162,10 +145,10 @@ def _wrap(draw, text, font, max_w):
                     cur = w
         if cur:
             lines.append(cur)
-    return lines[:10] or [""]
+    return lines[:8] or [""]
 
 
-async def _avatar(ctx, user, size=90) -> Image.Image:
+async def _avatar(ctx, user, size=100) -> Image.Image:
     try:
         photos = await ctx.bot.get_user_profile_photos(user.id, limit=1)
         if photos.photos:
@@ -176,7 +159,7 @@ async def _avatar(ctx, user, size=90) -> Image.Image:
             ImageDraw.Draw(mask).ellipse((0, 0, size, size), fill=255)
             im.putalpha(mask)
             return im
-    except (TelegramError, OSError):
+    except Exception:
         pass
 
     im = Image.new("RGBA", (size, size), (0, 0, 0, 0))
@@ -195,60 +178,59 @@ async def build_quote_sticker(ctx, src_msg, sender) -> io.BytesIO:
     raw_text = src_msg.text or src_msg.caption or "[Media]"
     text = _clean_text(raw_text)
 
-    # Measurement dummy
     dummy = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
     d = ImageDraw.Draw(dummy)
 
-    # Large prominent fonts
-    name_font = _quote_font(52, bold=True)
-    text_font = _quote_font(54, bold=False)
+    name_font = _quote_font(38, bold=True)
+    text_font = _quote_font(40, bold=False)
     accent = _color_for(sender.id)
 
-    max_w = 680
+    max_w = 400
     lines = _wrap(d, text, text_font, max_w)
 
     name_w = d.textlength(name, font=name_font)
-    text_w = max((d.textlength(l, font=text_font) for l in lines), default=220)
+    text_w = max((d.textlength(l, font=text_font) for l in lines), default=140)
 
-    # Spacing and layout
-    pad_left = 100
-    pad_right = 50
-    pad_top = 32
-    pad_bottom = 36
+    # Padding inside text area
+    pad_left = 32
+    pad_right = 32
+    pad_top = 22
+    pad_bottom = 26
 
-    content_w = max(name_w, text_w, 240)
+    content_w = max(name_w, text_w, 160)
     bubble_w = int(content_w + pad_left + pad_right)
 
     name_bbox = name_font.getbbox("Ag")
     name_h = name_bbox[3] - name_bbox[1]
 
     sample_bbox = text_font.getbbox("Ag")
-    line_h = (sample_bbox[3] - sample_bbox[1]) + 18
+    line_h = (sample_bbox[3] - sample_bbox[1]) + 14
     body_h = len(lines) * line_h
 
-    # Bada circular avatar
-    avatar_size = 145
-    bubble_h = max(avatar_size + 24, pad_top + name_h + 16 + body_h + pad_bottom)
+    avatar_size = 100
+    bubble_h = max(avatar_size + 14, pad_top + name_h + 10 + body_h + pad_bottom)
 
-    # Canvas bounds
-    canvas_w = bubble_w + 70
-    canvas_h = bubble_h + 30
+    # Avatar placed safely on the LEFT side of the bubble (NO OVERLAP)
+    ax = 14
+    bx = ax + avatar_size + 16  # Bubble starts strictly AFTER avatar
+    by = 12
+
+    canvas_w = bx + bubble_w + 20
+    canvas_h = bubble_h + 26
 
     img = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    bx = 45
-    by = 12
-    radius = min(50, bubble_h // 2)
+    radius = min(36, bubble_h // 2)
 
-    # Soft Shadow
+    # Soft Shadow behind bubble
     draw.rounded_rectangle(
-        (bx + 4, by + 6, bx + bubble_w + 4, by + bubble_h + 6),
+        (bx + 3, by + 5, bx + bubble_w + 3, by + bubble_h + 5),
         radius=radius,
         fill=(0, 0, 0, 75)
     )
 
-    # Dark Violet chat bubble
+    # Bubble Body
     bubble_bg = (28, 22, 38, 245)
     draw.rounded_rectangle(
         (bx, by, bx + bubble_w, by + bubble_h),
@@ -256,26 +238,25 @@ async def build_quote_sticker(ctx, src_msg, sender) -> io.BytesIO:
         fill=bubble_bg
     )
 
-    # Big Avatar (Vertically Centered on Left Edge)
+    # Avatar pasted clearly separated on the left
     avatar = await _avatar(ctx, sender, avatar_size)
-    ax = bx - 42
     ay = by + (bubble_h - avatar_size) // 2
     img.paste(avatar, (ax, ay), avatar)
 
     draw = ImageDraw.Draw(img)
 
-    # Name rendering
+    # Render Name clearly inside bubble
     tx = bx + pad_left
     ty = by + pad_top
     draw.text((tx, ty), name, font=name_font, fill=accent)
 
-    # Message text rendering
-    curr_y = ty + name_h + 16
+    # Render Message Text lines clearly
+    curr_y = ty + name_h + 10
     for line in lines:
         draw.text((tx, curr_y), line, font=text_font, fill=(255, 255, 255, 255))
         curr_y += line_h
 
-    # Auto-scale to full 512px
+    # Resize to exact Telegram 512px rule
     img = _fit_512(img)
 
     out = io.BytesIO()
@@ -283,7 +264,6 @@ async def build_quote_sticker(ctx, src_msg, sender) -> io.BytesIO:
     img.save(out, "WEBP", quality=95, method=6)
     out.seek(0)
     return out
-            
 
 
 async def _quote_and_send(update, ctx, as_reply: bool):
@@ -308,7 +288,7 @@ async def q_cmd(update, ctx):
 
 async def qr_cmd(update, ctx):
     await _quote_and_send(update, ctx, as_reply=True)
-    
+            
 
 # =====================================================================
 # KANG COMMANDS (UNTOUCHED)
