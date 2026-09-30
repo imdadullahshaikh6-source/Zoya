@@ -41,20 +41,35 @@ START_TXT = (
     "tap <b>command</b> below to see everything i can do."
 )
 
+MUSIC_HELP_TXT = (
+    "<b>✦ music</b>\n\n"
+    "music runs on a separate bot in your group (voice-chat streaming needs a "
+    "different kind of connection than i use), so add that bot alongside me.\n\n"
+    "/play (or .play) &lt;song / youtube / spotify link&gt; — play or queue a track\n"
+    "/playforce — skip the queue and play this right now\n"
+    "/skip — next track in the queue\n"
+    "/replay — restart the current track\n"
+    "/stop or /end — stop and leave the voice chat\n"
+    "/queue — see what's coming up\n\n"
+    "tap <b>Controls ?</b> on the now-playing card for pause / resume / replay / skip."
+)
+
 PAGES = {
     "greet": ("🎉 Greetings", welcome.HELP_TXT),
     "admin": ("👮 Admin", admin.HELP_TXT),
     "afk": ("💤 AFK", afk.HELP_TXT),
     "mod": ("🛡 Moderation", ban.HELP_TXT),
     "extra": ("🎁 Extra", sticker.HELP_TXT + "\n\n" + fun.HELP_TXT),
+    "music": ("🎵 Music", MUSIC_HELP_TXT),
 }
 ALIASES = {
     "welcome": "greet", "greetings": "greet", "greet": "greet",
     "admin": "admin", "promote": "admin",
     "afk": "afk",
-    "mod": "mod", "moderation": "mod", "ban": "mod", "mute": "mod", "warn": "mod",
+    "mod": "mod", "moderation": "mod", "ban": "mod", "mute": "mod", "warn": "mod", "kick": "mod",
     "extra": "extra", "sticker": "extra", "stickers": "extra", "q": "extra",
     "kang": "extra", "waifu": "extra", "couple": "extra", "fun": "extra",
+    "music": "music", "play": "music", "song": "music",
 }
 
 
@@ -242,4 +257,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
