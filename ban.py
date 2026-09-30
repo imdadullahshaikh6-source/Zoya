@@ -19,15 +19,17 @@ WARN_LIMIT = int(os.getenv("WARN_LIMIT", "3"))
 HELP_TXT = (
     "<b>✦ moderation — ban / mute / warn</b>\n\n"
     "/ban (or .ban) — reply / @username / id (+ optional reason)\n"
+    "/kick (or .kick) — same usage, removes them but they can rejoin (no undo button)\n"
     "/mute (or .mute) — same usage, restricts sending messages\n"
     "/warn (or .warn) — after {n} warns the user is auto-muted\n"
     "/unban • /unmute • /unwarn — reverse any of the above\n\n"
-    "every action shows an undo button, and only works if i actually have the "
-    "<b>Ban Users</b> power in this group — i check first and tag you if I don't."
+    "every action re-checks that you have the <b>Ban Users</b> right and that i "
+    "actually have it too — i tag you if I don't."
 ).replace("{n}", str(WARN_LIMIT))
 
 COMMANDS = [
     ("ban", "Ban a user"), ("unban", "Unban a user"),
+    ("kick", "Kick a user (they can rejoin)"),
     ("mute", "Mute a user"), ("unmute", "Unmute a user"),
     ("warn", "Warn a user"), ("unwarn", "Clear a user's warns"),
 ]
@@ -114,6 +116,27 @@ async def unban_cmd(update, ctx):
         return
     await dbase.mod_clear(chat.id, target.id)
     await say(ctx, chat.id, T("✅ {m} has been unbanned.", m=mention(target)), reply_to=msg.message_id)
+
+
+# ───────── KICK (ban immediately followed by unban — no permanent ban, no button) ─────────
+async def kick_cmd(update, ctx):
+    msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
+    if not await _need_restrict(update, ctx):
+        return
+    target, reason = await _target_or_complain(update, ctx, "kick")
+    if not target:
+        return
+    try:
+        await ctx.bot.ban_chat_member(chat.id, target.id)
+        await ctx.bot.unban_chat_member(chat.id, target.id, only_if_banned=True)
+    except TelegramError as e:
+        await say(ctx, chat.id, T("kick failed:") + f" {esc(e)}", reply_to=msg.message_id)
+        return
+    text = T(
+        "<b>👢 KICKED</b>\n\nuser: {u}\nby admin: {a}\nreason: {r}",
+        u=mention(target), a=mention(user), r=esc(reason) if reason else "no reason given",
+    )
+    await ctx.bot.send_message(chat.id, q(text))
 
 
 # ───────── MUTE ─────────
@@ -233,9 +256,10 @@ async def mod_cb(update, ctx):
 def register(app):
     dual_command(app, "ban", ban_cmd)
     dual_command(app, "unban", unban_cmd)
+    dual_command(app, "kick", kick_cmd)
     dual_command(app, "mute", mute_cmd)
     dual_command(app, "unmute", unmute_cmd)
     dual_command(app, "warn", warn_cmd)
     dual_command(app, "unwarn", unwarn_cmd)
     app.add_handler(CallbackQueryHandler(mod_cb, pattern=r"^mod:"))
-  
+    
