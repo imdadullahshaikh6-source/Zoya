@@ -4,4 +4,11 @@ dnspython>=2.6
 Pillow>=10.1.0
 httpx>=0.27
 fonttools>=4.47
+pyrogram>=2.0.106
+tgcrypto>=1.2.5
+pytgcalls>=2.1.0
+yt-dlp>=2024.12.0
+spotipy>=2.24.0
+
+
 
