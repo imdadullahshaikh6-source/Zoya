@@ -18,10 +18,16 @@ START_TIME = time.time()
 PING_IMAGE = "https://graph.org/file/d3a2c17942e606f4ec811-9c0373fa8bb10f4448.jpg"
 SUPPORT_URL = "https://t.me/REDFLAGSGCS"
 
-# Support Button (Permanent Blue Primary)
-SUPPORT_BUTTON = InlineKeyboardMarkup([
-    [InlineKeyboardButton(text="Support ✅", url=SUPPORT_URL, style="primary")]
-])
+# Support Button (with fallback for older PTB versions)
+try:
+    SUPPORT_BUTTON = InlineKeyboardMarkup([
+        [InlineKeyboardButton(text="Support ✅", url=SUPPORT_URL, style="primary")]
+    ])
+except TypeError:
+    # Fallback if PTB version doesn't support button colors
+    SUPPORT_BUTTON = InlineKeyboardMarkup([
+        [InlineKeyboardButton(text="Support ✅", url=SUPPORT_URL)]
+    ])
 
 psutil.cpu_percent(interval=None)
 
