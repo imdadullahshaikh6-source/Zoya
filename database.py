@@ -19,6 +19,7 @@ async def init(uri: str, name: str):
     await _db.moderation.create_index([("chat_id", 1), ("user_id", 1)])
     await _db.warns.create_index([("chat_id", 1), ("user_id", 1)])
     await _db.members.create_index("chat_id")
+    await _db.filters.create_index([("chat_id", 1), ("keyword", 1)], unique=True)
     log.info("MongoDB connected (db: %s)", name)
 
 
