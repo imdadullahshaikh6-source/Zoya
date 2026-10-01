@@ -1,14 +1,14 @@
 """Advanced .ping command — owner only, shows latency, uptime, system load, and MongoDB stats."""
 import logging
-import re
 import time
 
 import psutil
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, ContextTypes, MessageHandler, filters as tg_filters
 
 import database as dbase
+from common import parse_buttons  # <-- Yahan master function import kiya
 
 log = logging.getLogger("ping")
 
@@ -17,17 +17,6 @@ OWNER_ID = 8373739674
 START_TIME = time.time()
 PING_IMAGE = "https://graph.org/file/d3a2c17942e606f4ec811-9c0373fa8bb10f4448.jpg"
 SUPPORT_URL = "https://t.me/REDFLAGSGCS"
-
-# Support Button (with fallback for older PTB versions)
-try:
-    SUPPORT_BUTTON = InlineKeyboardMarkup([
-        [InlineKeyboardButton(text="Support ✅", url=SUPPORT_URL, style="primary")]
-    ])
-except TypeError:
-    # Fallback if PTB version doesn't support button colors
-    SUPPORT_BUTTON = InlineKeyboardMarkup([
-        [InlineKeyboardButton(text="Support ✅", url=SUPPORT_URL)]
-    ])
 
 psutil.cpu_percent(interval=None)
 
@@ -103,21 +92,26 @@ async def ping_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uptime_str = _format_uptime(time.time() - START_TIME)
     latency_ms = (time.time() - start) * 1000
 
-    caption = (
+    # Yahan humne caption ke end me Button ka text format daal diya (Primary color ke sath)
+    raw_caption = (
         f"<b>🏓 Pong!</b>\n\n"
         f"<b>📡 Ping:</b> <code>{latency_ms:.2f} ms</code>\n"
         f"<b>⏱ Uptime:</b> <code>{uptime_str}</code>\n"
         f"<b>💻 CPU:</b> <code>{cpu:.1f}%</code>\n"
         f"<b>🧠 RAM:</b> <code>{ram:.1f}%</code>\n"
-        f"{mongo_line}"
+        f"{mongo_line}\n\n"
+        f"[Support ✅](buttonurl:{SUPPORT_URL}:primary)"
     )
+
+    # common.py ka function apne aap string se button bana lega
+    caption, kb = parse_buttons(raw_caption)
 
     try:
         await msg.reply_photo(
             photo=PING_IMAGE,
             caption=caption,
             parse_mode=ParseMode.HTML,
-            reply_markup=SUPPORT_BUTTON,
+            reply_markup=kb,
             reply_to_message_id=msg.message_id,
         )
     except Exception as e:
@@ -126,7 +120,7 @@ async def ping_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text(
                 caption, 
                 parse_mode=ParseMode.HTML, 
-                reply_markup=SUPPORT_BUTTON, 
+                reply_markup=kb, 
                 reply_to_message_id=msg.message_id
             )
         except Exception as fallback_err:
