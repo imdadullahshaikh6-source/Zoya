@@ -40,9 +40,8 @@ HELP_TXT = (
 
 
 _BTN_RE = re.compile(r"\[([^\[\]~]+?)\s*~\s*([^\[\]]+?)\]")
-# ✅ FIX: Ab dono Markdown aur HTML format handle karega
-_MD_RE = re.compile(r"\[([^\[\]]+?)\]\(buttonurl:(https?://[^\)]+?)\)")
-_HTML_RE = re.compile(r'<a href="buttonurl:(https?://[^"]+?)">([^<]+?)</a>')
+# ✅ FIX: Ab ye HTML <a> tags ko bhi catch karega, chahe buttonurl: ho ya nahi
+_HTML_RE = re.compile(r'<a href="(?:buttonurl:)?(https?://[^"]+?)">([^<]+?)</a>')
 
 
 def _parse_buttons(text: str | None):
@@ -64,21 +63,17 @@ def _parse_buttons(text: str | None):
         btn = {"text": label.strip(), "url": url.strip()}
         if color:
             btn["style"] = color
+            print(f"🎨 COLOR DETECTED: {color} for button '{label.strip()}'")
+        else:
+            print(f"⚪ No color for button '{label.strip()}' (URL: {url})")
+            
         rows.append([btn])
         return ""
 
-    def _repl_md(m):
-        return _process_button(m.group(1), m.group(2))
-
-    def _repl_html(m):
-        return _process_button(m.group(2), m.group(1))
-
-    # Apply Markdown regex
-    cleaned = _MD_RE.sub(_repl_md, text)
-    # Apply HTML regex
-    cleaned = _HTML_RE.sub(_repl_html, cleaned).strip()
-
-    # Custom [Text ~ URL]
+    # Apply HTML regex (Telegram converts markdown to HTML)
+    cleaned = _HTML_RE.sub(lambda m: _process_button(m.group(2), m.group(1)), text)
+    
+    # Apply custom [Text ~ URL] regex
     def _repl_custom(m):
         label = m.group(1).strip()
         url = m.group(2).strip()
@@ -125,9 +120,12 @@ def _kb_from_stored(rows):
             try:
                 if "style" in b and b["style"]:
                     btn = InlineKeyboardButton(text=b["text"], url=b["url"], style=b["style"])
+                    print(f"🔨 Building button '{b['text']}' with style '{b['style']}'")
                 else:
                     btn = InlineKeyboardButton(text=b["text"], url=b["url"])
-            except TypeError:
+                    print(f"🔨 Building button '{b['text']}' WITHOUT style (key missing or empty)")
+            except TypeError as e:
+                print(f"⚠️ TypeError while building button (old PTB version?): {e}")
                 btn = InlineKeyboardButton(text=b["text"], url=b["url"])
             kb_row.append(btn)
         kb_rows.append(kb_row)
@@ -185,6 +183,7 @@ async def filter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if reply.text:
         clean, btns = _parse_buttons(reply.text_html)
         final_btns = (native_btns or []) + (btns or [])
+        print(f"📦 Final buttons to save: {final_btns}") # DEBUG
         data.update(type="text", content=clean, buttons=final_btns or None)
         
     elif reply.sticker:
@@ -194,21 +193,25 @@ async def filter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif reply.photo:
         clean, btns = _parse_buttons(reply.caption_html)
         final_btns = (native_btns or []) + (btns or [])
+        print(f"📦 Final buttons to save: {final_btns}") # DEBUG
         data.update(type="photo", content=reply.photo[-1].file_id, caption=clean, buttons=final_btns or None)
         
     elif reply.video:
         clean, btns = _parse_buttons(reply.caption_html)
         final_btns = (native_btns or []) + (btns or [])
+        print(f"📦 Final buttons to save: {final_btns}") # DEBUG
         data.update(type="video", content=reply.video.file_id, caption=clean, buttons=final_btns or None)
         
     elif reply.animation:
         clean, btns = _parse_buttons(reply.caption_html)
         final_btns = (native_btns or []) + (btns or [])
+        print(f"📦 Final buttons to save: {final_btns}") # DEBUG
         data.update(type="animation", content=reply.animation.file_id, caption=clean, buttons=final_btns or None)
         
     elif reply.audio:
         clean, btns = _parse_buttons(reply.caption_html)
         final_btns = (native_btns or []) + (btns or [])
+        print(f"📦 Final buttons to save: {final_btns}") # DEBUG
         data.update(type="audio", content=reply.audio.file_id, caption=clean, buttons=final_btns or None)
         
     else:
