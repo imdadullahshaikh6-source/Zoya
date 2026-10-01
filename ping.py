@@ -57,18 +57,18 @@ async def ping_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     cpu = psutil.cpu_percent(interval=None)
     ram = psutil.virtual_memory().percent
 
-    # ───── MongoDB Stats (Debug Mode ON) ─────
+    # ───── MongoDB Stats (Fixed Truthiness Bug) ─────
     mongo_line = "<b>🗄 MongoDB:</b> N/A"
     try:
-        db = getattr(dbase, "db", None) or getattr(dbase, "_db", None)
-        
+        # ✅ FIX: 'or' ki jagah explicit None check use kiya
+        db = getattr(dbase, "db", None)
+        if db is None:
+            db = getattr(dbase, "_db", None)
+
         if db is None:
             mongo_line = "<b>🗄 MongoDB:</b> ❌ DB object is None"
-            print("DEBUG: db object is None!")
         else:
             stats = await db.command("dbstats")
-            print(f"DEBUG DBSTATS: {stats}") # Terminal me dikhega
-            
             data_size = stats.get("dataSize", 0)
             storage_size = stats.get("storageSize", 0)
             fs_total = stats.get("fsTotalSize")
@@ -84,9 +84,8 @@ async def ping_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     f"Storage <code>{_format_bytes(storage_size)}</code>"
                 )
     except Exception as e:
-        print(f"DEBUG MONGO ERROR: {e}") # Terminal me exact error dikhega
-        mongo_line = f"<b>🗄 MongoDB:</b> ❌ <code>{str(e)[:40]}</code>"
         log.error("Failed to fetch MongoDB stats: %s", e)
+        mongo_line = f"<b>🗄 MongoDB:</b> ❌ <code>{str(e)[:40]}</code>"
 
     uptime_str = _format_uptime(time.time() - START_TIME)
     latency_ms = (time.time() - start) * 1000
