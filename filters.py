@@ -36,24 +36,18 @@ HELP_TXT = (
     "• <code>[Text](buttonurl:URL:success)</code> — colors: danger, success, primary"
 )
 
-# Simplified regex — direct raw text pe chalega (HTML-free)
 _BTN_URL_RE = re.compile(r'\[([^\[\]]+?)\]\s*\(\s*(?:buttonurl:)?\s*([^\)]+?)\s*\)')
 _TILDE_RE = re.compile(r'\[([^\[\]~]+?)\s*~\s*([^\[\]]+?)\]')
 
 
 def _clean_url(raw: str):
     """Return (clean_url, color_or_None) from a messy URL chunk."""
-    # Strip HTML tags
     cleaned = re.sub(r'<[^>]+>', '', raw or "")
-    # Unescape HTML entities
     cleaned = html.unescape(cleaned).strip()
-    # Strip any leading buttonurl:
     if cleaned.lower().startswith("buttonurl:"):
         cleaned = cleaned[len("buttonurl:"):].strip()
-    # Strip trailing noise (spaces, newlines, invisible chars)
     cleaned = cleaned.strip().rstrip('.,;:')
 
-    # Extract color suffix via regex (more robust than endswith)
     color = None
     m = re.search(r':(danger|success|primary)\s*$', cleaned, re.IGNORECASE)
     if m:
@@ -84,19 +78,16 @@ def _parse_buttons(text: str | None):
         rows.append([btn])
         return True
 
-    # 1. Match [Text](buttonurl:URL) or [Text](URL)
     def _repl_md(m):
         return "" if _add(m.group(1), m.group(2)) else m.group(0)
 
     cleaned = _BTN_URL_RE.sub(_repl_md, text)
 
-    # 2. Match [Text ~ URL]
     def _repl_tilde(m):
         return "" if _add(m.group(1), m.group(2)) else m.group(0)
 
     cleaned = _TILDE_RE.sub(_repl_tilde, cleaned)
 
-    # Strip empty lines
     cleaned = "\n".join(line for line in cleaned.splitlines() if line.strip()).strip()
 
     log.info("✅ Parsed %d button(s) | cleaned text: %r", len(rows), cleaned)
@@ -160,6 +151,19 @@ async def _is_admin(update: Update) -> bool:
         return False
 
 
+async def _safe_reply(func, *args, **kwargs):
+    """Try with HTML parse mode; on failure retry as plain text."""
+    try:
+        return await func(*args, parse_mode=ParseMode.HTML, **kwargs)
+    except Exception as e:
+        err = str(e).lower()
+        if "parse" in err or "entities" in err or "tag" in err:
+            log.warning("HTML parse failed, falling back to plain text: %s", e)
+            kwargs.pop("parse_mode", None)
+            return await func(*args, **kwargs)
+        raise
+
+
 async def filter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg, chat = update.effective_message, update.effective_chat
 
@@ -185,8 +189,6 @@ async def filter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     log.info("📝 FILTER '%s' DEBUG", keyword)
     log.info("reply.text        = %r", reply.text)
     log.info("reply.caption     = %r", reply.caption)
-    log.info("reply.text_html   = %r", reply.text_html)
-    log.info("reply.caption_html= %r", reply.caption_html)
     log.info("reply.reply_markup= %r", reply.reply_markup)
     log.info("=" * 50)
 
@@ -194,10 +196,8 @@ async def filter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "set_by": update.effective_user.id}
     native_btns = _extract_native_buttons(reply)
 
-    # Use raw text (reply.text / reply.caption) NOT _html versions
     if reply.text:
         clean, btns = _parse_buttons(reply.text)
-        # ✅ Agar custom buttons mile toh native IGNORE karo
         final_btns = btns if btns else native_btns
         data.update(type="text", content=clean, buttons=final_btns)
     elif reply.sticker:
@@ -286,17 +286,22 @@ async def trigger_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         try:
             if ftype == "text":
-                await msg.reply_text(content or "", reply_markup=kb, parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id)
+                await _safe_reply(msg.reply_text, content or "",
+                                  reply_markup=kb, reply_to_message_id=msg.message_id)
             elif ftype == "sticker":
                 await msg.reply_sticker(content, reply_markup=kb, reply_to_message_id=msg.message_id)
             elif ftype == "photo":
-                await msg.reply_photo(content, caption=caption or None, reply_markup=kb, parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id)
+                await _safe_reply(msg.reply_photo, content, caption=caption or None,
+                                  reply_markup=kb, reply_to_message_id=msg.message_id)
             elif ftype == "video":
-                await msg.reply_video(content, caption=caption or None, reply_markup=kb, parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id)
+                await _safe_reply(msg.reply_video, content, caption=caption or None,
+                                  reply_markup=kb, reply_to_message_id=msg.message_id)
             elif ftype == "animation":
-                await msg.reply_animation(content, caption=caption or None, reply_markup=kb, parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id)
+                await _safe_reply(msg.reply_animation, content, caption=caption or None,
+                                  reply_markup=kb, reply_to_message_id=msg.message_id)
             elif ftype == "audio":
-                await msg.reply_audio(content, caption=caption or None, reply_markup=kb, parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id)
+                await _safe_reply(msg.reply_audio, content, caption=caption or None,
+                                  reply_markup=kb, reply_to_message_id=msg.message_id)
         except Exception as e:
             log.error("filter send failed [%s/%s]: %s", chat.id, word, e)
         break
