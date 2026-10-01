@@ -1,4 +1,4 @@
-"""Filters module — Rose-style auto replies (Supports Native, Custom, and Rose buttons with colors)."""
+"""Filters module — Rose-style auto replies (Supports Native, Custom, and Rose buttons)."""
 import logging
 import re
 
@@ -56,14 +56,14 @@ def _parse_buttons(text: str | None):
     def _repl_rose(m):
         label = m.group(1).strip()
         url = m.group(2).strip()
-        color = m.group(3) # danger, success, primary (or None)
+        color = m.group(3)
         
         btn = {"text": label, "url": url}
         if color:
             btn["style"] = color
             
         rows.append([btn])
-        return "" # Remove from text
+        return "" 
 
     # 2. Parse Custom-style buttons [Text ~ URL]
     def _repl_custom(m):
@@ -74,9 +74,7 @@ def _parse_buttons(text: str | None):
         rows.append([{"text": label, "url": url}])
         return ""
 
-    # Apply Rose regex first
     cleaned = _ROSE_BTN_RE.sub(_repl_rose, text)
-    # Then apply Custom regex
     cleaned = _BTN_RE.sub(_repl_custom, cleaned).strip()
     
     return cleaned, (rows or None)
@@ -94,9 +92,9 @@ def _extract_native_buttons(reply_msg):
     for row in markup.inline_keyboard:
         btn_row = []
         for btn in row:
-            if btn.url:  # Only save URL buttons
-                # Native buttons might have a style attribute, try to save it if it exists
+            if btn.url:
                 btn_data = {"text": btn.text, "url": btn.url}
+                # Native buttons might have a style attribute
                 if hasattr(btn, 'style') and btn.style:
                     btn_data["style"] = btn.style
                 btn_row.append(btn_data)
@@ -106,7 +104,7 @@ def _extract_native_buttons(reply_msg):
 
 
 def _kb_from_stored(rows):
-    """Build InlineKeyboardMarkup from stored dicts, including style if present."""
+    """Build InlineKeyboardMarkup safely, handling older PTB versions without style support."""
     if not rows:
         return None
     
@@ -114,12 +112,17 @@ def _kb_from_stored(rows):
     for row in rows:
         kb_row = []
         for b in row:
-            # Pass style if it exists in the stored data
-            kb_row.append(InlineKeyboardButton(
-                text=b["text"], 
-                url=b["url"], 
-                style=b.get("style")
-            ))
+            # SAFE FALLBACK: Try without style first, then with style
+            try:
+                # Some PTB versions don't support 'style' parameter, so we try/except
+                if "style" in b and b["style"]:
+                    btn = InlineKeyboardButton(text=b["text"], url=b["url"], style=b["style"])
+                else:
+                    btn = InlineKeyboardButton(text=b["text"], url=b["url"])
+            except TypeError:
+                # If PTB version is old, fallback to normal button
+                btn = InlineKeyboardButton(text=b["text"], url=b["url"])
+            kb_row.append(btn)
         kb_rows.append(kb_row)
         
     return InlineKeyboardMarkup(kb_rows)
@@ -202,7 +205,7 @@ async def filter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         data.update(type="audio", content=reply.audio.file_id, caption=clean, buttons=final_btns or None)
         
     else:
-        await msg.reply_text("⚠️ Unsupported message type. Reply to text, sticker, photo, video, GIF or audio.")
+        await msg.reply_text("⚠️ Unsupported message type.")
         return
 
     await dbase.filter_set(chat.id, keyword, data)
@@ -290,6 +293,11 @@ async def trigger_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await msg.reply_audio(content, caption=caption or None, reply_markup=kb, parse_mode=ParseMode.HTML, do_quote=True)
         except Exception as e:
             log.error("filter send failed [%s/%s]: %s", chat.id, word, e)
+            # Send error to chat so you know exactly what's wrong
+            try:
+                await msg.reply_text(f"❌ Error sending filter: <code>{e}</code>")
+            except:
+                pass
 
         break
 
