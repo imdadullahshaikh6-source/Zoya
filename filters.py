@@ -41,7 +41,6 @@ _TILDE_RE = re.compile(r'\[([^\[\]~]+?)\s*~\s*([^\[\]]+?)\]')
 
 
 def _clean_url(raw: str):
-    """Return (clean_url, color_or_None) from a messy URL chunk."""
     cleaned = re.sub(r'<[^>]+>', '', raw or "")
     cleaned = html.unescape(cleaned).strip()
     if cleaned.lower().startswith("buttonurl:"):
@@ -58,7 +57,6 @@ def _clean_url(raw: str):
 
 
 def _parse_buttons(text: str | None):
-    """Extract buttons from raw text. Returns (clean_text, buttons_or_None)."""
     if not text:
         return text or "", None
 
@@ -87,7 +85,6 @@ def _parse_buttons(text: str | None):
         return "" if _add(m.group(1), m.group(2)) else m.group(0)
 
     cleaned = _TILDE_RE.sub(_repl_tilde, cleaned)
-
     cleaned = "\n".join(line for line in cleaned.splitlines() if line.strip()).strip()
 
     log.info("✅ Parsed %d button(s) | cleaned text: %r", len(rows), cleaned)
@@ -151,16 +148,17 @@ async def _is_admin(update: Update) -> bool:
         return False
 
 
+# ✅ FIXED _safe_reply — explicit parse_mode=None override default
 async def _safe_reply(func, *args, **kwargs):
-    """Try with HTML parse mode; on failure retry as plain text."""
+    """Try HTML parse mode; on failure, force plain text (None overrides default)."""
     try:
         return await func(*args, parse_mode=ParseMode.HTML, **kwargs)
     except Exception as e:
         err = str(e).lower()
         if "parse" in err or "entities" in err or "tag" in err:
-            log.warning("HTML parse failed, falling back to plain text: %s", e)
-            kwargs.pop("parse_mode", None)
-            return await func(*args, **kwargs)
+            log.warning("⚠️ HTML parse failed, retrying as plain text: %s", e)
+            # ✅ Explicit parse_mode=None — ye default ko override karega
+            return await func(*args, parse_mode=None, **kwargs)
         raise
 
 
@@ -184,13 +182,6 @@ async def filter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not reply:
         await msg.reply_text("⚠️ Reply to the message you want to send as the filter.")
         return
-
-    log.info("=" * 50)
-    log.info("📝 FILTER '%s' DEBUG", keyword)
-    log.info("reply.text        = %r", reply.text)
-    log.info("reply.caption     = %r", reply.caption)
-    log.info("reply.reply_markup= %r", reply.reply_markup)
-    log.info("=" * 50)
 
     data = {"type": "text", "content": "", "caption": "", "buttons": None,
             "set_by": update.effective_user.id}
