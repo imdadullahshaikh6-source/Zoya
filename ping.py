@@ -17,7 +17,6 @@ OWNER_ID = 8373739674
 START_TIME = time.time()
 PING_IMAGE = "https://graph.org/file/d3a2c17942e606f4ec811-9c0373fa8bb10f4448.jpg"
 
-# Initialise psutil CPU counter (first call returns 0.0, so we do it once at import)
 psutil.cpu_percent(interval=None)
 
 COMMANDS = [
@@ -32,12 +31,9 @@ def _format_uptime(seconds: float) -> str:
     hours, seconds = divmod(seconds, 3600)
     minutes, seconds = divmod(seconds, 60)
     parts = []
-    if days:
-        parts.append(f"{days}d")
-    if hours:
-        parts.append(f"{hours}h")
-    if minutes:
-        parts.append(f"{minutes}m")
+    if days: parts.append(f"{days}d")
+    if hours: parts.append(f"{hours}h")
+    if minutes: parts.append(f"{minutes}m")
     parts.append(f"{seconds}s")
     return " ".join(parts)
 
@@ -52,23 +48,27 @@ def _format_bytes(size: float) -> str:
 
 # ───────── command handler ─────────
 async def ping_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    # Owner-only, silently ignore everyone else
     if not update.effective_user or update.effective_user.id != OWNER_ID:
         return
 
     start = time.time()
     msg = update.effective_message
 
-    # System load
     cpu = psutil.cpu_percent(interval=None)
     ram = psutil.virtual_memory().percent
 
-    # MongoDB stats
+    # ───── MongoDB Stats (Debug Mode ON) ─────
     mongo_line = "<b>🗄 MongoDB:</b> N/A"
     try:
         db = getattr(dbase, "db", None) or getattr(dbase, "_db", None)
-        if db is not None:
+        
+        if db is None:
+            mongo_line = "<b>🗄 MongoDB:</b> ❌ DB object is None"
+            print("DEBUG: db object is None!")
+        else:
             stats = await db.command("dbstats")
+            print(f"DEBUG DBSTATS: {stats}") # Terminal me dikhega
+            
             data_size = stats.get("dataSize", 0)
             storage_size = stats.get("storageSize", 0)
             fs_total = stats.get("fsTotalSize")
@@ -84,12 +84,11 @@ async def ping_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     f"Storage <code>{_format_bytes(storage_size)}</code>"
                 )
     except Exception as e:
+        print(f"DEBUG MONGO ERROR: {e}") # Terminal me exact error dikhega
+        mongo_line = f"<b>🗄 MongoDB:</b> ❌ <code>{str(e)[:40]}</code>"
         log.error("Failed to fetch MongoDB stats: %s", e)
 
-    # Uptime
     uptime_str = _format_uptime(time.time() - START_TIME)
-
-    # Latency
     latency_ms = (time.time() - start) * 1000
 
     caption = (
@@ -118,7 +117,6 @@ async def ping_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ───────── registration ─────────
 def register(app: Application):
-    # ✅ FIX: flags=re.IGNORECASE hata kar regex ke andar (?i) daal diya
     app.add_handler(
         MessageHandler(
             tg_filters.Regex(r"(?i)^[./]ping\s*$"),
