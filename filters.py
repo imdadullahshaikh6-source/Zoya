@@ -1,9 +1,9 @@
 """Filters module — Rose-style auto replies.
 
 Set a filter by replying to any message (text, photo, video, gif, audio,
-sticker) with `/filter <keyword>`. When anyone types that keyword in the
-group, the bot sends the saved message back — including inline buttons
-written as [Button Text ~ https://url] in the original text/caption.
+sticker) with `.filter <keyword>` or `/filter <keyword>`. When anyone types
+that keyword in the group, the bot sends the saved message back — including
+inline buttons written as [Button Text ~ https://url] in the original text/caption.
 """
 import logging
 import re
@@ -13,7 +13,7 @@ from telegram import (
 )
 from telegram.constants import ChatType, ParseMode
 from telegram.ext import (
-    Application, CommandHandler, ContextTypes, MessageHandler,
+    Application, ContextTypes, MessageHandler,
     filters as tg_filters,
 )
 
@@ -61,9 +61,8 @@ def _parse_buttons(text: str | None):
     def _repl(m):
         label = m.group(1).strip()
         url = m.group(2).strip()
-        # telegram requires http(s) or tg:// for URL buttons
         if not (url.startswith("http://") or url.startswith("https://") or url.startswith("tg://")):
-            return m.group(0)  # leave it alone, treat as plain text
+            return m.group(0)
         rows.append([{"text": label, "url": url}])
         return ""
 
@@ -75,6 +74,17 @@ def _kb_from_stored(rows):
     if not rows:
         return None
     return InlineKeyboardMarkup([[InlineKeyboardButton(b["text"], url=b["url"]) for b in row] for row in rows])
+
+
+def _get_args(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Helper to get args from either ctx.args (if global parser exists) or manually parse text."""
+    if ctx.args:
+        return ctx.args
+    text = update.effective_message.text or ""
+    parts = text.split(maxsplit=1)
+    if len(parts) > 1:
+        return [parts[1].strip()]
+    return []
 
 
 async def _is_admin(update: Update) -> bool:
@@ -100,11 +110,12 @@ async def filter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("❌ Only admins can set filters.")
         return
 
-    if not ctx.args:
+    args = _get_args(update, ctx)
+    if not args:
         await msg.reply_text("⚠️ Usage: <code>/filter keyword</code> — reply to a message.")
         return
 
-    keyword = ctx.args[0].strip().lower()
+    keyword = args[0].strip().lower()
     reply = msg.reply_to_message
 
     if not reply:
@@ -152,11 +163,12 @@ async def unfilter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("❌ Only admins can remove filters.")
         return
 
-    if not ctx.args:
+    args = _get_args(update, ctx)
+    if not args:
         await msg.reply_text("⚠️ Usage: <code>/unfilter keyword</code>")
         return
 
-    keyword = ctx.args[0].strip().lower()
+    keyword = args[0].strip().lower()
     deleted = await dbase.filter_delete(chat.id, keyword)
     if deleted:
         await msg.reply_text(f"🗑 Filter <b>{keyword}</b> removed.")
@@ -203,11 +215,9 @@ async def trigger_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not text:
         return
 
-    # ignore commands (starting with / or .)
     if text.startswith(("/", ".")):
         return
 
-    # collect unique lowercase words
     words = set(re.findall(r"\b\w+\b", text.lower()))
     if not words:
         return
@@ -238,22 +248,34 @@ async def trigger_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             log.error("filter send failed [%s/%s]: %s", chat.id, word, e)
 
-        break  # only fire one filter per message
+        break
 
 
 # ───────────────────────── register ─────────────────────────
 def register(app: Application):
-    app.add_handler(CommandHandler(["filter"], filter_cmd))
-    app.add_handler(CommandHandler(["unfilter"], unfilter_cmd))
-    app.add_handler(CommandHandler(["filters"], list_filters_cmd))
-    app.add_handler(CommandHandler(["stop"], stop_filters_cmd))
+    # Support both / and . prefixes using MessageHandler + Regex
+    app.add_handler(MessageHandler(
+        tg_filters.Regex(r"^[./]filter(?:\s+(.+))?$") & tg_filters.ChatType.GROUPS,
+        filter_cmd
+    ), group=0)
+    
+    app.add_handler(MessageHandler(
+        tg_filters.Regex(r"^[./]unfilter(?:\s+(.+))?$") & tg_filters.ChatType.GROUPS,
+        unfilter_cmd
+    ), group=0)
+    
+    app.add_handler(MessageHandler(
+        tg_filters.Regex(r"^[./]filters$") & tg_filters.ChatType.GROUPS,
+        list_filters_cmd
+    ), group=0)
+    
+    app.add_handler(MessageHandler(
+        tg_filters.Regex(r"^[./]stop$") & tg_filters.ChatType.GROUPS,
+        stop_filters_cmd
+    ), group=0)
 
-    # Trigger filters for any text/caption in groups (group=1 so it runs
-    # after commands handled in group=0).
-    app.add_handler(
-        MessageHandler(
-            (tg_filters.TEXT | tg_filters.CAPTION) & tg_filters.ChatType.GROUPS,
-            trigger_filter,
-        ),
-        group=1,
-  )
+    # Trigger filter on any text or caption in groups (low priority)
+    app.add_handler(MessageHandler(
+        (tg_filters.TEXT | tg_filters.CAPTION) & tg_filters.ChatType.GROUPS,
+        trigger_filter
+    ), group=1)
