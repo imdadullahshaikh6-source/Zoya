@@ -78,6 +78,12 @@ def _guess_gender(name: str) -> str:
     return "unknown"
 
 
+def _html_mention(user_id: int, name: str) -> str:
+    """Build a clickable Telegram user mention."""
+    safe_name = esc(name or "Someone")
+    return f'<a href="tg://user?id={user_id}">{safe_name}</a>'
+
+
 # ───────── profile photo fetcher ─────────
 async def _fetch_profile_photo(ctx, user_id: int):
     """Fetch user's real Telegram profile photo as PIL Image. Returns None if none."""
@@ -85,7 +91,6 @@ async def _fetch_profile_photo(ctx, user_id: int):
         photos = await ctx.bot.get_user_profile_photos(user_id, limit=1)
         if photos.total_count == 0:
             return None
-        # largest size
         file_id = photos.photos[0][-1].file_id
         tg_file = await ctx.bot.get_file(file_id)
         bio = io.BytesIO()
@@ -98,10 +103,9 @@ async def _fetch_profile_photo(ctx, user_id: int):
 
 
 def _placeholder_avatar(name: str, size: int) -> Image.Image:
-    """Pretty fallback: gradient circle + big initial."""
-    # pick color from name hash
-    hue = hash(name or "x") % 360
+    """Pretty fallback: colored circle + big initial."""
     import colorsys
+    hue = hash(name or "x") % 360
     r, g, b = colorsys.hsv_to_rgb(hue / 360, 0.65, 0.85)
     color = (int(r * 255), int(g * 255), int(b * 255))
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
@@ -123,7 +127,6 @@ async def _get_avatar(ctx, user_id: int, name: str, size: int) -> Image.Image:
     img = await _fetch_profile_photo(ctx, user_id)
     if img is None:
         return _placeholder_avatar(name, size)
-    # center-crop to square
     w, h = img.size
     side = min(w, h)
     img = img.crop(((w - side) // 2, (h - side) // 2, (w + side) // 2, (h + side) // 2))
@@ -133,6 +136,16 @@ async def _get_avatar(ctx, user_id: int, name: str, size: int) -> Image.Image:
 # ───────── db helpers ─────────
 async def _get_waifu(chat_id, user_id):
     return await dbase.db.waifu.find_one({"chat_id": chat_id, "user_id": user_id})
+
+
+async def _find_mutual_waifu(chat_id, target_id):
+    """Find someone whose waifu is `target_id` (within 24h)."""
+    cutoff = time.time() - WAIFU_24H
+    return await dbase.db.waifu.find_one({
+        "chat_id": chat_id,
+        "target_id": target_id,
+        "assigned_at": {"$gt": cutoff},
+    })
 
 
 async def _save_waifu(chat_id, user_id, target_id):
@@ -163,6 +176,9 @@ async def waifu_cmd(update, ctx):
         return
 
     target_id = None
+    is_mutual = False
+
+    # 1. User's existing waifu (within 24h)
     existing = await _get_waifu(chat.id, user.id)
     if existing and (time.time() - existing.get("assigned_at", 0)) < WAIFU_24H:
         try:
@@ -171,6 +187,20 @@ async def waifu_cmd(update, ctx):
         except Exception:
             target_id = None
 
+    # 2. Mutual check: someone already has THIS user as their waifu?
+    if not target_id:
+        mutual = await _find_mutual_waifu(chat.id, user.id)
+        if mutual and mutual["user_id"] != user.id:
+            try:
+                await chat.get_member(mutual["user_id"])
+                target_id = mutual["user_id"]
+                is_mutual = True
+                # lock it in: save user's waifu as mutual partner
+                await _save_waifu(chat.id, user.id, target_id)
+            except Exception:
+                target_id = None
+
+    # 3. Fresh assignment
     if not target_id:
         members = await dbase.random_members(chat.id, 30)
         members = [m for m in members if m.get("user_id") and m["user_id"] != user.id]
@@ -195,9 +225,14 @@ async def waifu_cmd(update, ctx):
     target_name = target_member.get("name", "Someone")
 
     reply_params = ReplyParameters(message_id=msg.message_id, allow_sending_without_reply=True)
-    cap = q(T("<b>💖 {name} is your waifu for today!</b>", name=esc(target_name)))
+    mention_html = _html_mention(target_id, target_name)
 
-    # ✅ Try direct send with file_id first (fastest & cleanest)
+    if is_mutual:
+        cap = q(T("<b>💖 It's mutual! {name} is your waifu for today!</b>", name=mention_html))
+    else:
+        cap = q(T("<b>💖 {name} is your waifu for today!</b>", name=mention_html))
+
+    # Try direct file_id send (fastest)
     try:
         photos = await ctx.bot.get_user_profile_photos(target_id, limit=1)
         if photos.total_count > 0:
@@ -208,7 +243,7 @@ async def waifu_cmd(update, ctx):
     except Exception as e:
         log.warning("send via file_id failed: %s", e)
 
-    # Fallback: build a nicer placeholder
+    # Fallback placeholder
     img = await _get_avatar(ctx, target_id, target_name, 512)
     out = io.BytesIO()
     out.name = "waifu.png"
@@ -255,7 +290,6 @@ def _font(bold, size):
 
 
 def _renderable(text: str) -> str:
-    """Strip non-renderable chars for the font."""
     return "".join(c for c in (text or "") if c.isprintable())
 
 
@@ -355,7 +389,11 @@ async def couple_cmd(update, ctx):
         await say(ctx, chat.id, T("couldn't build that image:") + f" {esc(e)}", reply_to=msg.message_id)
         return
 
-    cap = q(T("<b>💞 today's couple</b>\n{a} + {b}", a=esc(a_name), b=esc(b_name)))
+    # ✅ Clickable mentions for both
+    a_mention = _html_mention(a_id, a_name)
+    b_mention = _html_mention(b_id, b_name)
+    cap = q(T("<b>💞 today's couple</b>\n{a} + {b}", a=a_mention, b=b_mention))
+
     await ctx.bot.send_photo(
         chat.id, photo, caption=cap, parse_mode=ParseMode.HTML,
         reply_parameters=ReplyParameters(message_id=msg.message_id, allow_sending_without_reply=True),
