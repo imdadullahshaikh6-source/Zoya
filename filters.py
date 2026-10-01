@@ -12,6 +12,7 @@ from telegram.ext import (
 )
 
 import database as dbase
+from common import parse_buttons  # <-- Welcome wala same function import kiya!
 
 log = logging.getLogger("filters")
 
@@ -37,49 +38,6 @@ HELP_TXT = (
     "Supports Native Telegram buttons, <code>[Text ~ URL]</code>, and Rose-style <code>[Text](buttonurl:URL:color)</code>.\n"
     "Colors: <code>:danger</code> (Red), <code>:success</code> (Green), <code>:primary</code> (Blue)"
 )
-
-
-# Regex for [Text ~ URL]
-_BTN_RE = re.compile(r"\[([^\[\]~]+?)\s*~\s*([^\[\]]+?)\]")
-# Regex for [Text](buttonurl:URL:color) - Rose style with optional color
-_ROSE_BTN_RE = re.compile(r"\[([^\[\]]+?)\]\(buttonurl:(https?://[^\)]+?)(?::(danger|success|primary))?\)")
-
-
-def _parse_buttons(text: str | None):
-    """Extract custom [Text ~ URL] AND Rose [Text](buttonurl:URL:color) buttons."""
-    if not text:
-        return text or "", None
-
-    rows = []
-
-    # 1. Parse Rose-style buttons [Text](buttonurl:URL:color)
-    def _repl_rose(m):
-        label = m.group(1).strip()
-        url = m.group(2).strip()
-        color = m.group(3) # danger, success, primary (or None)
-        
-        btn = {"text": label, "url": url}
-        if color:
-            btn["style"] = color
-            
-        rows.append([btn])
-        return "" # Remove from text
-
-    # 2. Parse Custom-style buttons [Text ~ URL]
-    def _repl_custom(m):
-        label = m.group(1).strip()
-        url = m.group(2).strip()
-        if not (url.startswith("http://") or url.startswith("https://") or url.startswith("tg://")):
-            return m.group(0)
-        rows.append([{"text": label, "url": url}])
-        return ""
-
-    # Apply Rose regex first
-    cleaned = _ROSE_BTN_RE.sub(_repl_rose, text)
-    # Then apply Custom regex
-    cleaned = _BTN_RE.sub(_repl_custom, cleaned).strip()
-    
-    return cleaned, (rows or None)
 
 
 def _extract_native_buttons(reply_msg):
@@ -114,7 +72,6 @@ def _kb_from_stored(rows):
     for row in rows:
         kb_row = []
         for b in row:
-            # SAFE FALLBACK: Try without style first, then with style
             try:
                 if "style" in b and b["style"]:
                     btn = InlineKeyboardButton(text=b["text"], url=b["url"], style=b["style"])
@@ -177,33 +134,23 @@ async def filter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     native_btns = _extract_native_buttons(reply)
 
     if reply.text:
-        clean, btns = _parse_buttons(reply.text_html)
-        final_btns = (native_btns or []) + (btns or [])
-        data.update(type="text", content=clean, buttons=final_btns or None)
+        # Ab raw HTML save hoga, parse_buttons common.py se load hoga runtime pe!
+        data.update(type="text", content=reply.text_html, buttons=native_btns)
         
     elif reply.sticker:
-        final_btns = (native_btns or [])
-        data.update(type="sticker", content=reply.sticker.file_id, buttons=final_btns or None)
+        data.update(type="sticker", content=reply.sticker.file_id, buttons=native_btns)
         
     elif reply.photo:
-        clean, btns = _parse_buttons(reply.caption_html)
-        final_btns = (native_btns or []) + (btns or [])
-        data.update(type="photo", content=reply.photo[-1].file_id, caption=clean, buttons=final_btns or None)
+        data.update(type="photo", content=reply.photo[-1].file_id, caption=reply.caption_html or "", buttons=native_btns)
         
     elif reply.video:
-        clean, btns = _parse_buttons(reply.caption_html)
-        final_btns = (native_btns or []) + (btns or [])
-        data.update(type="video", content=reply.video.file_id, caption=clean, buttons=final_btns or None)
+        data.update(type="video", content=reply.video.file_id, caption=reply.caption_html or "", buttons=native_btns)
         
     elif reply.animation:
-        clean, btns = _parse_buttons(reply.caption_html)
-        final_btns = (native_btns or []) + (btns or [])
-        data.update(type="animation", content=reply.animation.file_id, caption=clean, buttons=final_btns or None)
+        data.update(type="animation", content=reply.animation.file_id, caption=reply.caption_html or "", buttons=native_btns)
         
     elif reply.audio:
-        clean, btns = _parse_buttons(reply.caption_html)
-        final_btns = (native_btns or []) + (btns or [])
-        data.update(type="audio", content=reply.audio.file_id, caption=clean, buttons=final_btns or None)
+        data.update(type="audio", content=reply.audio.file_id, caption=reply.caption_html or "", buttons=native_btns)
         
     else:
         await msg.reply_text("⚠️ Unsupported message type.")
@@ -285,24 +232,41 @@ async def trigger_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not row:
             continue
 
-        kb = _kb_from_stored(row.get("buttons"))
         ftype = row.get("type", "text")
         content = row.get("content", "")
         caption = row.get("caption", "")
 
+        # Yahan common.py wala parse_buttons use hoga!
+        custom_kb = None
+        if ftype == "text" and content:
+            content, custom_kb = parse_buttons(content)
+        elif caption:
+            caption, custom_kb = parse_buttons(caption)
+            
+        # Combine native buttons with custom colour buttons
+        final_kb = custom_kb
+        saved_btns = row.get("buttons")
+        if saved_btns:
+            n_kb = _kb_from_stored(saved_btns)
+            if n_kb:
+                if final_kb and final_kb.inline_keyboard:
+                    final_kb = InlineKeyboardMarkup(final_kb.inline_keyboard + n_kb.inline_keyboard)
+                else:
+                    final_kb = n_kb
+
         try:
             if ftype == "text":
-                await msg.reply_text(content or "", reply_markup=kb, parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id)
+                await msg.reply_text(content or "", reply_markup=final_kb, parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id)
             elif ftype == "sticker":
-                await msg.reply_sticker(content, reply_markup=kb, reply_to_message_id=msg.message_id)
+                await msg.reply_sticker(content, reply_markup=final_kb, reply_to_message_id=msg.message_id)
             elif ftype == "photo":
-                await msg.reply_photo(content, caption=caption or None, reply_markup=kb, parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id)
+                await msg.reply_photo(content, caption=caption or None, reply_markup=final_kb, parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id)
             elif ftype == "video":
-                await msg.reply_video(content, caption=caption or None, reply_markup=kb, parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id)
+                await msg.reply_video(content, caption=caption or None, reply_markup=final_kb, parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id)
             elif ftype == "animation":
-                await msg.reply_animation(content, caption=caption or None, reply_markup=kb, parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id)
+                await msg.reply_animation(content, caption=caption or None, reply_markup=final_kb, parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id)
             elif ftype == "audio":
-                await msg.reply_audio(content, caption=caption or None, reply_markup=kb, parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id)
+                await msg.reply_audio(content, caption=caption or None, reply_markup=final_kb, parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id)
         except Exception as e:
             log.error("filter send failed [%s/%s]: %s", chat.id, word, e)
             try:
@@ -338,3 +302,4 @@ def register(app: Application):
         (tg_filters.TEXT | tg_filters.CAPTION) & tg_filters.ChatType.GROUPS,
         trigger_filter
     ), group=-2)
+    
