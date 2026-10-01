@@ -25,80 +25,81 @@ COMMANDS = [
 
 HELP_TXT = (
     "<b>🔍 Filters</b>\n\n"
-    "Filters send an automatic reply whenever a keyword appears in chat.\n\n"
     "<b>Commands</b>\n"
-    "• <code>/filter &lt;keyword&gt;</code> — reply to any message to set it\n"
+    "• <code>/filter &lt;keyword&gt;</code> — reply to a message to set it\n"
     "• <code>/unfilter &lt;keyword&gt;</code> — delete one filter\n"
-    "• <code>/filters</code> — list all filters\n"
-    "• <code>/stop</code> — delete every filter\n\n"
-    "<b>Inline buttons</b>\n"
-    "• Custom: <code>[Text ~ URL]</code>\n"
-    "• Rose-style: <code>[Text](buttonurl:URL)</code>\n"
-    "• With color: <code>[Text](buttonurl:URL:success)</code>\n"
-    "Colors: <code>:danger</code> (Red), <code>:success</code> (Green), <code>:primary</code> (Blue)"
+    "• <code>/filters</code> — list filters\n"
+    "• <code>/stop</code> — delete all filters\n\n"
+    "<b>Button formats supported</b>\n"
+    "• <code>[Text ~ URL]</code>\n"
+    "• <code>[Text](buttonurl:URL)</code>\n"
+    "• <code>[Text](buttonurl:URL:success)</code> — colors: danger, success, primary"
 )
 
-# ✅ FIX: Yeh regex ab 'buttonurl:' ke bina bhi kaam karega (optional banaya hai)
-_MD_RE = re.compile(r'\[([^\[\]]+?)\]\s*\(\s*(?:buttonurl:)?\s*([^\)]+?)\s*\)')
+# Simplified regex — direct raw text pe chalega (HTML-free)
+_BTN_URL_RE = re.compile(r'\[([^\[\]]+?)\]\s*\(\s*(?:buttonurl:)?\s*([^\)]+?)\s*\)')
 _TILDE_RE = re.compile(r'\[([^\[\]~]+?)\s*~\s*([^\[\]]+?)\]')
 
 
 def _clean_url(raw: str):
-    """Strip HTML tags, unescape entities, extract optional color suffix."""
-    # HTML tags hata do (agar Telegram ne <a> tag lagaya ho)
+    """Return (clean_url, color_or_None) from a messy URL chunk."""
+    # Strip HTML tags
     cleaned = re.sub(r'<[^>]+>', '', raw or "")
+    # Unescape HTML entities
     cleaned = html.unescape(cleaned).strip()
-
-    # Agar 'buttonurl:' bacha ho toh hata do
+    # Strip any leading buttonurl:
     if cleaned.lower().startswith("buttonurl:"):
         cleaned = cleaned[len("buttonurl:"):].strip()
+    # Strip trailing noise (spaces, newlines, invisible chars)
+    cleaned = cleaned.strip().rstrip('.,;:')
 
-    # Color suffix nikaalo
+    # Extract color suffix via regex (more robust than endswith)
     color = None
-    for c in ("danger", "success", "primary"):
-        if cleaned.endswith(f":{c}"):
-            color = c
-            cleaned = cleaned[:-len(f":{c}")]
-            break
+    m = re.search(r':(danger|success|primary)\s*$', cleaned, re.IGNORECASE)
+    if m:
+        color = m.group(1).lower()
+        cleaned = cleaned[:m.start()].strip()
 
-    return cleaned.strip(), color
+    return cleaned, color
 
 
 def _parse_buttons(text: str | None):
-    """Extract Rose-style [Text](buttonurl:URL:color) and custom [Text ~ URL]."""
+    """Extract buttons from raw text. Returns (clean_text, buttons_or_None)."""
     if not text:
         return text or "", None
 
+    log.info("🔍 RAW INPUT: %r", text)
+
     rows = []
 
+    def _add(label, raw_url):
+        url, color = _clean_url(raw_url)
+        log.info("   └─ label=%r | url=%r | color=%r", label, url, color)
+        if not url.startswith(("http://", "https://", "tg://")):
+            log.info("   └─ ❌ Invalid URL, skipping")
+            return False
+        btn = {"text": label.strip(), "url": url}
+        if color:
+            btn["style"] = color
+        rows.append([btn])
+        return True
+
+    # 1. Match [Text](buttonurl:URL) or [Text](URL)
     def _repl_md(m):
-        label = m.group(1).strip()
-        url, color = _clean_url(m.group(2))
-        if not url.startswith(("http://", "https://", "tg://")):
-            return m.group(0)  # Valid URL nahi hai toh chhod do
-        btn = {"text": label, "url": url}
-        if color:
-            btn["style"] = color
-        log.info("🎨 Rose button parsed | label=%r url=%s color=%s", label, url, color)
-        rows.append([btn])
-        return ""  # Text se hata do
+        return "" if _add(m.group(1), m.group(2)) else m.group(0)
 
+    cleaned = _BTN_URL_RE.sub(_repl_md, text)
+
+    # 2. Match [Text ~ URL]
     def _repl_tilde(m):
-        label = m.group(1).strip()
-        url, color = _clean_url(m.group(2))
-        if not url.startswith(("http://", "https://", "tg://")):
-            return m.group(0)
-        btn = {"text": label, "url": url}
-        if color:
-            btn["style"] = color
-        log.info("🔗 Tilde button parsed | label=%r url=%s color=%s", label, url, color)
-        rows.append([btn])
-        return ""
+        return "" if _add(m.group(1), m.group(2)) else m.group(0)
 
-    cleaned = _MD_RE.sub(_repl_md, text)
-    cleaned = _TILDE_RE.sub(_repl_tilde, cleaned).strip()
+    cleaned = _TILDE_RE.sub(_repl_tilde, cleaned)
 
-    log.info("✅ Total %d custom button(s) parsed", len(rows))
+    # Strip empty lines
+    cleaned = "\n".join(line for line in cleaned.splitlines() if line.strip()).strip()
+
+    log.info("✅ Parsed %d button(s) | cleaned text: %r", len(rows), cleaned)
     return cleaned, (rows or None)
 
 
@@ -180,40 +181,50 @@ async def filter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("⚠️ Reply to the message you want to send as the filter.")
         return
 
+    log.info("=" * 50)
+    log.info("📝 FILTER '%s' DEBUG", keyword)
+    log.info("reply.text        = %r", reply.text)
+    log.info("reply.caption     = %r", reply.caption)
+    log.info("reply.text_html   = %r", reply.text_html)
+    log.info("reply.caption_html= %r", reply.caption_html)
+    log.info("reply.reply_markup= %r", reply.reply_markup)
+    log.info("=" * 50)
+
     data = {"type": "text", "content": "", "caption": "", "buttons": None,
             "set_by": update.effective_user.id}
     native_btns = _extract_native_buttons(reply)
 
+    # Use raw text (reply.text / reply.caption) NOT _html versions
     if reply.text:
-        clean, btns = _parse_buttons(reply.text_html)
-        # ✅ FIX: Agar custom text button mila hai, toh native buttons ko ignore karo
+        clean, btns = _parse_buttons(reply.text)
+        # ✅ Agar custom buttons mile toh native IGNORE karo
         final_btns = btns if btns else native_btns
         data.update(type="text", content=clean, buttons=final_btns)
     elif reply.sticker:
         data.update(type="sticker", content=reply.sticker.file_id, buttons=native_btns)
     elif reply.photo:
-        clean, btns = _parse_buttons(reply.caption_html)
+        clean, btns = _parse_buttons(reply.caption or "")
         final_btns = btns if btns else native_btns
         data.update(type="photo", content=reply.photo[-1].file_id, caption=clean, buttons=final_btns)
     elif reply.video:
-        clean, btns = _parse_buttons(reply.caption_html)
+        clean, btns = _parse_buttons(reply.caption or "")
         final_btns = btns if btns else native_btns
         data.update(type="video", content=reply.video.file_id, caption=clean, buttons=final_btns)
     elif reply.animation:
-        clean, btns = _parse_buttons(reply.caption_html)
+        clean, btns = _parse_buttons(reply.caption or "")
         final_btns = btns if btns else native_btns
         data.update(type="animation", content=reply.animation.file_id, caption=clean, buttons=final_btns)
     elif reply.audio:
-        clean, btns = _parse_buttons(reply.caption_html)
+        clean, btns = _parse_buttons(reply.caption or "")
         final_btns = btns if btns else native_btns
         data.update(type="audio", content=reply.audio.file_id, caption=clean, buttons=final_btns)
     else:
         await msg.reply_text("⚠️ Unsupported message type.")
         return
 
-    log.info("💾 Saving filter %r | buttons=%s", keyword, data["buttons"])
+    log.info("💾 FINAL BUTTONS: %s", data["buttons"])
     await dbase.filter_set(chat.id, keyword, data)
-    await msg.reply_text(f"✅ Filter <b>{keyword}</b> saved with formatting and buttons.")
+    await msg.reply_text(f"✅ Filter <b>{keyword}</b> saved.")
 
 
 async def unfilter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -229,17 +240,17 @@ async def unfilter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if await dbase.filter_delete(chat.id, keyword):
         await msg.reply_text(f"🗑 Filter <b>{keyword}</b> removed.")
     else:
-        await msg.reply_text(f"❓ No filter named <b>{keyword}</b> in this chat.")
+        await msg.reply_text(f"❓ No filter named <b>{keyword}</b>.")
 
 
 async def list_filters_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg, chat = update.effective_message, update.effective_chat
     rows = await dbase.filter_list(chat.id)
     if not rows:
-        await msg.reply_text("No filters set in this chat yet.")
+        await msg.reply_text("No filters set.")
         return
     lines = [f"• <code>{r['keyword']}</code>  <i>({r.get('type', 'text')})</i>" for r in rows]
-    await msg.reply_text(f"<b>🔍 Filters in this chat — {len(rows)}</b>\n\n" + "\n".join(lines))
+    await msg.reply_text(f"<b>🔍 Filters — {len(rows)}</b>\n\n" + "\n".join(lines))
 
 
 async def stop_filters_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -248,7 +259,7 @@ async def stop_filters_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("❌ Only admins can wipe filters.")
         return
     n = await dbase.filter_delete_all(chat.id)
-    await msg.reply_text(f"🗑 Deleted <b>{n}</b> filter(s) from this chat." if n else "No filters to delete.")
+    await msg.reply_text(f"🗑 Deleted {n} filter(s)." if n else "No filters to delete.")
 
 
 async def trigger_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -267,6 +278,7 @@ async def trigger_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not row:
             continue
 
+        log.info("🎯 Trigger: %r | buttons=%s", word, row.get("buttons"))
         kb = _kb_from_stored(row.get("buttons"))
         ftype = row.get("type", "text")
         content = row.get("content", "")
