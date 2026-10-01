@@ -15,6 +15,7 @@ import admin
 import afk
 import ban
 import database as dbase
+import filters as bot_filters
 import fun
 import sticker
 import welcome
@@ -47,7 +48,9 @@ PAGES = {
     "afk": ("💤 AFK", afk.HELP_TXT),
     "mod": ("🛡 Moderation", ban.HELP_TXT),
     "extra": ("🎁 Extra", sticker.HELP_TXT + "\n\n" + fun.HELP_TXT),
+    "filters": ("🔍 Filters", bot_filters.HELP_TXT),
 }
+
 ALIASES = {
     "welcome": "greet", "greetings": "greet", "greet": "greet",
     "admin": "admin", "promote": "admin",
@@ -55,6 +58,7 @@ ALIASES = {
     "mod": "mod", "moderation": "mod", "ban": "mod", "mute": "mod", "warn": "mod", "kick": "mod",
     "extra": "extra", "sticker": "extra", "stickers": "extra", "q": "extra",
     "kang": "extra", "waifu": "extra", "couple": "extra", "fun": "extra",
+    "filter": "filters", "filters": "filters", "f": "filters",
 }
 
 
@@ -154,7 +158,7 @@ async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         text, kb = section_page(key)
     else:
         text, kb = main_page()
-    await ctx.bot.send_message(chat.id, f"<blockquote>{text}</blockquote>", parse_Mode=ParseMode.HTML, reply_markup=kb)
+    await ctx.bot.send_message(chat.id, f"<blockquote>{text}</blockquote>", parse_mode=ParseMode.HTML, reply_markup=kb)
 
 
 async def help_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -208,7 +212,7 @@ async def post_init(app: Application):
     await dbase.init(MONGO_URI, DB_NAME)
     app.bot_data["me"] = await app.bot.get_me()
     cmds = [("start", "Start the bot"), ("help", "Show commands")]
-    for mod in (welcome, admin, afk, ban, sticker, fun):
+    for mod in (welcome, admin, afk, ban, sticker, fun, bot_filters):
         cmds += mod.COMMANDS
     await app.bot.set_my_commands(cmds)
     log.info("Started as @%s", app.bot_data["me"].username)
@@ -235,6 +239,7 @@ def main():
     ban.register(app)
     sticker.register(app)
     fun.register(app)
+    bot_filters.register(app)
 
     app.add_error_handler(on_error)
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
@@ -242,4 +247,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
