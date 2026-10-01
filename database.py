@@ -19,7 +19,7 @@ async def init(uri: str, name: str):
     await _db.moderation.create_index([("chat_id", 1), ("user_id", 1)])
     await _db.warns.create_index([("chat_id", 1), ("user_id", 1)])
     await _db.members.create_index("chat_id")
-    await _db.filters.create_index([("chat_id", 1), ("keyword", 1)], unique=True)
+    await _db.filters.create_index([("chat_id", 1), ("keyword", 1)], unique=True)  # <-- Added
     log.info("MongoDB connected (db: %s)", name)
 
 
@@ -156,7 +156,7 @@ async def filter_set(chat_id: int, keyword: str, data: dict):
         "type": data.get("type", "text"),
         "content": data.get("content", ""),
         "caption": data.get("caption", ""),
-        "buttons": data.get("buttons"),  # list of rows of {text, url} dicts
+        "buttons": data.get("buttons"),
         "set_by": data.get("set_by"),
         "since": time.time(),
     }
@@ -192,4 +192,3 @@ async def filter_list(chat_id: int):
 
 async def filter_count(chat_id: int) -> int:
     return await _db.filters.count_documents({"chat_id": chat_id})
-            
