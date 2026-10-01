@@ -40,6 +40,14 @@ _BTN_URL_RE = re.compile(r'\[([^\[\]]+?)\]\s*\(\s*(?:buttonurl:)?\s*([^\)]+?)\s*
 _TILDE_RE = re.compile(r'\[([^\[\]~]+?)\s*~\s*([^\[\]]+?)\]')
 
 
+def _sanitize_caption(text: str) -> str:
+    """Escape < that aren't starting valid HTML tags (e.g. </3 → &lt;/3)."""
+    if not text:
+        return text
+    # < not followed by optional '/' then a letter → escape it
+    return re.sub(r'<(?!\/?[a-zA-Z])', '&lt;', text)
+
+
 def _clean_url(raw: str):
     cleaned = re.sub(r'<[^>]+>', '', raw or "")
     cleaned = html.unescape(cleaned).strip()
@@ -87,7 +95,7 @@ def _parse_buttons(text: str | None):
     cleaned = _TILDE_RE.sub(_repl_tilde, cleaned)
     cleaned = "\n".join(line for line in cleaned.splitlines() if line.strip()).strip()
 
-    log.info("✅ Parsed %d button(s) | cleaned text: %r", len(rows), cleaned)
+    log.info("✅ Parsed %d button(s)", len(rows))
     return cleaned, (rows or None)
 
 
@@ -148,16 +156,14 @@ async def _is_admin(update: Update) -> bool:
         return False
 
 
-# ✅ FIXED _safe_reply — explicit parse_mode=None override default
 async def _safe_reply(func, *args, **kwargs):
-    """Try HTML parse mode; on failure, force plain text (None overrides default)."""
+    """Try HTML parse mode; on failure, force plain text."""
     try:
         return await func(*args, parse_mode=ParseMode.HTML, **kwargs)
     except Exception as e:
         err = str(e).lower()
         if "parse" in err or "entities" in err or "tag" in err:
             log.warning("⚠️ HTML parse failed, retrying as plain text: %s", e)
-            # ✅ Explicit parse_mode=None — ye default ko override karega
             return await func(*args, parse_mode=None, **kwargs)
         raise
 
@@ -272,8 +278,10 @@ async def trigger_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         log.info("🎯 Trigger: %r | buttons=%s", word, row.get("buttons"))
         kb = _kb_from_stored(row.get("buttons"))
         ftype = row.get("type", "text")
-        content = row.get("content", "")
-        caption = row.get("caption", "")
+
+        # ✅ SANITIZE caption/content so </3 jaisi cheezein HTML ko break na karein
+        content = _sanitize_caption(row.get("content", ""))
+        caption = _sanitize_caption(row.get("caption", ""))
 
         try:
             if ftype == "text":
