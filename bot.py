@@ -1,5 +1,6 @@
 """Entry point: creates the bot, wires up every plugin, and handles the
 DM /start experience (reaction + photo + buttons)."""
+import asyncio
 import logging
 import os
 
@@ -20,9 +21,6 @@ import fun
 import ping
 import sticker
 import welcome
-import asyncio
-import uvloop
-asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from common import B, T, log, mention, say, sc
 
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(name)s | %(message)s", level=logging.INFO)
@@ -212,7 +210,6 @@ async def post_init(app: Application):
     await dbase.init(MONGO_URI, DB_NAME)
     app.bot_data["me"] = await app.bot.get_me()
     cmds = [("start", "Start the bot"), ("help", "Show commands")]
-    # Added 'ping' to the loop
     for mod in (welcome, admin, afk, ban, sticker, fun, bot_filters, ping):
         cmds += mod.COMMANDS
     await app.bot.set_my_commands(cmds)
@@ -220,6 +217,13 @@ async def post_init(app: Application):
 
 
 def main():
+    # ✅ FIX: Python 3.11 ke liye event loop manually set karo
+    # uvloop hata diya kyunki wo PTB ke saath crash karta hai
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
     app = (
         Application.builder()
         .token(BOT_TOKEN)
@@ -241,7 +245,7 @@ def main():
     sticker.register(app)
     fun.register(app)
     bot_filters.register(app)
-    ping.register(app)  # <-- Ping registered here
+    ping.register(app)
 
     app.add_error_handler(on_error)
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
