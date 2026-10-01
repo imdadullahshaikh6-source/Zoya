@@ -4,7 +4,7 @@ import re
 import time
 
 import psutil
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, ContextTypes, MessageHandler, filters as tg_filters
 
@@ -16,8 +16,19 @@ log = logging.getLogger("ping")
 OWNER_ID = 8373739674
 START_TIME = time.time()
 PING_IMAGE = "https://graph.org/file/d3a2c17942e606f4ec811-9c0373fa8bb10f4448.jpg"
+SUPPORT_URL = "https://t.me/REDFLAGSGCS"
 
-# Initialize CPU counter
+# Support Button (with fallback for older PTB versions)
+try:
+    SUPPORT_BUTTON = InlineKeyboardMarkup([
+        [InlineKeyboardButton(text="Support ✅", url=SUPPORT_URL, style="primary")]
+    ])
+except TypeError:
+    # Fallback if PTB version doesn't support button colors
+    SUPPORT_BUTTON = InlineKeyboardMarkup([
+        [InlineKeyboardButton(text="Support ✅", url=SUPPORT_URL)]
+    ])
+
 psutil.cpu_percent(interval=None)
 
 COMMANDS = [
@@ -60,7 +71,7 @@ async def ping_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     cpu = psutil.cpu_percent(interval=None)
     ram = psutil.virtual_memory().percent
 
-    # MongoDB stats (Fixed the truth value testing bug)
+    # MongoDB stats
     mongo_line = "<b>🗄 MongoDB:</b> N/A"
     try:
         db = getattr(dbase, "db", None)
@@ -106,12 +117,18 @@ async def ping_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             photo=PING_IMAGE,
             caption=caption,
             parse_mode=ParseMode.HTML,
+            reply_markup=SUPPORT_BUTTON,
             reply_to_message_id=msg.message_id,
         )
     except Exception as e:
         log.error("Failed to send ping photo: %s", e)
         try:
-            await msg.reply_text(caption, parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id)
+            await msg.reply_text(
+                caption, 
+                parse_mode=ParseMode.HTML, 
+                reply_markup=SUPPORT_BUTTON, 
+                reply_to_message_id=msg.message_id
+            )
         except Exception as fallback_err:
             log.error("Fallback text also failed: %s", fallback_err)
 
