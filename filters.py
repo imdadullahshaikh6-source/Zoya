@@ -1,5 +1,4 @@
-"""Filters module — Rose-style auto replies (Rose buttons + colors)."""
-import html
+"""Filters module — simple auto-replies with button support."""
 import logging
 import re
 
@@ -30,76 +29,35 @@ HELP_TXT = (
     "• <code>/unfilter &lt;keyword&gt;</code> — delete one filter\n"
     "• <code>/filters</code> — list filters\n"
     "• <code>/stop</code> — delete all filters\n\n"
-    "<b>Button formats supported</b>\n"
-    "• <code>[Text ~ URL]</code>\n"
-    "• <code>[Text](buttonurl:URL)</code>\n"
-    "• <code>[Text](buttonurl:URL:success)</code> — colors: danger, success, primary"
+    "<b>Button format</b>\n"
+    "<code>[Text ~ URL]</code>"
 )
 
-_BTN_URL_RE = re.compile(r'\[([^\[\]]+?)\]\s*\(\s*(?:buttonurl:)?\s*([^\)]+?)\s*\)')
+# Custom [Text ~ URL]
 _TILDE_RE = re.compile(r'\[([^\[\]~]+?)\s*~\s*([^\[\]]+?)\]')
 
 
-def _sanitize_caption(text: str) -> str:
-    """Escape < that aren't starting valid HTML tags (e.g. </3 → &lt;/3)."""
-    if not text:
-        return text
-    # < not followed by optional '/' then a letter → escape it
-    return re.sub(r'<(?!\/?[a-zA-Z])', '&lt;', text)
-
-
-def _clean_url(raw: str):
-    cleaned = re.sub(r'<[^>]+>', '', raw or "")
-    cleaned = html.unescape(cleaned).strip()
-    if cleaned.lower().startswith("buttonurl:"):
-        cleaned = cleaned[len("buttonurl:"):].strip()
-    cleaned = cleaned.strip().rstrip('.,;:')
-
-    color = None
-    m = re.search(r':(danger|success|primary)\s*$', cleaned, re.IGNORECASE)
-    if m:
-        color = m.group(1).lower()
-        cleaned = cleaned[:m.start()].strip()
-
-    return cleaned, color
-
-
 def _parse_buttons(text: str | None):
+    """Extract [Text ~ URL] buttons."""
     if not text:
         return text or "", None
 
-    log.info("🔍 RAW INPUT: %r", text)
-
     rows = []
 
-    def _add(label, raw_url):
-        url, color = _clean_url(raw_url)
-        log.info("   └─ label=%r | url=%r | color=%r", label, url, color)
+    def _repl(m):
+        label = m.group(1).strip()
+        url = m.group(2).strip()
         if not url.startswith(("http://", "https://", "tg://")):
-            log.info("   └─ ❌ Invalid URL, skipping")
-            return False
-        btn = {"text": label.strip(), "url": url}
-        if color:
-            btn["style"] = color
-        rows.append([btn])
-        return True
+            return m.group(0)
+        rows.append([{"text": label, "url": url}])
+        return ""
 
-    def _repl_md(m):
-        return "" if _add(m.group(1), m.group(2)) else m.group(0)
-
-    cleaned = _BTN_URL_RE.sub(_repl_md, text)
-
-    def _repl_tilde(m):
-        return "" if _add(m.group(1), m.group(2)) else m.group(0)
-
-    cleaned = _TILDE_RE.sub(_repl_tilde, cleaned)
-    cleaned = "\n".join(line for line in cleaned.splitlines() if line.strip()).strip()
-
-    log.info("✅ Parsed %d button(s)", len(rows))
+    cleaned = _TILDE_RE.sub(_repl, text).strip()
     return cleaned, (rows or None)
 
 
 def _extract_native_buttons(reply_msg):
+    """Get Telegram native inline buttons."""
     if not reply_msg or not reply_msg.reply_markup:
         return None
     markup = reply_msg.reply_markup
@@ -110,11 +68,7 @@ def _extract_native_buttons(reply_msg):
         btn_row = []
         for btn in row:
             if btn.url:
-                data = {"text": btn.text, "url": btn.url}
-                style = getattr(btn, "style", None)
-                if style:
-                    data["style"] = style
-                btn_row.append(data)
+                btn_row.append({"text": btn.text, "url": btn.url})
         if btn_row:
             rows.append(btn_row)
     return rows or None
@@ -123,19 +77,9 @@ def _extract_native_buttons(reply_msg):
 def _kb_from_stored(rows):
     if not rows:
         return None
-    kb_rows = []
-    for row in rows:
-        kb_row = []
-        for b in row:
-            try:
-                if b.get("style"):
-                    kb_row.append(InlineKeyboardButton(text=b["text"], url=b["url"], style=b["style"]))
-                else:
-                    kb_row.append(InlineKeyboardButton(text=b["text"], url=b["url"]))
-            except TypeError:
-                kb_row.append(InlineKeyboardButton(text=b["text"], url=b["url"]))
-        kb_rows.append(kb_row)
-    return InlineKeyboardMarkup(kb_rows)
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton(text=b["text"], url=b["url"]) for b in row] for row in rows]
+    )
 
 
 def _get_args(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -156,18 +100,6 @@ async def _is_admin(update: Update) -> bool:
         return False
 
 
-async def _safe_reply(func, *args, **kwargs):
-    """Try HTML parse mode; on failure, force plain text."""
-    try:
-        return await func(*args, parse_mode=ParseMode.HTML, **kwargs)
-    except Exception as e:
-        err = str(e).lower()
-        if "parse" in err or "entities" in err or "tag" in err:
-            log.warning("⚠️ HTML parse failed, retrying as plain text: %s", e)
-            return await func(*args, parse_mode=None, **kwargs)
-        raise
-
-
 async def filter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg, chat = update.effective_message, update.effective_chat
 
@@ -186,7 +118,7 @@ async def filter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     keyword = args[0].strip().lower()
     reply = msg.reply_to_message
     if not reply:
-        await msg.reply_text("⚠️ Reply to the message you want to send as the filter.")
+        await msg.reply_text("⚠️ Reply to the message you want me to send as the filter.")
         return
 
     data = {"type": "text", "content": "", "caption": "", "buttons": None,
@@ -219,7 +151,6 @@ async def filter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("⚠️ Unsupported message type.")
         return
 
-    log.info("💾 FINAL BUTTONS: %s", data["buttons"])
     await dbase.filter_set(chat.id, keyword, data)
     await msg.reply_text(f"✅ Filter <b>{keyword}</b> saved.")
 
@@ -275,32 +206,35 @@ async def trigger_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not row:
             continue
 
-        log.info("🎯 Trigger: %r | buttons=%s", word, row.get("buttons"))
         kb = _kb_from_stored(row.get("buttons"))
         ftype = row.get("type", "text")
-
-        # ✅ SANITIZE caption/content so </3 jaisi cheezein HTML ko break na karein
-        content = _sanitize_caption(row.get("content", ""))
-        caption = _sanitize_caption(row.get("caption", ""))
+        content = row.get("content", "")
+        caption = row.get("caption", "")
 
         try:
             if ftype == "text":
-                await _safe_reply(msg.reply_text, content or "",
-                                  reply_markup=kb, reply_to_message_id=msg.message_id)
+                await msg.reply_text(content or "", reply_markup=kb,
+                                     parse_mode=ParseMode.HTML,
+                                     reply_to_message_id=msg.message_id)
             elif ftype == "sticker":
-                await msg.reply_sticker(content, reply_markup=kb, reply_to_message_id=msg.message_id)
+                await msg.reply_sticker(content, reply_markup=kb,
+                                        reply_to_message_id=msg.message_id)
             elif ftype == "photo":
-                await _safe_reply(msg.reply_photo, content, caption=caption or None,
-                                  reply_markup=kb, reply_to_message_id=msg.message_id)
+                await msg.reply_photo(content, caption=caption or None, reply_markup=kb,
+                                      parse_mode=ParseMode.HTML,
+                                      reply_to_message_id=msg.message_id)
             elif ftype == "video":
-                await _safe_reply(msg.reply_video, content, caption=caption or None,
-                                  reply_markup=kb, reply_to_message_id=msg.message_id)
+                await msg.reply_video(content, caption=caption or None, reply_markup=kb,
+                                      parse_mode=ParseMode.HTML,
+                                      reply_to_message_id=msg.message_id)
             elif ftype == "animation":
-                await _safe_reply(msg.reply_animation, content, caption=caption or None,
-                                  reply_markup=kb, reply_to_message_id=msg.message_id)
+                await msg.reply_animation(content, caption=caption or None, reply_markup=kb,
+                                          parse_mode=ParseMode.HTML,
+                                          reply_to_message_id=msg.message_id)
             elif ftype == "audio":
-                await _safe_reply(msg.reply_audio, content, caption=caption or None,
-                                  reply_markup=kb, reply_to_message_id=msg.message_id)
+                await msg.reply_audio(content, caption=caption or None, reply_markup=kb,
+                                      parse_mode=ParseMode.HTML,
+                                      reply_to_message_id=msg.message_id)
         except Exception as e:
             log.error("filter send failed [%s/%s]: %s", chat.id, word, e)
         break
