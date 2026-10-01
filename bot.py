@@ -1,6 +1,7 @@
 """Entry point: creates the bot, wires up every plugin, and handles the
 DM /start experience (reaction + photo + buttons)."""
 import asyncio
+import aiofastnet
 import logging
 import os
 
@@ -217,11 +218,18 @@ async def post_init(app: Application):
 
 
 def main():
-    # ✅ FINAL FIX: Fresh event loop set karo (Python 3.11 ke liye zaroori)
+    # ✅ FIX: Python 3.11 ke liye fresh event loop set karo
     try:
         asyncio.get_event_loop()
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
+
+    # ✅ aiofastnet install karo (uvloop ki jagah, crash nahi karega)
+    try:
+        aiofastnet.install_policy()
+        log.info("aiofastnet installed — faster HTTPS connections 🚀")
+    except Exception as e:
+        log.warning("aiofastnet install failed, using default loop: %s", e)
 
     app = (
         Application.builder()
