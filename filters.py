@@ -1,10 +1,4 @@
-"""Filters module — Rose-style auto replies.
-
-Set a filter by replying to any message (text, photo, video, gif, audio,
-sticker) with `.filter <keyword>` or `/filter <keyword>`. When anyone types
-that keyword in the group, the bot sends the saved message back — including
-inline buttons written as [Button Text ~ https://url] in the original text/caption.
-"""
+"""Filters module — Rose-style auto replies."""
 import logging
 import re
 
@@ -22,7 +16,6 @@ import database as dbase
 log = logging.getLogger("filters")
 
 
-# ───────────────────────── help / commands ─────────────────────────
 COMMANDS = [
     ("filter", "Set a new filter (reply to a message)"),
     ("unfilter", "Remove a filter by keyword"),
@@ -47,12 +40,10 @@ HELP_TXT = (
 )
 
 
-# ───────────────────────── helpers ─────────────────────────
 _BTN_RE = re.compile(r"\[([^\[\]~]+?)\s*~\s*([^\[\]]+?)\]")
 
 
 def _parse_buttons(text: str | None):
-    """Return (clean_text, inline_keyboard_rows or None)."""
     if not text:
         return text or "", None
 
@@ -77,7 +68,6 @@ def _kb_from_stored(rows):
 
 
 def _get_args(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Helper to get args from either ctx.args (if global parser exists) or manually parse text."""
     if ctx.args:
         return ctx.args
     text = update.effective_message.text or ""
@@ -98,7 +88,6 @@ async def _is_admin(update: Update) -> bool:
         return False
 
 
-# ───────────────────────── /filter ─────────────────────────
 async def filter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg, chat = update.effective_message, update.effective_chat
 
@@ -127,47 +116,37 @@ async def filter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if reply.text:
         clean, btns = _parse_buttons(reply.text)
         data.update(type="text", content=clean, buttons=btns)
-
     elif reply.sticker:
         data.update(type="sticker", content=reply.sticker.file_id)
-
     elif reply.photo:
         clean, btns = _parse_buttons(reply.caption)
         data.update(type="photo", content=reply.photo[-1].file_id, caption=clean, buttons=btns)
-
     elif reply.video:
         clean, btns = _parse_buttons(reply.caption)
         data.update(type="video", content=reply.video.file_id, caption=clean, buttons=btns)
-
     elif reply.animation:
         clean, btns = _parse_buttons(reply.caption)
         data.update(type="animation", content=reply.animation.file_id, caption=clean, buttons=btns)
-
     elif reply.audio:
         clean, btns = _parse_buttons(reply.caption)
         data.update(type="audio", content=reply.audio.file_id, caption=clean, buttons=btns)
-
     else:
-        await msg.reply_text("⚠️ Unsupported message type. Reply to text, sticker, photo, video, GIF or audio.")
+        await msg.reply_text("⚠️ Unsupported message type.")
         return
 
     await dbase.filter_set(chat.id, keyword, data)
     await msg.reply_text(f"✅ Filter <b>{keyword}</b> saved.")
 
 
-# ───────────────────────── /unfilter ─────────────────────────
 async def unfilter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg, chat = update.effective_message, update.effective_chat
-
     if not await _is_admin(update):
         await msg.reply_text("❌ Only admins can remove filters.")
         return
-
     args = _get_args(update, ctx)
     if not args:
         await msg.reply_text("⚠️ Usage: <code>/unfilter keyword</code>")
         return
-
     keyword = args[0].strip().lower()
     deleted = await dbase.filter_delete(chat.id, keyword)
     if deleted:
@@ -176,28 +155,22 @@ async def unfilter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(f"❓ No filter named <b>{keyword}</b> in this chat.")
 
 
-# ───────────────────────── /filters ─────────────────────────
 async def list_filters_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg, chat = update.effective_message, update.effective_chat
     rows = await dbase.filter_list(chat.id)
-
     if not rows:
         await msg.reply_text("No filters set in this chat yet.")
         return
-
     lines = [f"• <code>{r['keyword']}</code>  <i>({r.get('type', 'text')})</i>" for r in rows]
     header = f"<b>🔍 Filters in this chat — {len(rows)}</b>\n\n"
     await msg.reply_text(header + "\n".join(lines))
 
 
-# ───────────────────────── /stop ─────────────────────────
 async def stop_filters_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg, chat = update.effective_message, update.effective_chat
-
     if not await _is_admin(update):
         await msg.reply_text("❌ Only admins can wipe filters.")
         return
-
     n = await dbase.filter_delete_all(chat.id)
     if n:
         await msg.reply_text(f"🗑 Deleted <b>{n}</b> filter(s) from this chat.")
@@ -205,8 +178,10 @@ async def stop_filters_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("There were no filters to delete.")
 
 
-# ───────────────────────── trigger on every message ─────────────────────────
 async def trigger_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    # 🔍 DEBUG LINE
+    print(f"🔍 TRIGGER CALLED: {update.effective_message.text}")
+    
     msg, chat = update.effective_message, update.effective_chat
     if not msg:
         return
@@ -251,9 +226,7 @@ async def trigger_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         break
 
 
-# ───────────────────────── register ─────────────────────────
 def register(app: Application):
-    # Support both / and . prefixes using MessageHandler + Regex
     app.add_handler(MessageHandler(
         tg_filters.Regex(r"^[./]filter(?:\s+(.+))?$") & tg_filters.ChatType.GROUPS,
         filter_cmd
@@ -274,8 +247,8 @@ def register(app: Application):
         stop_filters_cmd
     ), group=0)
 
-    # Trigger filter on any text or caption in groups (low priority)
+    # ⚠️ CHANGE: group=-2 taaki ye sabse pehle chale
     app.add_handler(MessageHandler(
         (tg_filters.TEXT | tg_filters.CAPTION) & tg_filters.ChatType.GROUPS,
         trigger_filter
-    ), group=1)
+    ), group=-2)
