@@ -17,6 +17,7 @@ import ban
 import database as dbase
 import filters as bot_filters
 import fun
+import ping
 import sticker
 import welcome
 from common import B, T, log, mention, say, sc
@@ -191,10 +192,6 @@ _seen_member: dict = {}
 
 
 async def _track_usernames(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Caches username -> id from every group message, so /promote @user, .ban @user
-    etc. work even if that user has never DMed the bot. Also records group membership
-    (for .waifu / .couple). Runs before commands, cheap: only writes to Mongo when
-    something is new or changed."""
     u, chat = update.effective_user, update.effective_chat
     if not u or u.is_bot:
         return
@@ -212,7 +209,8 @@ async def post_init(app: Application):
     await dbase.init(MONGO_URI, DB_NAME)
     app.bot_data["me"] = await app.bot.get_me()
     cmds = [("start", "Start the bot"), ("help", "Show commands")]
-    for mod in (welcome, admin, afk, ban, sticker, fun, bot_filters):
+    # Added 'ping' to the loop
+    for mod in (welcome, admin, afk, ban, sticker, fun, bot_filters, ping):
         cmds += mod.COMMANDS
     await app.bot.set_my_commands(cmds)
     log.info("Started as @%s", app.bot_data["me"].username)
@@ -240,6 +238,7 @@ def main():
     sticker.register(app)
     fun.register(app)
     bot_filters.register(app)
+    ping.register(app)  # <-- Ping registered here
 
     app.add_error_handler(on_error)
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
