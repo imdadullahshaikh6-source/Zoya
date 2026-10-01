@@ -1,4 +1,4 @@
-"""Filters module — Rose-style auto replies."""
+"""Filters module — Rose-style auto replies (Preserves formatting & native buttons)."""
 import logging
 import re
 
@@ -34,9 +34,7 @@ HELP_TXT = (
     "<b>Supported content</b>\n"
     "Text, stickers, GIFs, audio, video, photos — anything you can reply to.\n\n"
     "<b>Inline buttons</b>\n"
-    "Inside your reply text or caption, write:\n"
-    "<code>[Button Label ~ https://example.com]</code>\n"
-    "Every such block becomes a clickable button when the filter fires."
+    "Telegram's native buttons and custom <code>[Text ~ URL]</code> buttons are both supported."
 )
 
 
@@ -44,6 +42,7 @@ _BTN_RE = re.compile(r"\[([^\[\]~]+?)\s*~\s*([^\[\]]+?)\]")
 
 
 def _parse_buttons(text: str | None):
+    """Extract custom [Text ~ URL] buttons from HTML text."""
     if not text:
         return text or "", None
 
@@ -59,6 +58,25 @@ def _parse_buttons(text: str | None):
 
     cleaned = _BTN_RE.sub(_repl, text).strip()
     return cleaned, (rows or None)
+
+
+def _extract_native_buttons(reply_msg):
+    """Extract Telegram's native inline buttons (like JOIN buttons)."""
+    if not reply_msg or not reply_msg.reply_markup:
+        return None
+    markup = reply_msg.reply_markup
+    if not hasattr(markup, 'inline_keyboard') or not markup.inline_keyboard:
+        return None
+    
+    rows = []
+    for row in markup.inline_keyboard:
+        btn_row = []
+        for btn in row:
+            if btn.url:  # Only save URL buttons, skip callback_data buttons
+                btn_row.append({"text": btn.text, "url": btn.url})
+        if btn_row:
+            rows.append(btn_row)
+    return rows if rows else None
 
 
 def _kb_from_stored(rows):
@@ -112,30 +130,46 @@ async def filter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     data = {"type": "text", "content": "", "caption": "", "buttons": None, "set_by": update.effective_user.id}
+    
+    # Extract native buttons (like JOIN button)
+    native_btns = _extract_native_buttons(reply)
 
     if reply.text:
-        clean, btns = _parse_buttons(reply.text)
-        data.update(type="text", content=clean, buttons=btns)
+        # Use text_html to preserve bold, italic, and text links
+        clean, btns = _parse_buttons(reply.text_html)
+        final_btns = (native_btns or []) + (btns or [])
+        data.update(type="text", content=clean, buttons=final_btns or None)
+        
     elif reply.sticker:
-        data.update(type="sticker", content=reply.sticker.file_id)
+        final_btns = (native_btns or [])
+        data.update(type="sticker", content=reply.sticker.file_id, buttons=final_btns or None)
+        
     elif reply.photo:
-        clean, btns = _parse_buttons(reply.caption)
-        data.update(type="photo", content=reply.photo[-1].file_id, caption=clean, buttons=btns)
+        clean, btns = _parse_buttons(reply.caption_html)
+        final_btns = (native_btns or []) + (btns or [])
+        data.update(type="photo", content=reply.photo[-1].file_id, caption=clean, buttons=final_btns or None)
+        
     elif reply.video:
-        clean, btns = _parse_buttons(reply.caption)
-        data.update(type="video", content=reply.video.file_id, caption=clean, buttons=btns)
+        clean, btns = _parse_buttons(reply.caption_html)
+        final_btns = (native_btns or []) + (btns or [])
+        data.update(type="video", content=reply.video.file_id, caption=clean, buttons=final_btns or None)
+        
     elif reply.animation:
-        clean, btns = _parse_buttons(reply.caption)
-        data.update(type="animation", content=reply.animation.file_id, caption=clean, buttons=btns)
+        clean, btns = _parse_buttons(reply.caption_html)
+        final_btns = (native_btns or []) + (btns or [])
+        data.update(type="animation", content=reply.animation.file_id, caption=clean, buttons=final_btns or None)
+        
     elif reply.audio:
-        clean, btns = _parse_buttons(reply.caption)
-        data.update(type="audio", content=reply.audio.file_id, caption=clean, buttons=btns)
+        clean, btns = _parse_buttons(reply.caption_html)
+        final_btns = (native_btns or []) + (btns or [])
+        data.update(type="audio", content=reply.audio.file_id, caption=clean, buttons=final_btns or None)
+        
     else:
-        await msg.reply_text("⚠️ Unsupported message type.")
+        await msg.reply_text("⚠️ Unsupported message type. Reply to text, sticker, photo, video, GIF or audio.")
         return
 
     await dbase.filter_set(chat.id, keyword, data)
-    await msg.reply_text(f"✅ Filter <b>{keyword}</b> saved.")
+    await msg.reply_text(f"✅ Filter <b>{keyword}</b> saved with formatting and buttons.")
 
 
 async def unfilter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -179,9 +213,6 @@ async def stop_filters_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def trigger_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    # 🔍 DEBUG LINE
-    print(f"🔍 TRIGGER CALLED: {update.effective_message.text}")
-    
     msg, chat = update.effective_message, update.effective_chat
     if not msg:
         return
@@ -247,7 +278,7 @@ def register(app: Application):
         stop_filters_cmd
     ), group=0)
 
-    # ⚠️ CHANGE: group=-2 taaki ye sabse pehle chale
+    # Trigger filter on any text or caption in groups (low priority)
     app.add_handler(MessageHandler(
         (tg_filters.TEXT | tg_filters.CAPTION) & tg_filters.ChatType.GROUPS,
         trigger_filter
