@@ -1,4 +1,4 @@
-"""Filters module — Rose-style auto replies (Preserves formatting & native buttons)."""
+"""Filters module — Rose-style auto replies (Supports Native, Custom, and Rose buttons with colors)."""
 import logging
 import re
 
@@ -34,21 +34,39 @@ HELP_TXT = (
     "<b>Supported content</b>\n"
     "Text, stickers, GIFs, audio, video, photos — anything you can reply to.\n\n"
     "<b>Inline buttons</b>\n"
-    "Telegram's native buttons and custom <code>[Text ~ URL]</code> buttons are both supported."
+    "Supports Native Telegram buttons, <code>[Text ~ URL]</code>, and Rose-style <code>[Text](buttonurl:URL:color)</code>.\n"
+    "Colors: <code>:danger</code> (Red), <code>:success</code> (Green), <code>:primary</code> (Blue)"
 )
 
 
+# Regex for [Text ~ URL]
 _BTN_RE = re.compile(r"\[([^\[\]~]+?)\s*~\s*([^\[\]]+?)\]")
+# Regex for [Text](buttonurl:URL:color) - Rose style with optional color
+_ROSE_BTN_RE = re.compile(r"\[([^\[\]]+?)\]\(buttonurl:(https?://[^\)]+?)(?::(danger|success|primary))?\)")
 
 
 def _parse_buttons(text: str | None):
-    """Extract custom [Text ~ URL] buttons from HTML text."""
+    """Extract custom [Text ~ URL] AND Rose [Text](buttonurl:URL:color) buttons."""
     if not text:
         return text or "", None
 
     rows = []
 
-    def _repl(m):
+    # 1. Parse Rose-style buttons [Text](buttonurl:URL:color)
+    def _repl_rose(m):
+        label = m.group(1).strip()
+        url = m.group(2).strip()
+        color = m.group(3) # danger, success, primary (or None)
+        
+        btn = {"text": label, "url": url}
+        if color:
+            btn["style"] = color
+            
+        rows.append([btn])
+        return "" # Remove from text
+
+    # 2. Parse Custom-style buttons [Text ~ URL]
+    def _repl_custom(m):
         label = m.group(1).strip()
         url = m.group(2).strip()
         if not (url.startswith("http://") or url.startswith("https://") or url.startswith("tg://")):
@@ -56,7 +74,11 @@ def _parse_buttons(text: str | None):
         rows.append([{"text": label, "url": url}])
         return ""
 
-    cleaned = _BTN_RE.sub(_repl, text).strip()
+    # Apply Rose regex first
+    cleaned = _ROSE_BTN_RE.sub(_repl_rose, text)
+    # Then apply Custom regex
+    cleaned = _BTN_RE.sub(_repl_custom, cleaned).strip()
+    
     return cleaned, (rows or None)
 
 
@@ -72,17 +94,35 @@ def _extract_native_buttons(reply_msg):
     for row in markup.inline_keyboard:
         btn_row = []
         for btn in row:
-            if btn.url:  # Only save URL buttons, skip callback_data buttons
-                btn_row.append({"text": btn.text, "url": btn.url})
+            if btn.url:  # Only save URL buttons
+                # Native buttons might have a style attribute, try to save it if it exists
+                btn_data = {"text": btn.text, "url": btn.url}
+                if hasattr(btn, 'style') and btn.style:
+                    btn_data["style"] = btn.style
+                btn_row.append(btn_data)
         if btn_row:
             rows.append(btn_row)
     return rows if rows else None
 
 
 def _kb_from_stored(rows):
+    """Build InlineKeyboardMarkup from stored dicts, including style if present."""
     if not rows:
         return None
-    return InlineKeyboardMarkup([[InlineKeyboardButton(b["text"], url=b["url"]) for b in row] for row in rows])
+    
+    kb_rows = []
+    for row in rows:
+        kb_row = []
+        for b in row:
+            # Pass style if it exists in the stored data
+            kb_row.append(InlineKeyboardButton(
+                text=b["text"], 
+                url=b["url"], 
+                style=b.get("style")
+            ))
+        kb_rows.append(kb_row)
+        
+    return InlineKeyboardMarkup(kb_rows)
 
 
 def _get_args(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -130,12 +170,9 @@ async def filter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     data = {"type": "text", "content": "", "caption": "", "buttons": None, "set_by": update.effective_user.id}
-    
-    # Extract native buttons (like JOIN button)
     native_btns = _extract_native_buttons(reply)
 
     if reply.text:
-        # Use text_html to preserve bold, italic, and text links
         clean, btns = _parse_buttons(reply.text_html)
         final_btns = (native_btns or []) + (btns or [])
         data.update(type="text", content=clean, buttons=final_btns or None)
@@ -278,7 +315,6 @@ def register(app: Application):
         stop_filters_cmd
     ), group=0)
 
-    # Trigger filter on any text or caption in groups (low priority)
     app.add_handler(MessageHandler(
         (tg_filters.TEXT | tg_filters.CAPTION) & tg_filters.ChatType.GROUPS,
         trigger_filter
