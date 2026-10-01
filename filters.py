@@ -37,51 +37,40 @@ HELP_TXT = (
     "Colors: <code>:danger</code> (Red), <code>:success</code> (Green), <code>:primary</code> (Blue)"
 )
 
-# ✅ FIXED REGEX: Ye ab plain text, Markdown aur HTML teeno ko support karega
-_MD_RE = re.compile(r"\[([^\[\]]+?)\]\(buttonurl:(https?://[^\)]+?)\)")
-_HTML_RE = re.compile(r'<a href="(?:buttonurl:)?(https?://[^"]+?)">([^<]+?)</a>')
+# ✅ FIXED REGEX: Ab ye plain text [Text](buttonurl:URL:color) ko perfectly pakdega
+_MD_RE = re.compile(r'\[([^\[\]]+?)\]\s*\((?:buttonurl:)?(https?://[^\)]+?)(?::(danger|success|primary))?\)')
 _BTN_RE = re.compile(r"\[([^\[\]~]+?)\s*~\s*([^\[\]]+?)\]")
 
 def _parse_buttons(text: str | None):
-    """Extract buttons from plain text, Markdown or HTML."""
+    """Extract buttons from plain text or Markdown."""
     if not text:
         return text or "", None
 
     rows = []
 
-    def _process_button(label, url):
-        color = None
-        # Check karo URL ke end me color tag hai ya nahi
-        for c in ["danger", "success", "primary"]:
-            if url.endswith(f":{c}"):
-                color = c
-                url = url[:-len(f":{c}")]  # URL se color tag hata do
-                break
-        
+    def _process_button(label, url, color=None):
         btn = {"text": label.strip(), "url": url.strip()}
         if color:
             btn["style"] = color
             print(f"🎨 COLOR DETECTED: {color} | Button: '{label.strip()}'")
         else:
-            print(f"⚪ No color | Button: '{label.strip()}' (URL: {url})")
-            
+            print(f"⚪ No color | Button: '{label.strip()}'")
         rows.append([btn])
         return ""
 
-    # 1. Apply Markdown/Plain text regex
-    cleaned = _MD_RE.sub(lambda m: _process_button(m.group(1), m.group(2)), text)
-    
-    # 2. Apply HTML regex (agar Telegram ne parse kar diya ho)
-    cleaned = _HTML_RE.sub(lambda m: _process_button(m.group(2), m.group(1)), cleaned)
+    # 1. Parse [Text](buttonurl:URL:color) ya [Text](URL)
+    def _repl_md(m):
+        return _process_button(m.group(1), m.group(2), m.group(3))
 
-    # 3. Custom [Text ~ URL] format
+    cleaned = _MD_RE.sub(_repl_md, text)
+
+    # 2. Parse custom [Text ~ URL]
     def _repl_custom(m):
         label = m.group(1).strip()
         url = m.group(2).strip()
         if not (url.startswith("http://") or url.startswith("https://") or url.startswith("tg://")):
             return m.group(0)
-        rows.append([{"text": label, "url": url}])
-        return ""
+        return _process_button(label, url)
 
     cleaned = _BTN_RE.sub(_repl_custom, cleaned).strip()
     return cleaned, (rows or None)
@@ -183,7 +172,7 @@ async def filter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if reply.text:
         clean, btns = _parse_buttons(reply.text_html)
-        # ✅ FIX: Agar custom text button mila hai, toh native buttons ignore karo
+        # ✅ FIX: Agar text me custom button mila hai, toh native buttons ko ignore karo
         final_btns = (btns or []) if btns else (native_btns or [])
         print(f"📦 Saving Buttons: {final_btns}") # DEBUG
         data.update(type="text", content=clean, buttons=final_btns or None)
