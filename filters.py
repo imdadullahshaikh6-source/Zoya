@@ -1,4 +1,4 @@
-"""Filters module — Rose-style auto replies (Supports Native, Custom, and Rose buttons)."""
+"""Filters module — Rose-style auto replies (Supports Native, Custom, and Rose buttons with colors)."""
 import logging
 import re
 
@@ -52,16 +52,20 @@ def _parse_buttons(text: str | None):
 
     rows = []
 
+    # 1. Parse Rose-style buttons [Text](buttonurl:URL:color)
     def _repl_rose(m):
         label = m.group(1).strip()
         url = m.group(2).strip()
-        color = m.group(3)
+        color = m.group(3) # danger, success, primary (or None)
+        
         btn = {"text": label, "url": url}
         if color:
             btn["style"] = color
+            
         rows.append([btn])
-        return ""
+        return "" # Remove from text
 
+    # 2. Parse Custom-style buttons [Text ~ URL]
     def _repl_custom(m):
         label = m.group(1).strip()
         url = m.group(2).strip()
@@ -70,8 +74,11 @@ def _parse_buttons(text: str | None):
         rows.append([{"text": label, "url": url}])
         return ""
 
+    # Apply Rose regex first
     cleaned = _ROSE_BTN_RE.sub(_repl_rose, text)
+    # Then apply Custom regex
     cleaned = _BTN_RE.sub(_repl_custom, cleaned).strip()
+    
     return cleaned, (rows or None)
 
 
@@ -87,8 +94,9 @@ def _extract_native_buttons(reply_msg):
     for row in markup.inline_keyboard:
         btn_row = []
         for btn in row:
-            if btn.url:
+            if btn.url:  # Only save URL buttons
                 btn_data = {"text": btn.text, "url": btn.url}
+                # Native buttons might have a style attribute
                 if hasattr(btn, 'style') and btn.style:
                     btn_data["style"] = btn.style
                 btn_row.append(btn_data)
@@ -106,15 +114,18 @@ def _kb_from_stored(rows):
     for row in rows:
         kb_row = []
         for b in row:
+            # SAFE FALLBACK: Try without style first, then with style
             try:
                 if "style" in b and b["style"]:
                     btn = InlineKeyboardButton(text=b["text"], url=b["url"], style=b["style"])
                 else:
                     btn = InlineKeyboardButton(text=b["text"], url=b["url"])
             except TypeError:
+                # If PTB version is old, fallback to normal button
                 btn = InlineKeyboardButton(text=b["text"], url=b["url"])
             kb_row.append(btn)
         kb_rows.append(kb_row)
+        
     return InlineKeyboardMarkup(kb_rows)
 
 
@@ -169,25 +180,31 @@ async def filter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         clean, btns = _parse_buttons(reply.text_html)
         final_btns = (native_btns or []) + (btns or [])
         data.update(type="text", content=clean, buttons=final_btns or None)
+        
     elif reply.sticker:
         final_btns = (native_btns or [])
         data.update(type="sticker", content=reply.sticker.file_id, buttons=final_btns or None)
+        
     elif reply.photo:
         clean, btns = _parse_buttons(reply.caption_html)
         final_btns = (native_btns or []) + (btns or [])
         data.update(type="photo", content=reply.photo[-1].file_id, caption=clean, buttons=final_btns or None)
+        
     elif reply.video:
         clean, btns = _parse_buttons(reply.caption_html)
         final_btns = (native_btns or []) + (btns or [])
         data.update(type="video", content=reply.video.file_id, caption=clean, buttons=final_btns or None)
+        
     elif reply.animation:
         clean, btns = _parse_buttons(reply.caption_html)
         final_btns = (native_btns or []) + (btns or [])
         data.update(type="animation", content=reply.animation.file_id, caption=clean, buttons=final_btns or None)
+        
     elif reply.audio:
         clean, btns = _parse_buttons(reply.caption_html)
         final_btns = (native_btns or []) + (btns or [])
         data.update(type="audio", content=reply.audio.file_id, caption=clean, buttons=final_btns or None)
+        
     else:
         await msg.reply_text("⚠️ Unsupported message type.")
         return
@@ -248,7 +265,7 @@ async def trigger_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if text.startswith(("/", ".")):
         return
 
-    # ✅ FIX: @?\w+ use kiya taaki @username bhi capture ho
+    # Extract words including @mentions
     words = set(re.findall(r"@?\w+", text.lower()))
     if not words:
         return
@@ -257,11 +274,11 @@ async def trigger_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         # Try matching exactly as it is
         row = await dbase.filter_get(chat.id, word)
         
-        # ✅ FIX: Agar @ ke saath match nahi hua, toh @ hata kar try karo
+        # If not found and word has @, try without @
         if not row and word.startswith("@"):
             row = await dbase.filter_get(chat.id, word[1:])
         
-        # ✅ FIX: Agar @ ke bina match nahi hua, toh @ laga kar try karo
+        # If not found and word has no @, try with @
         if not row and not word.startswith("@"):
             row = await dbase.filter_get(chat.id, f"@{word}")
 
