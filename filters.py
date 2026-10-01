@@ -39,10 +39,10 @@ HELP_TXT = (
 )
 
 
-# Regex for [Text ~ URL]
 _BTN_RE = re.compile(r"\[([^\[\]~]+?)\s*~\s*([^\[\]]+?)\]")
-# ✅ FIXED: Regex for [Text](buttonurl:URL) - ab color URL ka part nahi banega
-_ROSE_BTN_RE = re.compile(r"\[([^\[\]]+?)\]\(buttonurl:(https?://[^\)]+?)\)")
+# ✅ FIX: Ab dono Markdown aur HTML format handle karega
+_MD_RE = re.compile(r"\[([^\[\]]+?)\]\(buttonurl:(https?://[^\)]+?)\)")
+_HTML_RE = re.compile(r'<a href="buttonurl:(https?://[^"]+?)">([^<]+?)</a>')
 
 
 def _parse_buttons(text: str | None):
@@ -52,27 +52,33 @@ def _parse_buttons(text: str | None):
 
     rows = []
 
-    # 1. Parse Rose-style buttons [Text](buttonurl:URL:color)
-    def _repl_rose(m):
-        label = m.group(1).strip()
-        url = m.group(2).strip()
+    def _process_button(label, url):
         color = None
-        
-        # ✅ FIX: Check karo ki URL ke end me color tag hai ya nahi
+        # Check karo URL ke end me color tag hai ya nahi
         for c in ["danger", "success", "primary"]:
             if url.endswith(f":{c}"):
                 color = c
                 url = url[:-len(f":{c}")]  # URL se color tag hata do
                 break
         
-        btn = {"text": label, "url": url}
+        btn = {"text": label.strip(), "url": url.strip()}
         if color:
             btn["style"] = color
-            
         rows.append([btn])
-        return "" 
+        return ""
 
-    # 2. Parse Custom-style buttons [Text ~ URL]
+    def _repl_md(m):
+        return _process_button(m.group(1), m.group(2))
+
+    def _repl_html(m):
+        return _process_button(m.group(2), m.group(1))
+
+    # Apply Markdown regex
+    cleaned = _MD_RE.sub(_repl_md, text)
+    # Apply HTML regex
+    cleaned = _HTML_RE.sub(_repl_html, cleaned).strip()
+
+    # Custom [Text ~ URL]
     def _repl_custom(m):
         label = m.group(1).strip()
         url = m.group(2).strip()
@@ -81,11 +87,7 @@ def _parse_buttons(text: str | None):
         rows.append([{"text": label, "url": url}])
         return ""
 
-    # Apply Rose regex first
-    cleaned = _ROSE_BTN_RE.sub(_repl_rose, text)
-    # Then apply Custom regex
     cleaned = _BTN_RE.sub(_repl_custom, cleaned).strip()
-    
     return cleaned, (rows or None)
 
 
