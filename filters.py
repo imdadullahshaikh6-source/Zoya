@@ -38,27 +38,22 @@ HELP_TXT = (
     "Colors: <code>:danger</code> (Red), <code>:success</code> (Green), <code>:primary</code> (Blue)"
 )
 
-# Rose-style: capture ANYTHING between buttonurl: and the LAST closing paren
-_ROSE_RE = re.compile(r'\[([^\[\]]+?)\]\(buttonurl:(.+?)\)\s*$', re.DOTALL)
-# Simpler version (non-greedy on end) for mid-text matches:
-_ROSE_RE_INLINE = re.compile(r'\[([^\[\]]+?)\]\(buttonurl:(.+?)\)')
-# Custom [Text ~ URL]
+# ✅ FIX: Yeh regex ab 'buttonurl:' ke bina bhi kaam karega (optional banaya hai)
+_MD_RE = re.compile(r'\[([^\[\]]+?)\]\s*\(\s*(?:buttonurl:)?\s*([^\)]+?)\s*\)')
 _TILDE_RE = re.compile(r'\[([^\[\]~]+?)\s*~\s*([^\[\]]+?)\]')
 
 
 def _clean_url(raw: str):
-    """Strip HTML tags, unescape entities, extract optional color suffix.
-    Returns (url, color_or_None)."""
-    # Remove any HTML tags Telegram inserted (linkifier wraps URLs in <a>)
+    """Strip HTML tags, unescape entities, extract optional color suffix."""
+    # HTML tags hata do (agar Telegram ne <a> tag lagaya ho)
     cleaned = re.sub(r'<[^>]+>', '', raw or "")
-    # Unescape HTML entities like &amp; -> &
     cleaned = html.unescape(cleaned).strip()
 
-    # Strip any stray 'buttonurl:' prefix that might remain
+    # Agar 'buttonurl:' bacha ho toh hata do
     if cleaned.lower().startswith("buttonurl:"):
         cleaned = cleaned[len("buttonurl:"):].strip()
 
-    # Extract color suffix
+    # Color suffix nikaalo
     color = None
     for c in ("danger", "success", "primary"):
         if cleaned.endswith(f":{c}"):
@@ -76,17 +71,17 @@ def _parse_buttons(text: str | None):
 
     rows = []
 
-    def _repl_rose(m):
+    def _repl_md(m):
         label = m.group(1).strip()
         url, color = _clean_url(m.group(2))
-        if not url:
-            return m.group(0)
+        if not url.startswith(("http://", "https://", "tg://")):
+            return m.group(0)  # Valid URL nahi hai toh chhod do
         btn = {"text": label, "url": url}
         if color:
             btn["style"] = color
-        log.info("🎨 Rose button | label=%r url=%s color=%s", label, url, color)
+        log.info("🎨 Rose button parsed | label=%r url=%s color=%s", label, url, color)
         rows.append([btn])
-        return ""
+        return ""  # Text se hata do
 
     def _repl_tilde(m):
         label = m.group(1).strip()
@@ -96,14 +91,14 @@ def _parse_buttons(text: str | None):
         btn = {"text": label, "url": url}
         if color:
             btn["style"] = color
-        log.info("🔗 Tilde button | label=%r url=%s color=%s", label, url, color)
+        log.info("🔗 Tilde button parsed | label=%r url=%s color=%s", label, url, color)
         rows.append([btn])
         return ""
 
-    cleaned = _ROSE_RE_INLINE.sub(_repl_rose, text)
+    cleaned = _MD_RE.sub(_repl_md, text)
     cleaned = _TILDE_RE.sub(_repl_tilde, cleaned).strip()
 
-    log.info("✅ Parsed %d button(s)", len(rows))
+    log.info("✅ Total %d custom button(s) parsed", len(rows))
     return cleaned, (rows or None)
 
 
@@ -191,21 +186,27 @@ async def filter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if reply.text:
         clean, btns = _parse_buttons(reply.text_html)
-        data.update(type="text", content=clean, buttons=btns or native_btns or None)
+        # ✅ FIX: Agar custom text button mila hai, toh native buttons ko ignore karo
+        final_btns = btns if btns else native_btns
+        data.update(type="text", content=clean, buttons=final_btns)
     elif reply.sticker:
         data.update(type="sticker", content=reply.sticker.file_id, buttons=native_btns)
     elif reply.photo:
         clean, btns = _parse_buttons(reply.caption_html)
-        data.update(type="photo", content=reply.photo[-1].file_id, caption=clean, buttons=btns or native_btns or None)
+        final_btns = btns if btns else native_btns
+        data.update(type="photo", content=reply.photo[-1].file_id, caption=clean, buttons=final_btns)
     elif reply.video:
         clean, btns = _parse_buttons(reply.caption_html)
-        data.update(type="video", content=reply.video.file_id, caption=clean, buttons=btns or native_btns or None)
+        final_btns = btns if btns else native_btns
+        data.update(type="video", content=reply.video.file_id, caption=clean, buttons=final_btns)
     elif reply.animation:
         clean, btns = _parse_buttons(reply.caption_html)
-        data.update(type="animation", content=reply.animation.file_id, caption=clean, buttons=btns or native_btns or None)
+        final_btns = btns if btns else native_btns
+        data.update(type="animation", content=reply.animation.file_id, caption=clean, buttons=final_btns)
     elif reply.audio:
         clean, btns = _parse_buttons(reply.caption_html)
-        data.update(type="audio", content=reply.audio.file_id, caption=clean, buttons=btns or native_btns or None)
+        final_btns = btns if btns else native_btns
+        data.update(type="audio", content=reply.audio.file_id, caption=clean, buttons=final_btns)
     else:
         await msg.reply_text("⚠️ Unsupported message type.")
         return
