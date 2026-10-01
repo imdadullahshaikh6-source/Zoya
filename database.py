@@ -1,5 +1,5 @@
 """MongoDB layer. Everything persists across restarts/redeploys:
-welcome messages, rules, AFK status, bans, mutes, and warns."""
+welcome messages, rules, AFK status, bans, mutes, warns, and filters."""
 import logging
 import time
 
@@ -8,18 +8,20 @@ from motor.motor_asyncio import AsyncIOMotorClient
 log = logging.getLogger("database")
 
 _db = None
+db = None  # <-- Public access for ping.py
 
 
 async def init(uri: str, name: str):
-    global _db
+    global _db, db
     client = AsyncIOMotorClient(uri, serverSelectionTimeoutMS=15000)
     _db = client[name]
-    await client.admin.command("ping")  # fail fast on a bad URI / network access
+    db = _db  # <-- Expose publicly
+    await client.admin.command("ping")
     await _db.users.create_index("username")
     await _db.moderation.create_index([("chat_id", 1), ("user_id", 1)])
     await _db.warns.create_index([("chat_id", 1), ("user_id", 1)])
     await _db.members.create_index("chat_id")
-    await _db.filters.create_index([("chat_id", 1), ("keyword", 1)], unique=True)  # <-- Added
+    await _db.filters.create_index([("chat_id", 1), ("keyword", 1)], unique=True)
     log.info("MongoDB connected (db: %s)", name)
 
 
@@ -70,7 +72,7 @@ async def afk_clear(user_id: int):
     await _db.afk.delete_one({"_id": user_id})
 
 
-# ───────── moderation: ban / mute (one active record per chat+user) ─────────
+# ───────── moderation: ban / mute ─────────
 def _mid(chat_id, user_id):
     return f"{chat_id}:{user_id}"
 
@@ -117,7 +119,7 @@ async def warn_clear(chat_id: int, user_id: int):
     await _db.warns.delete_one({"_id": _mid(chat_id, user_id)})
 
 
-# ───────── chat members seen (for .waifu / .couple games) ─────────
+# ───────── chat members seen ─────────
 async def mark_member(chat_id: int, user_id: int, name: str):
     await _db.members.update_one(
         {"_id": f"{chat_id}:{user_id}"},
@@ -134,7 +136,7 @@ async def random_members(chat_id: int, count: int):
     return [doc async for doc in cursor]
 
 
-# ───────── kang packs (one growing sticker pack per user) ─────────
+# ───────── kang packs ─────────
 async def kang_get(user_id: int):
     return await _db.kangs.find_one({"_id": user_id})
 
@@ -148,7 +150,6 @@ async def kang_set(user_id: int, name: str, count: int, part: int | None = None)
 
 # ───────── filters (keyword -> auto reply, per chat) ─────────
 async def filter_set(chat_id: int, keyword: str, data: dict):
-    """Save or overwrite a filter for a chat."""
     keyword = keyword.lower()
     doc = {
         "chat_id": chat_id,
@@ -168,24 +169,20 @@ async def filter_set(chat_id: int, keyword: str, data: dict):
 
 
 async def filter_get(chat_id: int, keyword: str):
-    """Return a single filter doc, or None."""
     return await _db.filters.find_one({"chat_id": chat_id, "keyword": keyword.lower()})
 
 
 async def filter_delete(chat_id: int, keyword: str) -> int:
-    """Delete a specific filter. Returns deleted count."""
     res = await _db.filters.delete_one({"chat_id": chat_id, "keyword": keyword.lower()})
     return res.deleted_count
 
 
 async def filter_delete_all(chat_id: int) -> int:
-    """Delete every filter in a chat. Returns deleted count."""
     res = await _db.filters.delete_many({"chat_id": chat_id})
     return res.deleted_count
 
 
 async def filter_list(chat_id: int):
-    """Return all filters for a chat."""
     cursor = _db.filters.find({"chat_id": chat_id}).sort("keyword", 1)
     return [doc async for doc in cursor]
 
