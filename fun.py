@@ -1,15 +1,18 @@
 """Fun plugin: .waifu (find a waifu from the group) and .couple (ship two members)."""
 import io
+import logging
 import random
 import time
 
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 from telegram import ReplyParameters
 from telegram.constants import ChatType, ParseMode
 
 import database as dbase
 import sticker
 from common import T, dual_command, esc, mention, q, say
+
+log = logging.getLogger("fun")
 
 HELP_TXT = (
     "<b>✦ fun</b>\n\n"
@@ -68,7 +71,6 @@ def _guess_gender(name: str) -> str:
         return "female"
     if first in _MALE_NAMES:
         return "male"
-    # heuristic by suffix
     if first.endswith(("a", "i", "ee", "ya", "ina", "isha", "ita", "ana", "ika")):
         return "female"
     if first.endswith(("dev", "ish", "it", "iv", "om", "on", "ay", "an", "ar", "av")):
@@ -76,39 +78,56 @@ def _guess_gender(name: str) -> str:
     return "unknown"
 
 
-class _FakeUser:
-    """Minimal stand-in for sticker._avatar()."""
-    def __init__(self, uid, name):
-        self.id = uid
-        self.full_name = name
+# ───────── profile photo fetcher ─────────
+async def _fetch_profile_photo(ctx, user_id: int):
+    """Fetch user's real Telegram profile photo as PIL Image. Returns None if none."""
+    try:
+        photos = await ctx.bot.get_user_profile_photos(user_id, limit=1)
+        if photos.total_count == 0:
+            return None
+        # largest size
+        file_id = photos.photos[0][-1].file_id
+        tg_file = await ctx.bot.get_file(file_id)
+        bio = io.BytesIO()
+        await tg_file.download_to_memory(bio)
+        bio.seek(0)
+        return Image.open(bio).convert("RGBA")
+    except Exception as e:
+        log.warning("profile photo fetch failed for %s: %s", user_id, e)
+        return None
 
 
-# ───────── drawing helpers ─────────
-def _vertical_gradient(w, h, top, bottom):
-    grad = Image.new("RGB", (1, h))
-    for y in range(h):
-        t = y / h
-        r = int(top[0] * (1 - t) + bottom[0] * t)
-        g = int(top[1] * (1 - t) + bottom[1] * t)
-        b = int(top[2] * (1 - t) + bottom[2] * t)
-        grad.putpixel((0, y), (r, g, b))
-    return grad.resize((w, h))
+def _placeholder_avatar(name: str, size: int) -> Image.Image:
+    """Pretty fallback: gradient circle + big initial."""
+    # pick color from name hash
+    hue = hash(name or "x") % 360
+    import colorsys
+    r, g, b = colorsys.hsv_to_rgb(hue / 360, 0.65, 0.85)
+    color = (int(r * 255), int(g * 255), int(b * 255))
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.ellipse((0, 0, size, size), fill=color)
+    initial = (name or "?").strip()[:1].upper() or "?"
+    try:
+        f = ImageFont.truetype("DejaVuSans-Bold.ttf", int(size * 0.5))
+    except Exception:
+        f = ImageFont.load_default()
+    bbox = d.textbbox((0, 0), initial, font=f)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    d.text(((size - tw) / 2 - bbox[0], (size - th) / 2 - bbox[1]), initial, font=f, fill=(255, 255, 255))
+    return img
 
 
-def _rounded_avatar(img, size, radius):
-    mask = Image.new("L", (size, size), 0)
-    d = ImageDraw.Draw(mask)
-    d.rounded_rectangle((0, 0, size, size), radius=radius, fill=255)
-    out = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    out.paste(img, (0, 0), mask)
-    return out
-
-
-def _draw_heart(draw, cx, cy, w, color):
-    r = w / 4
-    draw.ellipse((cx - w / 2, cy - r, cx, cy + r), fill=color)
-    draw.ellipse((cx, cy - r, cx + w / 2, cy + r), fill=color)
-    draw.polygon([(cx - w / 2, cy), (cx + w / 2, cy), (cx, cy + w / 2)], fill=color)
+async def _get_avatar(ctx, user_id: int, name: str, size: int) -> Image.Image:
+    """Real photo if available, else pretty placeholder."""
+    img = await _fetch_profile_photo(ctx, user_id)
+    if img is None:
+        return _placeholder_avatar(name, size)
+    # center-crop to square
+    w, h = img.size
+    side = min(w, h)
+    img = img.crop(((w - side) // 2, (h - side) // 2, (w + side) // 2, (h + side) // 2))
+    return img.resize((size, size), Image.LANCZOS)
 
 
 # ───────── db helpers ─────────
@@ -146,7 +165,6 @@ async def waifu_cmd(update, ctx):
     target_id = None
     existing = await _get_waifu(chat.id, user.id)
     if existing and (time.time() - existing.get("assigned_at", 0)) < WAIFU_24H:
-        # verify target still in group
         try:
             await chat.get_member(existing["target_id"])
             target_id = existing["target_id"]
@@ -159,7 +177,6 @@ async def waifu_cmd(update, ctx):
         if not members:
             await say(ctx, chat.id, T("not enough active members seen yet — chat a bit more first!"), reply_to=msg.message_id)
             return
-
         sender_gender = _guess_gender(user.first_name or "")
         candidates = []
         for m in members:
@@ -180,72 +197,104 @@ async def waifu_cmd(update, ctx):
     reply_params = ReplyParameters(message_id=msg.message_id, allow_sending_without_reply=True)
     cap = q(T("<b>💖 {name} is your waifu for today!</b>", name=esc(target_name)))
 
-    # try Telegram profile photo first
-    file_id = None
+    # ✅ Try direct send with file_id first (fastest & cleanest)
     try:
         photos = await ctx.bot.get_user_profile_photos(target_id, limit=1)
         if photos.total_count > 0:
             file_id = photos.photos[0][-1].file_id
+            await ctx.bot.send_photo(chat.id, file_id, caption=cap,
+                                     parse_mode=ParseMode.HTML, reply_parameters=reply_params)
+            return
+    except Exception as e:
+        log.warning("send via file_id failed: %s", e)
+
+    # Fallback: build a nicer placeholder
+    img = await _get_avatar(ctx, target_id, target_name, 512)
+    out = io.BytesIO()
+    out.name = "waifu.png"
+    img.save(out, "PNG")
+    out.seek(0)
+    await ctx.bot.send_photo(chat.id, out, caption=cap,
+                             parse_mode=ParseMode.HTML, reply_parameters=reply_params)
+
+
+# ───────── image builders ─────────
+def _vertical_gradient(w, h, top, bottom):
+    grad = Image.new("RGB", (1, h))
+    for y in range(h):
+        t = y / h
+        r = int(top[0] * (1 - t) + bottom[0] * t)
+        g = int(top[1] * (1 - t) + bottom[1] * t)
+        b = int(top[2] * (1 - t) + bottom[2] * t)
+        grad.putpixel((0, y), (r, g, b))
+    return grad.resize((w, h))
+
+
+def _rounded(img, radius):
+    size = img.size[0]
+    mask = Image.new("L", (size, size), 0)
+    d = ImageDraw.Draw(mask)
+    d.rounded_rectangle((0, 0, size, size), radius=radius, fill=255)
+    out = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    out.paste(img, (0, 0), mask)
+    return out
+
+
+def _draw_heart(draw, cx, cy, w, color):
+    r = w / 4
+    draw.ellipse((cx - w / 2, cy - r, cx, cy + r), fill=color)
+    draw.ellipse((cx, cy - r, cx + w / 2, cy + r), fill=color)
+    draw.polygon([(cx - w / 2, cy), (cx + w / 2, cy), (cx, cy + w / 2)], fill=color)
+
+
+def _font(bold, size):
+    try:
+        return ImageFont.truetype("DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf", size)
     except Exception:
-        pass
-
-    if file_id:
-        await ctx.bot.send_photo(chat.id, file_id, caption=cap, parse_mode=ParseMode.HTML, reply_parameters=reply_params)
-    else:
-        # fallback: draw avatar via sticker helper
-        target_user = _FakeUser(target_id, target_name)
-        try:
-            img = await sticker._avatar(ctx, target_user, 512)
-            out = io.BytesIO()
-            out.name = "waifu.png"
-            img.save(out, "PNG")
-            out.seek(0)
-            await ctx.bot.send_photo(chat.id, out, caption=cap, parse_mode=ParseMode.HTML, reply_parameters=reply_params)
-        except Exception as e:
-            await say(ctx, chat.id, T("couldn't fetch that waifu's photo:") + f" {esc(e)}", reply_to=msg.message_id)
+        return ImageFont.load_default()
 
 
-# ───────── .couple ─────────
-async def _build_couple_image(ctx, a, b, pct) -> io.BytesIO:
-    W, H = 800, 500
-    img = _vertical_gradient(W, H, (35, 15, 60), (10, 20, 55))
+def _renderable(text: str) -> str:
+    """Strip non-renderable chars for the font."""
+    return "".join(c for c in (text or "") if c.isprintable())
+
+
+async def _build_couple_image(ctx, a_id, a_name, b_id, b_name, pct) -> io.BytesIO:
+    W, H = 820, 520
+    img = _vertical_gradient(W, H, (35, 15, 60), (10, 20, 55)).convert("RGBA")
     draw = ImageDraw.Draw(img)
 
-    title_font = sticker._load_font(True, 48)
-    name_font = sticker._load_font(True, 32)
-    pct_font = sticker._load_font(True, 52)
+    title_font = _font(True, 46)
+    name_font = _font(True, 30)
+    pct_font = _font(True, 46)
 
     title = "Today's Couple"
     tb = draw.textbbox((0, 0), title, font=title_font)
     draw.text(((W - (tb[2] - tb[0])) / 2, 30), title, font=title_font, fill=(255, 105, 180))
 
     avatar_size = 220
-    ay = 150
+    ay = 160
     left_x = 90
     right_x = W - 90 - avatar_size
 
-    a_img = await sticker._avatar(ctx, a, avatar_size)
-    b_img = await sticker._avatar(ctx, b, avatar_size)
-
-    a_round = _rounded_avatar(a_img, avatar_size, 40)
-    b_round = _rounded_avatar(b_img, avatar_size, 40)
-
+    a_img = await _get_avatar(ctx, a_id, a_name, avatar_size)
+    b_img = await _get_avatar(ctx, b_id, b_name, avatar_size)
+    a_round = _rounded(a_img, 40)
+    b_round = _rounded(b_img, 40)
     img.paste(a_round, (left_x, ay), a_round)
     img.paste(b_round, (right_x, ay), b_round)
 
     cx, cy = W // 2, ay + avatar_size // 2
-    # glow
     glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     gdraw = ImageDraw.Draw(glow)
-    _draw_heart(gdraw, cx, cy, 150, (255, 80, 120, 90))
-    glow = glow.filter(ImageFilter.GaussianBlur(18))
+    _draw_heart(gdraw, cx, cy, 160, (255, 80, 120, 100))
+    glow = glow.filter(ImageFilter.GaussianBlur(20))
     img.paste(glow, (0, 0), glow)
-    # solid heart
-    _draw_heart(draw, cx, cy, 100, (255, 55, 100))
+    _draw_heart(draw, cx, cy, 95, (255, 55, 100))
 
-    a_name = sticker._renderable(True, a.full_name, "Someone")[:16]
-    b_name = sticker._renderable(True, b.full_name, "Someone")[:16]
-    for name, x in ((a_name, left_x + avatar_size / 2), (b_name, right_x + avatar_size / 2)):
+    a_disp = _renderable(a_name)[:16] or "Someone"
+    b_disp = _renderable(b_name)[:16] or "Someone"
+    for name, x in ((a_disp, left_x + avatar_size / 2), (b_disp, right_x + avatar_size / 2)):
         nb = draw.textbbox((0, 0), name, font=name_font)
         draw.text((x - (nb[2] - nb[0]) / 2, ay + avatar_size + 20), name, font=name_font, fill=(255, 255, 255))
 
@@ -255,11 +304,12 @@ async def _build_couple_image(ctx, a, b, pct) -> io.BytesIO:
 
     out = io.BytesIO()
     out.name = "couple.png"
-    img.save(out, "PNG")
+    img.convert("RGB").save(out, "PNG")
     out.seek(0)
     return out
 
 
+# ───────── .couple ─────────
 async def couple_cmd(update, ctx):
     msg, chat = update.effective_message, update.effective_chat
     if chat.type == ChatType.PRIVATE:
@@ -296,13 +346,12 @@ async def couple_cmd(update, ctx):
     a_name = a_member.get("name", "Someone")
     b_name = b_member.get("name", "Someone")
 
-    a = _FakeUser(a_id, a_name)
-    b = _FakeUser(b_id, b_name)
     pct = random.randint(40, 100)
 
     try:
-        photo = await _build_couple_image(ctx, a, b, pct)
+        photo = await _build_couple_image(ctx, a_id, a_name, b_id, b_name, pct)
     except Exception as e:
+        log.error("couple image build failed: %s", e)
         await say(ctx, chat.id, T("couldn't build that image:") + f" {esc(e)}", reply_to=msg.message_id)
         return
 
