@@ -41,8 +41,8 @@ HELP_TXT = (
 
 # Regex for [Text ~ URL]
 _BTN_RE = re.compile(r"\[([^\[\]~]+?)\s*~\s*([^\[\]]+?)\]")
-# Regex for [Text](buttonurl:URL:color) - Rose style with optional color
-_ROSE_BTN_RE = re.compile(r"\[([^\[\]]+?)\]\(buttonurl:(https?://[^\)]+?)(?::(danger|success|primary))?\)")
+# ✅ FIXED: Regex for [Text](buttonurl:URL) - ab color URL ka part nahi banega
+_ROSE_BTN_RE = re.compile(r"\[([^\[\]]+?)\]\(buttonurl:(https?://[^\)]+?)\)")
 
 
 def _parse_buttons(text: str | None):
@@ -56,14 +56,21 @@ def _parse_buttons(text: str | None):
     def _repl_rose(m):
         label = m.group(1).strip()
         url = m.group(2).strip()
-        color = m.group(3) # danger, success, primary (or None)
+        color = None
+        
+        # ✅ FIX: Check karo ki URL ke end me color tag hai ya nahi
+        for c in ["danger", "success", "primary"]:
+            if url.endswith(f":{c}"):
+                color = c
+                url = url[:-len(f":{c}")]  # URL se color tag hata do
+                break
         
         btn = {"text": label, "url": url}
         if color:
             btn["style"] = color
             
         rows.append([btn])
-        return "" # Remove from text
+        return "" 
 
     # 2. Parse Custom-style buttons [Text ~ URL]
     def _repl_custom(m):
@@ -94,9 +101,8 @@ def _extract_native_buttons(reply_msg):
     for row in markup.inline_keyboard:
         btn_row = []
         for btn in row:
-            if btn.url:  # Only save URL buttons
+            if btn.url:
                 btn_data = {"text": btn.text, "url": btn.url}
-                # Native buttons might have a style attribute
                 if hasattr(btn, 'style') and btn.style:
                     btn_data["style"] = btn.style
                 btn_row.append(btn_data)
@@ -106,7 +112,7 @@ def _extract_native_buttons(reply_msg):
 
 
 def _kb_from_stored(rows):
-    """Build InlineKeyboardMarkup safely, handling older PTB versions without style support."""
+    """Build InlineKeyboardMarkup safely."""
     if not rows:
         return None
     
@@ -114,14 +120,12 @@ def _kb_from_stored(rows):
     for row in rows:
         kb_row = []
         for b in row:
-            # SAFE FALLBACK: Try without style first, then with style
             try:
                 if "style" in b and b["style"]:
                     btn = InlineKeyboardButton(text=b["text"], url=b["url"], style=b["style"])
                 else:
                     btn = InlineKeyboardButton(text=b["text"], url=b["url"])
             except TypeError:
-                # If PTB version is old, fallback to normal button
                 btn = InlineKeyboardButton(text=b["text"], url=b["url"])
             kb_row.append(btn)
         kb_rows.append(kb_row)
@@ -265,20 +269,16 @@ async def trigger_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if text.startswith(("/", ".")):
         return
 
-    # Extract words including @mentions
     words = set(re.findall(r"@?\w+", text.lower()))
     if not words:
         return
 
     for word in words:
-        # Try matching exactly as it is
         row = await dbase.filter_get(chat.id, word)
         
-        # If not found and word has @, try without @
         if not row and word.startswith("@"):
             row = await dbase.filter_get(chat.id, word[1:])
         
-        # If not found and word has no @, try with @
         if not row and not word.startswith("@"):
             row = await dbase.filter_get(chat.id, f"@{word}")
 
