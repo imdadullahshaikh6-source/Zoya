@@ -17,6 +17,7 @@ OWNER_ID = 8373739674
 START_TIME = time.time()
 PING_IMAGE = "https://graph.org/file/d3a2c17942e606f4ec811-9c0373fa8bb10f4448.jpg"
 
+# Initialize CPU counter
 psutil.cpu_percent(interval=None)
 
 COMMANDS = [
@@ -48,26 +49,25 @@ def _format_bytes(size: float) -> str:
 
 # ───────── command handler ─────────
 async def ping_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    # Owner-only, silently ignore others
     if not update.effective_user or update.effective_user.id != OWNER_ID:
         return
 
     start = time.time()
     msg = update.effective_message
 
+    # System stats
     cpu = psutil.cpu_percent(interval=None)
     ram = psutil.virtual_memory().percent
 
-    # ───── MongoDB Stats (Fixed Truthiness Bug) ─────
+    # MongoDB stats (Fixed the truth value testing bug)
     mongo_line = "<b>🗄 MongoDB:</b> N/A"
     try:
-        # ✅ FIX: 'or' ki jagah explicit None check use kiya
         db = getattr(dbase, "db", None)
         if db is None:
             db = getattr(dbase, "_db", None)
 
-        if db is None:
-            mongo_line = "<b>🗄 MongoDB:</b> ❌ DB object is None"
-        else:
+        if db is not None:
             stats = await db.command("dbstats")
             data_size = stats.get("dataSize", 0)
             storage_size = stats.get("storageSize", 0)
@@ -83,6 +83,8 @@ async def ping_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     f"<b>🗄 MongoDB:</b> Data <code>{_format_bytes(data_size)}</code> | "
                     f"Storage <code>{_format_bytes(storage_size)}</code>"
                 )
+        else:
+            mongo_line = "<b>🗄 MongoDB:</b> ❌ DB object is None"
     except Exception as e:
         log.error("Failed to fetch MongoDB stats: %s", e)
         mongo_line = f"<b>🗄 MongoDB:</b> ❌ <code>{str(e)[:40]}</code>"
