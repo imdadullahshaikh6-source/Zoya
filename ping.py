@@ -66,7 +66,6 @@ async def ping_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # MongoDB stats
     mongo_line = "<b>🗄 MongoDB:</b> N/A"
     try:
-        # Access public db object from database.py
         db = getattr(dbase, "db", None) or getattr(dbase, "_db", None)
         if db is not None:
             stats = await db.command("dbstats")
@@ -90,7 +89,7 @@ async def ping_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Uptime
     uptime_str = _format_uptime(time.time() - START_TIME)
 
-    # Latency (processing time before sending)
+    # Latency
     latency_ms = (time.time() - start) * 1000
 
     caption = (
@@ -103,21 +102,28 @@ async def ping_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
     try:
+        # ✅ FIX: do_quote hata kar reply_to_message_id use kiya
         await msg.reply_photo(
             photo=PING_IMAGE,
             caption=caption,
             parse_mode=ParseMode.HTML,
-            do_quote=True,
+            reply_to_message_id=msg.message_id,
         )
     except Exception as e:
         log.error("Failed to send ping photo: %s", e)
-        # Fallback to plain text if photo fails
-        await msg.reply_text(caption, parse_mode=ParseMode.HTML, do_quote=True)
+        # Fallback to plain text
+        try:
+            await msg.reply_text(
+                caption, 
+                parse_mode=ParseMode.HTML, 
+                reply_to_message_id=msg.message_id
+            )
+        except Exception as fallback_err:
+            log.error("Fallback text also failed: %s", fallback_err)
 
 
 # ───────── registration ─────────
 def register(app: Application):
-    """Register .ping and /ping (case-insensitive, no extra args)."""
     app.add_handler(
         MessageHandler(
             tg_filters.Regex(r"^[./]ping\s*$", flags=re.IGNORECASE),
