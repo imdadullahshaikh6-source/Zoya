@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 
+import uvloop
 from telegram import InlineKeyboardMarkup, LinkPreviewOptions, Update
 from telegram.constants import ChatType, ParseMode
 from telegram.error import TelegramError
@@ -217,12 +218,18 @@ async def post_init(app: Application):
 
 
 def main():
-    # ✅ FIX: Python 3.11 ke liye event loop manually set karo
-    # uvloop hata diya kyunki wo PTB ke saath crash karta hai
+    # ✅ FIX: uvloop 0.22.x + Python 3.11 crash fix
+    # Pehle default event loop banayein, phir uvloop install karein
     try:
         asyncio.get_event_loop()
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
+    
+    try:
+        uvloop.install()
+        log.info("uvloop installed — running at max speed 🚀")
+    except Exception as e:
+        log.warning("uvloop install failed, using default loop: %s", e)
 
     app = (
         Application.builder()
