@@ -143,4 +143,52 @@ async def kang_set(user_id: int, name: str, count: int, part: int | None = None)
     if part is not None:
         fields["part"] = part
     await _db.kangs.update_one({"_id": user_id}, {"$set": fields}, upsert=True)
+
+
+# ───────── filters (keyword -> auto reply, per chat) ─────────
+async def filter_set(chat_id: int, keyword: str, data: dict):
+    """Save or overwrite a filter for a chat."""
+    keyword = keyword.lower()
+    doc = {
+        "chat_id": chat_id,
+        "keyword": keyword,
+        "type": data.get("type", "text"),
+        "content": data.get("content", ""),
+        "caption": data.get("caption", ""),
+        "buttons": data.get("buttons"),  # list of rows of {text, url} dicts
+        "set_by": data.get("set_by"),
+        "since": time.time(),
+    }
+    await _db.filters.update_one(
+        {"chat_id": chat_id, "keyword": keyword},
+        {"$set": doc},
+        upsert=True,
+    )
+
+
+async def filter_get(chat_id: int, keyword: str):
+    """Return a single filter doc, or None."""
+    return await _db.filters.find_one({"chat_id": chat_id, "keyword": keyword.lower()})
+
+
+async def filter_delete(chat_id: int, keyword: str) -> int:
+    """Delete a specific filter. Returns deleted count."""
+    res = await _db.filters.delete_one({"chat_id": chat_id, "keyword": keyword.lower()})
+    return res.deleted_count
+
+
+async def filter_delete_all(chat_id: int) -> int:
+    """Delete every filter in a chat. Returns deleted count."""
+    res = await _db.filters.delete_many({"chat_id": chat_id})
+    return res.deleted_count
+
+
+async def filter_list(chat_id: int):
+    """Return all filters for a chat."""
+    cursor = _db.filters.find({"chat_id": chat_id}).sort("keyword", 1)
+    return [doc async for doc in cursor]
+
+
+async def filter_count(chat_id: int) -> int:
+    return await _db.filters.count_documents({"chat_id": chat_id})
             
