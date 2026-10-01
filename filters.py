@@ -20,7 +20,7 @@ COMMANDS = [
     ("filter", "Set a new filter (reply to a message)"),
     ("unfilter", "Remove a filter by keyword"),
     ("filters", "List all filters in this chat"),
-    ("stop", "Delete every filter in this chat"),
+    ("stop", "Delete all filters in this chat"),
 ]
 
 HELP_TXT = (
@@ -52,20 +52,16 @@ def _parse_buttons(text: str | None):
 
     rows = []
 
-    # 1. Parse Rose-style buttons [Text](buttonurl:URL:color)
     def _repl_rose(m):
         label = m.group(1).strip()
         url = m.group(2).strip()
         color = m.group(3)
-        
         btn = {"text": label, "url": url}
         if color:
             btn["style"] = color
-            
         rows.append([btn])
-        return "" 
+        return ""
 
-    # 2. Parse Custom-style buttons [Text ~ URL]
     def _repl_custom(m):
         label = m.group(1).strip()
         url = m.group(2).strip()
@@ -76,7 +72,6 @@ def _parse_buttons(text: str | None):
 
     cleaned = _ROSE_BTN_RE.sub(_repl_rose, text)
     cleaned = _BTN_RE.sub(_repl_custom, cleaned).strip()
-    
     return cleaned, (rows or None)
 
 
@@ -94,7 +89,6 @@ def _extract_native_buttons(reply_msg):
         for btn in row:
             if btn.url:
                 btn_data = {"text": btn.text, "url": btn.url}
-                # Native buttons might have a style attribute
                 if hasattr(btn, 'style') and btn.style:
                     btn_data["style"] = btn.style
                 btn_row.append(btn_data)
@@ -112,19 +106,15 @@ def _kb_from_stored(rows):
     for row in rows:
         kb_row = []
         for b in row:
-            # SAFE FALLBACK: Try without style first, then with style
             try:
-                # Some PTB versions don't support 'style' parameter, so we try/except
                 if "style" in b and b["style"]:
                     btn = InlineKeyboardButton(text=b["text"], url=b["url"], style=b["style"])
                 else:
                     btn = InlineKeyboardButton(text=b["text"], url=b["url"])
             except TypeError:
-                # If PTB version is old, fallback to normal button
                 btn = InlineKeyboardButton(text=b["text"], url=b["url"])
             kb_row.append(btn)
         kb_rows.append(kb_row)
-        
     return InlineKeyboardMarkup(kb_rows)
 
 
@@ -179,31 +169,25 @@ async def filter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         clean, btns = _parse_buttons(reply.text_html)
         final_btns = (native_btns or []) + (btns or [])
         data.update(type="text", content=clean, buttons=final_btns or None)
-        
     elif reply.sticker:
         final_btns = (native_btns or [])
         data.update(type="sticker", content=reply.sticker.file_id, buttons=final_btns or None)
-        
     elif reply.photo:
         clean, btns = _parse_buttons(reply.caption_html)
         final_btns = (native_btns or []) + (btns or [])
         data.update(type="photo", content=reply.photo[-1].file_id, caption=clean, buttons=final_btns or None)
-        
     elif reply.video:
         clean, btns = _parse_buttons(reply.caption_html)
         final_btns = (native_btns or []) + (btns or [])
         data.update(type="video", content=reply.video.file_id, caption=clean, buttons=final_btns or None)
-        
     elif reply.animation:
         clean, btns = _parse_buttons(reply.caption_html)
         final_btns = (native_btns or []) + (btns or [])
         data.update(type="animation", content=reply.animation.file_id, caption=clean, buttons=final_btns or None)
-        
     elif reply.audio:
         clean, btns = _parse_buttons(reply.caption_html)
         final_btns = (native_btns or []) + (btns or [])
         data.update(type="audio", content=reply.audio.file_id, caption=clean, buttons=final_btns or None)
-        
     else:
         await msg.reply_text("⚠️ Unsupported message type.")
         return
@@ -264,12 +248,23 @@ async def trigger_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if text.startswith(("/", ".")):
         return
 
-    words = set(re.findall(r"\b\w+\b", text.lower()))
+    # ✅ FIX: @?\w+ use kiya taaki @username bhi capture ho
+    words = set(re.findall(r"@?\w+", text.lower()))
     if not words:
         return
 
     for word in words:
+        # Try matching exactly as it is
         row = await dbase.filter_get(chat.id, word)
+        
+        # ✅ FIX: Agar @ ke saath match nahi hua, toh @ hata kar try karo
+        if not row and word.startswith("@"):
+            row = await dbase.filter_get(chat.id, word[1:])
+        
+        # ✅ FIX: Agar @ ke bina match nahi hua, toh @ laga kar try karo
+        if not row and not word.startswith("@"):
+            row = await dbase.filter_get(chat.id, f"@{word}")
+
         if not row:
             continue
 
@@ -280,22 +275,21 @@ async def trigger_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         try:
             if ftype == "text":
-                await msg.reply_text(content or "", reply_markup=kb, parse_mode=ParseMode.HTML, do_quote=True)
+                await msg.reply_text(content or "", reply_markup=kb, parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id)
             elif ftype == "sticker":
-                await msg.reply_sticker(content, reply_markup=kb, do_quote=True)
+                await msg.reply_sticker(content, reply_markup=kb, reply_to_message_id=msg.message_id)
             elif ftype == "photo":
-                await msg.reply_photo(content, caption=caption or None, reply_markup=kb, parse_mode=ParseMode.HTML, do_quote=True)
+                await msg.reply_photo(content, caption=caption or None, reply_markup=kb, parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id)
             elif ftype == "video":
-                await msg.reply_video(content, caption=caption or None, reply_markup=kb, parse_mode=ParseMode.HTML, do_quote=True)
+                await msg.reply_video(content, caption=caption or None, reply_markup=kb, parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id)
             elif ftype == "animation":
-                await msg.reply_animation(content, caption=caption or None, reply_markup=kb, parse_mode=ParseMode.HTML, do_quote=True)
+                await msg.reply_animation(content, caption=caption or None, reply_markup=kb, parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id)
             elif ftype == "audio":
-                await msg.reply_audio(content, caption=caption or None, reply_markup=kb, parse_mode=ParseMode.HTML, do_quote=True)
+                await msg.reply_audio(content, caption=caption or None, reply_markup=kb, parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id)
         except Exception as e:
             log.error("filter send failed [%s/%s]: %s", chat.id, word, e)
-            # Send error to chat so you know exactly what's wrong
             try:
-                await msg.reply_text(f"❌ Error sending filter: <code>{e}</code>")
+                await msg.reply_text(f"❌ Error sending filter: <code>{e}</code>", reply_to_message_id=msg.message_id)
             except:
                 pass
 
