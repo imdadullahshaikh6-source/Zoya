@@ -20,6 +20,9 @@ import fun
 import ping
 import sticker
 import welcome
+import asyncio
+import uvloop
+asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from common import B, T, log, mention, say, sc
 
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(name)s | %(message)s", level=logging.INFO)
