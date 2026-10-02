@@ -2,9 +2,10 @@
 .q / .qr  — render the replied-to message as a Telegram-style quote sticker
 .kang     — steal a replied sticker/photo into the user's own auto-growing pack
 
-The quote sticker replicates a Telegram purple message bubble: rounded purple
-box, sender's display name in bold at the top, message body below. The name
-is the sender's full_name (never @username)."""
+The quote sticker replicates a Telegram incoming message bubble: circular
+avatar on the left, sender's display name in the peer color (pink, orange,
+violet, etc.) at the top, and the message body in white below, all inside a
+dark rounded bubble. The name is the sender's full_name (never @username)."""
 import io
 import os
 import re
@@ -31,17 +32,26 @@ COMMANDS = [("q", "Quote a message as a sticker"), ("kang", "Steal a sticker int
 MAX_SIDE = 512
 EMOJI_RE = re.compile(r"^[\U0001F000-\U0001FAFF\u2600-\u27BF\u2190-\u21FF\u2B00-\u2BFF]+$")
 
-# Telegram dark-theme outgoing bubble — the purple from your screenshot.
-BUBBLE_BG = (135, 116, 225, 255)
-NAME_COLOR = (255, 255, 255)
-TEXT_COLOR = (255, 255, 255)
+# Telegram dark-theme incoming bubble (navy/purple).
+BUBBLE_BG = (43, 43, 63, 255)
+
+# Telegram's official peer colours — the same 7 colours the client uses for
+# usernames, chosen deterministically from the user id. Index = user_id % 7.
+PEER_COLORS = [
+    (225, 112, 118),   # red
+    (250, 167, 116),   # orange
+    (166, 149, 231),   # violet
+    (123, 200, 98),    # green
+    (110, 201, 203),   # cyan
+    (101, 170, 221),   # blue
+    (238, 122, 174),   # pink
+]
 
 FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 FONT_REGULAR = os.path.join(FONT_DIR, "DejaVuSans.ttf")
 FONT_BOLD = os.path.join(FONT_DIR, "DejaVuSans-Bold.ttf")
 
-# Lookalike map — substitutes decorative glyphs DejaVu can't draw, so the name
-# never collapses into tofu boxes.
+# Lookalike map for decorative characters that DejaVu Sans can't draw.
 _NAME_LOOKALIKE = {
     '˹': '[', '˺': ']', '˻': '[', '˼': ']', '˽': '|', '˾': '|', '˿': '|',
     '「': '[', '」': ']', '『': '[', '』': ']',
@@ -128,6 +138,11 @@ def _font_safe_name(name: str, bold: bool = True) -> str:
     return cleaned or "Unknown"
 
 
+def _peer_color(user_id: int):
+    """Same deterministic colour Telegram assigns to a user's name."""
+    return PEER_COLORS[abs(user_id) % len(PEER_COLORS)]
+
+
 def _fit_512(img: Image.Image) -> Image.Image:
     w, h = img.size
     scale = MAX_SIDE / max(w, h)
@@ -150,59 +165,97 @@ def _wrap(draw, text, font, max_w):
     return lines[:10] or [""]
 
 
-async def build_quote_sticker(ctx, src_msg, sender) -> io.BytesIO:
-    """Purple Telegram-style message bubble with the sender's name on top and
-    the message body underneath. No avatar, no time, no tick — just like the
-    screenshot the user provided."""
-    W = 512
-    outer_pad = 14
-    inner_pad = 26
+async def _avatar(ctx, user, size=90) -> Image.Image:
+    """Circular avatar — profile photo if available, else coloured initials."""
+    try:
+        photos = await ctx.bot.get_user_profile_photos(user.id, limit=1)
+        if photos.photos:
+            tgfile = await ctx.bot.get_file(photos.photos[0][-1].file_id)
+            raw = await tgfile.download_as_bytearray()
+            im = Image.open(io.BytesIO(bytes(raw))).convert("RGBA").resize((size, size))
+            mask = Image.new("L", (size, size), 0)
+            ImageDraw.Draw(mask).ellipse((0, 0, size, size), fill=255)
+            im.putalpha(mask)
+            return im
+    except (TelegramError, OSError):
+        pass
+    im = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    d.ellipse((0, 0, size, size), fill=_peer_color(user.id))
+    f = _load_font(True, size // 2)
+    words = re.findall(r"[A-Za-z]+", _font_safe_name(user.full_name))
+    initials = (words[0][0] + (words[1][0] if len(words) > 1 else "")).upper() if words else "?"
+    bbox = d.textbbox((0, 0), initials, font=f)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    d.text(((size - tw) / 2 - bbox[0], (size - th) / 2 - bbox[1]), initials, font=f, fill=(255, 255, 255))
+    return im
 
-    font_name = _load_font(True, 34)
-    font_text = _load_font(False, 38)
+
+async def build_quote_sticker(ctx, src_msg, sender) -> io.BytesIO:
+    """Replicates a Telegram incoming message bubble:
+         • circular avatar on the left
+         • sender's display name in the peer colour at the top
+         • message body in white below
+    All inside a dark rounded bubble. No time, no tick."""
+    W = 512
+    outer_pad = 12
+    avatar_size = 92
+    gap = 14
+    inner_pad = 22
+
+    font_name = _load_font(True, 30)
+    font_text = _load_font(False, 36)
 
     raw_text = src_msg.text or src_msg.caption or "[media]"
     text = _renderable(False, raw_text, "[unsupported characters]")
     sender_name = _font_safe_name(sender.full_name if sender else "", bold=True)
     print(f"[sticker] name: {sender.full_name!r} -> {sender_name!r}")
 
-    text_w = W - outer_pad * 2 - inner_pad * 2
+    bubble_x = outer_pad + avatar_size + gap
+    bubble_w = W - bubble_x - outer_pad
+    text_w = bubble_w - inner_pad * 2
+
     probe = ImageDraw.Draw(Image.new("RGB", (10, 10)))
 
     name_lines = _wrap(probe, sender_name, font_name, text_w)
-    name_line_h = font_name.getbbox("Ag")[3] + 8
+    name_line_h = font_name.getbbox("Ag")[3] + 6
 
     text_lines = _wrap(probe, text, font_text, text_w)
-    text_line_h = font_text.getbbox("Ag")[3] + 14
+    text_line_h = font_text.getbbox("Ag")[3] + 12
 
-    gap_name_text = 14
+    gap_name_text = 12
     body_h = (
         name_line_h * len(name_lines)
         + gap_name_text
         + text_line_h * len(text_lines)
     )
     bubble_h = body_h + inner_pad * 2
-    H = bubble_h + outer_pad * 2
+    H = max(avatar_size, bubble_h) + outer_pad * 2
 
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    # The purple message bubble
+    by = (H - bubble_h) // 2
     draw.rounded_rectangle(
-        (outer_pad, outer_pad, W - outer_pad, H - outer_pad),
-        radius=30, fill=BUBBLE_BG,
+        (bubble_x, by, bubble_x + bubble_w, by + bubble_h),
+        radius=26, fill=BUBBLE_BG,
     )
 
-    ty = outer_pad + inner_pad
-    # Name — bold white at the top
+    ty = by + inner_pad
+    name_color = _peer_color(sender.id) if sender else (255, 255, 255)
+    # Name — peer colour (pink, orange, violet, etc.) at the top
     for ln in name_lines:
-        draw.text((outer_pad + inner_pad, ty), ln, font=font_name, fill=NAME_COLOR)
+        draw.text((bubble_x + inner_pad, ty), ln, font=font_name, fill=name_color)
         ty += name_line_h
     ty += gap_name_text
-    # Message body — regular white below
+    # Message body — white below
     for ln in text_lines:
-        draw.text((outer_pad + inner_pad, ty), ln, font=font_text, fill=TEXT_COLOR)
+        draw.text((bubble_x + inner_pad, ty), ln, font=font_text, fill=(255, 255, 255))
         ty += text_line_h
+
+    # Avatar — circular, on the left, vertically centred
+    avatar = await _avatar(ctx, sender, avatar_size)
+    img.paste(avatar, (outer_pad, (H - avatar_size) // 2), avatar)
 
     img = _fit_512(img)
     out = io.BytesIO()
