@@ -492,8 +492,7 @@ async def _ensure_parent(ctx, chat_id: int, src):
 
 # ───────── command handler ─────────
 
-
-  def _cooldown_left(uid: int) -> float:
+def _cooldown_left(uid: int) -> float:
     return max(0.0, _last_quote.get(uid, 0.0) + COOLDOWN - time.time())
 
 
