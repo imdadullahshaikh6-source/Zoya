@@ -232,25 +232,27 @@ async def waifu_cmd(update, ctx):
     else:
         cap = q(T("<b>💖 {name} is your waifu for today!</b>", name=mention_html))
 
-    # Try direct file_id send (fastest)
+    # Try direct file_id send (fastest) — ✅ spoiler added
     try:
         photos = await ctx.bot.get_user_profile_photos(target_id, limit=1)
         if photos.total_count > 0:
             file_id = photos.photos[0][-1].file_id
             await ctx.bot.send_photo(chat.id, file_id, caption=cap,
-                                     parse_mode=ParseMode.HTML, reply_parameters=reply_params)
+                                     parse_mode=ParseMode.HTML, reply_parameters=reply_params,
+                                     has_spoiler=True)
             return
     except Exception as e:
         log.warning("send via file_id failed: %s", e)
 
-    # Fallback placeholder
+    # Fallback placeholder — ✅ spoiler added
     img = await _get_avatar(ctx, target_id, target_name, 512)
     out = io.BytesIO()
     out.name = "waifu.png"
     img.save(out, "PNG")
     out.seek(0)
     await ctx.bot.send_photo(chat.id, out, caption=cap,
-                             parse_mode=ParseMode.HTML, reply_parameters=reply_params)
+                             parse_mode=ParseMode.HTML, reply_parameters=reply_params,
+                             has_spoiler=True)
 
 
 # ───────── image builders ─────────
@@ -394,9 +396,11 @@ async def couple_cmd(update, ctx):
     b_mention = _html_mention(b_id, b_name)
     cap = q(T("<b>💞 today's couple</b>\n{a} + {b}", a=a_mention, b=b_mention))
 
+    # ✅ spoiler added
     await ctx.bot.send_photo(
         chat.id, photo, caption=cap, parse_mode=ParseMode.HTML,
         reply_parameters=ReplyParameters(message_id=msg.message_id, allow_sending_without_reply=True),
+        has_spoiler=True,
     )
 
 
