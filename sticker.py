@@ -4,11 +4,14 @@
             (the pack is created once per user and reused on every later .kang;
             if it fills up, a new part is started automatically).
 
-Fonts are bundled in ./fonts (DejaVu Sans) so rendering never depends on
-whatever fonts happen to be installed on the server — DejaVu covers Latin,
-Cyrillic, Greek, and the IPA/phonetic "small caps" block that most fancy
-Telegram-name generators use, so stylised display names render properly
-instead of showing missing-glyph boxes."""
+The sender's NAME is deliberately not drawn into the sticker image anymore —
+it's sent as a real Telegram mention right after the sticker instead. Telegram's
+own client renders any name (however decorative) perfectly, since it has full
+font fallback built in; we can't match that by drawing pixels with one bundled
+font, however good its coverage. The message BODY still has to be drawn into
+the image itself (that's the whole point of a "sticker"), so the bundled
+DejaVu fonts in ./fonts are still required for that and for the avatar-
+initials fallback — only the name-in-the-image part was removed."""
 import io
 import os
 import re
@@ -16,11 +19,12 @@ import unicodedata
 
 from fontTools.ttLib import TTFont
 from PIL import Image, ImageDraw, ImageFont
-from telegram import InputSticker
+from telegram import InputSticker, ReplyParameters
+from telegram.constants import ParseMode
 from telegram.error import TelegramError
 
 import database as dbase
-from common import T, dual_command, esc, say
+from common import T, dual_command, esc, mention, q, say
 
 HELP_TXT = (
     "<b>✦ stickers</b>\n\n"
@@ -51,10 +55,6 @@ def _load_font(bold: bool, size: int):
             return ImageFont.load_default()
 
 
-# Real glyph coverage, read straight from each font's cmap table — checking
-# via rendered-mask bounding boxes is unreliable because a missing-glyph
-# "tofu" box also has a non-empty bbox, so that trick can't tell a real
-# character from a placeholder box. Loaded once at import time.
 def _cmap_of(path):
     try:
         return set(TTFont(path, fontNumber=0, lazy=True).getBestCmap())
@@ -63,16 +63,10 @@ def _cmap_of(path):
 
 
 _CMAP = {False: _cmap_of(FONT_REGULAR), True: _cmap_of(FONT_BOLD)}
-
-# Zero-width/control/combining-mark characters render invisibly or misalign
-# even when the font technically has a glyph for them, so they're dropped too.
 _DROP_CATEGORIES = {"Cf", "Cc", "Co", "Cs", "Mn", "Me"}
 
 
 def _renderable(bold: bool, text: str, fallback: str = "") -> str:
-    # NFKD first: folds "fancy" letters built from compatibility blocks (bold/
-    # italic/fullwidth Unicode math letters, e.g. "𝙕𝙤𝙮𝙖") back to plain ASCII,
-    # while leaving true decorative marks (overlines, carets, ...) untouched.
     cmap = _CMAP[bold]
     out = []
     for ch in unicodedata.normalize("NFKD", text or ""):
@@ -97,7 +91,6 @@ def _initials(name: str) -> str:
 
 
 def _fit_512(img: Image.Image) -> Image.Image:
-    """Telegram static stickers need the longest side to be exactly 512px."""
     w, h = img.size
     scale = MAX_SIDE / max(w, h)
     return img.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.LANCZOS)
@@ -144,16 +137,17 @@ async def _avatar(ctx, user, size=100) -> Image.Image:
 
 
 async def build_quote_sticker(ctx, src_msg, sender) -> io.BytesIO:
-    W = 512  # design at the final sticker width so text never gets shrunk afterwards
+    """Draws the avatar + message bubble only — no name text baked in. The
+    name is sent as a real Telegram mention right after the sticker instead
+    (see _quote_and_send), so it always renders correctly."""
+    W = 512
     outer_pad = 20
     avatar_size = 100
     gap = 14
     pad = 24
 
-    font_name = _load_font(True, 34)
     font_text = _load_font(False, 40)
 
-    name = _renderable(True, sender.full_name, "Someone")[:28]
     raw_text = src_msg.text or src_msg.caption or "[media]"
     text = _renderable(False, raw_text, "[unsupported characters]")
 
@@ -164,9 +158,8 @@ async def build_quote_sticker(ctx, src_msg, sender) -> io.BytesIO:
     probe = ImageDraw.Draw(Image.new("RGB", (10, 10)))
     lines = _wrap(probe, text, font_text, text_w)
     line_h = font_text.getbbox("Ag")[3] + 16
-    name_h = font_name.getbbox("Ag")[3] + 18
     body_h = line_h * len(lines)
-    bubble_h = name_h + body_h + pad * 2
+    bubble_h = body_h + pad * 2
     H = max(avatar_size, bubble_h) + outer_pad * 2
 
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
@@ -174,8 +167,7 @@ async def build_quote_sticker(ctx, src_msg, sender) -> io.BytesIO:
     by = (H - bubble_h) // 2
     draw.rounded_rectangle((bubble_x, by, bubble_x + bubble_w, by + bubble_h), radius=28, fill=(24, 37, 51, 240))
 
-    draw.text((bubble_x + pad, by + pad - 2), name, font=font_name, fill=_color_for(sender.id))
-    ty = by + pad + name_h
+    ty = by + pad
     for ln in lines:
         draw.text((bubble_x + pad, ty), ln, font=font_text, fill=(255, 255, 255))
         ty += line_h
@@ -204,7 +196,15 @@ async def _quote_and_send(update, ctx, as_reply: bool):
         await say(ctx, chat.id, T("couldn't build that sticker:") + f" {esc(e)}", reply_to=msg.message_id)
         return
     kwargs = {"reply_to_message_id": src.message_id} if as_reply else {}
-    await ctx.bot.send_sticker(chat.id, out, **kwargs)
+    sent = await ctx.bot.send_sticker(chat.id, out, **kwargs)
+    # Stickers can't carry a caption, and drawing the name as pixels meant
+    # fighting font coverage for every possible fancy name — a real mention
+    # lets Telegram's own client render it exactly like it looks everywhere
+    # else, with zero font issues (this is the name, never the @username).
+    await ctx.bot.send_message(
+        chat.id, q(T("— {m}", m=mention(sender))), parse_mode=ParseMode.HTML,
+        reply_parameters=ReplyParameters(message_id=sent.message_id, allow_sending_without_reply=True),
+    )
 
 
 async def q_cmd(update, ctx):
@@ -291,4 +291,4 @@ def register(app):
     dual_command(app, "q", q_cmd)
     dual_command(app, "qr", qr_cmd)
     dual_command(app, "kang", kang_cmd)
-                          
+            
