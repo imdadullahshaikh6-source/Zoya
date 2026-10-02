@@ -1,21 +1,14 @@
+
 """Sticker plugin:
 .q / .qr  — render the replied-to message as a Telegram-style quote sticker
 .kang     — steal a replied sticker/photo into the user's own auto-growing pack
 
 Quote generation flow:
-  1. Self-hosted quote-api (config.QUOTE_API or QUOTE_API_URL env)
-  2. Public fallback APIs
+  1. Self-hosted quote-api (QUOTE_API env or common.py default)
+  2. Public fallback APIs (QUOTE_API_FALLBACKS env)
   3. Local Pillow rendering (uses ./fonts/DejaVuSans*.ttf)
 
-The .kang command is unchanged — always uses Pillow + DejaVu fonts.
-
-Improvements adapted from the reference quote.py (Pyrogram-based):
-  • per-user cooldown to prevent spam
-  • profile-photo data-URI cache (10 min TTL)
-  • entity preservation (bold, italic, links, spoiler, code, blockquote)
-  • one-level reply context (quoted parent included)
-  • config-driven API URL, timeout, background colour
-"""
+The .kang command is unchanged — always uses Pillow + DejaVu fonts."""
 from __future__ import annotations
 
 import asyncio
@@ -32,9 +25,12 @@ from PIL import Image, ImageDraw, ImageFont
 from telegram import InputSticker, MessageEntity
 from telegram.error import TelegramError
 
-import config
 import database as dbase
-from common import T, dual_command, esc, say
+from common import (
+    T, dual_command, esc, say,
+    QUOTE_API, QUOTE_API_FALLBACKS, QUOTE_BG,
+    QUOTE_TIMEOUT, QUOTE_TOTAL_TIMEOUT,
+)
 
 log = logging.getLogger("sticker")
 
@@ -51,22 +47,9 @@ COMMANDS = [("q", "Quote a message as a sticker"), ("kang", "Steal a sticker int
 MAX_SIDE = 512
 EMOJI_RE = re.compile(r"^[\U0001F000-\U0001FAFF\u2600-\u27BF\u2190-\u21FF\u2B00-\u2BFF]+$")
 
-# ───────── config (env / config.py driven) ─────────
-def _cfg(name: str, default):
-    """Read from config.py if present, else fall back to env, else default."""
-    return getattr(config, name, os.getenv(name, default))
-
-
-QUOTE_API = _cfg("QUOTE_API", "http://127.0.0.1:3000/generate")
-QUOTE_API_FALLBACKS = [
-    u.strip() for u in _cfg(
-        "QUOTE_API_FALLBACKS",
-        "https://bot.lyo.su/quote/generate"
-    ).split(",") if u.strip()
-]
-QUOTE_BG = _cfg("QUOTE_BG", "#1b1429")
-QUOTE_TIMEOUT = float(_cfg("QUOTE_TIMEOUT", 10))
-TOTAL_TIMEOUT = float(_cfg("QUOTE_TOTAL_TIMEOUT", 22))
+# ───────── runtime config ─────────
+_FALLBACKS = [u.strip() for u in (QUOTE_API_FALLBACKS or "").split(",") if u.strip()]
+TOTAL_TIMEOUT = QUOTE_TOTAL_TIMEOUT
 
 COOLDOWN = 8.0                       # seconds between quotes per user
 _AVATAR_TTL = 600                    # 10 min avatar cache
@@ -303,7 +286,7 @@ async def _build_quote_via_api(ctx, src_msg, sender) -> bytes | None:
     avatar_uri = await _avatar_data_uri(ctx, sender.id)
     payload = _build_payload(src_msg, avatar_uri)
 
-    urls = [QUOTE_API] + QUOTE_API_FALLBACKS
+    urls = [QUOTE_API] + _FALLBACKS
     timeout = httpx.Timeout(QUOTE_TIMEOUT)
     async with httpx.AsyncClient(timeout=timeout) as client:
         tasks = [_try_one_api(client, url, payload) for url in urls]
@@ -468,9 +451,8 @@ async def _quote_and_send(update, ctx, as_reply: bool):
     except Exception:
         pass
 
-    # The buffer MUST be named, and named .webp. Telegram refuses a static
-    # sticker without a .webp mime, and send_sticker reads the name for both
-    # the mime type and the filename.
+    # The buffer MUST be named .webp — Telegram refuses a static sticker
+    # whose declared mime is not image/webp.
     buf = io.BytesIO(sticker_bytes)
     buf.name = "quote.webp"
 
