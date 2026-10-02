@@ -9,14 +9,15 @@ Quote generation flow:
 
 .kang handling:
   • Photos           → download, square-crop 512x512, WEBP
-  • Static stickers  → download, square-crop 512x512, WEBP (fix for Sticker_png_dimensions)
-  • Video stickers   → pass file_id directly (WEBM must stay video)
-  • Animated stickers→ pass file_id directly (TGS must stay animated)"""
+  • Static stickers  → pass file_id directly
+  • Video stickers   → pass file_id directly (WEBM)
+  • Animated stickers→ pass file_id directly (TGS)"""
 from __future__ import annotations
 
 import asyncio
 import base64
 import io
+import json
 import logging
 import os
 import re
@@ -282,6 +283,31 @@ async def _try_one_api(client: httpx.AsyncClient, url: str, payload: dict) -> by
         if not data or len(data) < 100:
             log.warning("⚠️ %s returned empty body", url)
             return None
+
+        # LyoSU quote-api returns JSON: {"ok":true,"result":{"image":"<base64>"}}
+        # Decode the base64 payload — otherwise Telegram gets JSON and
+        # silently accepts it, then fails to render the sticker.
+        try:
+            j = json.loads(data)
+        except Exception:
+            j = None
+
+        if isinstance(j, dict):
+            img_b64 = None
+            if isinstance(j.get("result"), dict):
+                img_b64 = j["result"].get("image")
+            if not img_b64:
+                img_b64 = j.get("image") or j.get("data")
+            if isinstance(img_b64, str):
+                try:
+                    decoded = base64.b64decode(img_b64)
+                    if len(decoded) > 100:
+                        log.info("✅ quote built via %s (JSON→base64, %d bytes)", url, len(decoded))
+                        return decoded
+                except Exception as e:
+                    log.warning("⚠️ %s base64 decode failed: %s", url, e)
+                    return None
+
         log.info("✅ quote built via %s (%d bytes)", url, len(data))
         return data
     except Exception as e:
@@ -501,21 +527,6 @@ async def _photo_to_sticker_file(ctx, photo):
     return buf
 
 
-async def _sticker_to_file(ctx, sticker):
-    """Download an existing static sticker, crop to square, resize to 512x512,
-    re-encode as WEBP — fixes the 'Sticker_png_dimensions' error Telegram
-    throws when the source sticker's dimensions don't match what it expects."""
-    tgfile = await ctx.bot.get_file(sticker.file_id)
-    raw = await tgfile.download_as_bytearray()
-    im = Image.open(io.BytesIO(bytes(raw))).convert("RGBA")
-    im = _square_512(im)
-    buf = io.BytesIO()
-    buf.name = "kang.webp"
-    im.save(buf, "WEBP", quality=90)
-    buf.seek(0)
-    return buf
-
-
 # ───────── .kang ─────────
 
 async def kang_cmd(update, ctx):
@@ -530,21 +541,14 @@ async def kang_cmd(update, ctx):
     if src.sticker:
         s = src.sticker
         emoji = emoji or s.emoji or "🤔"
+        # Pass file_id directly — Telegram already has this file. Works for
+        # static, video, AND animated stickers without re-uploading.
+        file_arg = s.file_id
         if s.is_video:
-            # video sticker → WEBM, must pass file_id directly
-            file_arg = s.file_id
             fmt = "video"
         elif s.is_animated:
-            # animated sticker → TGS, must pass file_id directly
-            file_arg = s.file_id
             fmt = "animated"
         else:
-            # static sticker → download + convert to clean 512x512 WEBP
-            try:
-                file_arg = await _sticker_to_file(ctx, s)
-            except Exception as e:
-                await say(ctx, chat.id, T("couldn't read that sticker:") + f" {esc(e)}", reply_to=msg.message_id)
-                return
             fmt = "static"
     else:
         try:
@@ -597,4 +601,3 @@ def register(app):
     dual_command(app, "q", q_cmd)
     dual_command(app, "qr", qr_cmd)
     dual_command(app, "kang", kang_cmd)
-  
