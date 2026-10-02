@@ -5,14 +5,11 @@
 Quote commands:
   .q              → normal quote sticker
   .q r / .q reply → quote sticker sent as a reply to the source message
-  .qr             → same as .q r (shortcut)
+  .qr             → shortcut for .q r
 
 Nested quotes: if the replied-to message was itself a reply, we fetch its
-parent and include it in the sticker (like the baka bot). The replyMessage
-object needs a top-level `name` field for LyoSU quote-api to render it.
-
-Avatar: we pass Telegram's direct file URL (not a data URI) because the
-quote-api uses axios, which cannot fetch data: URIs."""
+parent and include it in the sticker. Handles multiple PTB attribute shapes
+(reply_to_message, reply_to_message_id, external_reply)."""
 from __future__ import annotations
 
 import asyncio
@@ -183,11 +180,12 @@ async def _fetch_avatar_bytes(ctx, user_id: int) -> bytes | None:
         return None
 
 
-async def _avatar_url(ctx, user_id: int) -> str | None:
+async def _avatar_url(ctx, user_id: int, force_refresh: bool = False) -> str | None:
     now = time.time()
-    cached = _avatar_cache.get(user_id)
-    if cached is not None and cached[0] > now:
-        return cached[1]
+    if not force_refresh:
+        cached = _avatar_cache.get(user_id)
+        if cached is not None and cached[0] > now:
+            return cached[1]
 
     url = None
     try:
@@ -245,10 +243,8 @@ def _from_block(user) -> dict:
 
 def _build_reply_block(reply) -> dict | None:
     """Build the replyMessage sub-object in the shape LyoSU quote-api expects.
-
-    The API needs a top-level `name` field (not just `from.name`) — without it
-    it silently ignores the nested parent, which is why the sticker was only
-    showing the source message and not the message it replied to."""
+    Needs a top-level `name` field — without it the API silently ignores the
+    nested parent."""
     if reply is None:
         return None
     text = _text_of(reply)
@@ -342,12 +338,11 @@ async def _build_quote_via_api(ctx, src_msg, sender) -> bytes | None:
     log.info("[sticker] avatar url: %s", "yes" if avatar_url else "none")
 
     payload = _build_payload(src_msg, avatar_url)
-    # Log whether a nested parent was included
     msg0 = payload["messages"][0]
     if "replyMessage" in msg0:
-        log.info("[sticker] nested replyMessage included: %r", msg0["replyMessage"].get("text", "")[:40])
+        log.info("[sticker] nested reply: %r", msg0["replyMessage"].get("text", "")[:50])
     else:
-        log.info("[sticker] no nested replyMessage")
+        log.info("[sticker] no nested reply")
 
     urls = [QUOTE_API] + _FALLBACKS
     timeout = httpx.Timeout(QUOTE_TIMEOUT)
@@ -454,9 +449,51 @@ async def _build_quote_sticker(ctx, src_msg, sender) -> bytes:
     return await _build_quote_via_pillow(ctx, src_msg, sender)
 
 
+# ───────── parent-message helper ─────────
+
+async def _ensure_parent(ctx, chat_id: int, src):
+    """Make sure src.reply_to_message is populated if src itself is a reply.
+
+    PTB exposes the parent in several possible places depending on version:
+      • src.reply_to_message  (full Message — preferred)
+      • src.external_reply.message_id  (for channel replies)
+      • src.reply_to_message_id  (some forks)
+    If none of them are set, we cannot render a nested quote.
+    """
+    if getattr(src, "reply_to_message", None):
+        return src.reply_to_message
+
+    parent_id = None
+    ext = getattr(src, "external_reply", None)
+    if ext is not None:
+        parent_id = getattr(ext, "message_id", None)
+    if not parent_id:
+        parent_id = getattr(src, "reply_to_message_id", None)
+    if not parent_id:
+        # Some PTB versions keep the ID under reply_to_message itself (as an
+        # incompletely-populated Message)
+        rt = getattr(src, "reply_to_message", None)
+        if rt is not None:
+            parent_id = getattr(rt, "message_id", None)
+
+    log.info("[sticker] parent_id detected: %r", parent_id)
+    if not parent_id:
+        return None
+
+    try:
+        fetched = await ctx.bot.get_messages(chat_id=chat_id, message_ids=parent_id)
+        if isinstance(fetched, list):
+            fetched = fetched[0] if fetched else None
+        return fetched
+    except Exception as e:
+        log.warning("[sticker] couldn't fetch parent %s: %s", parent_id, e)
+        return None
+
+
 # ───────── command handler ─────────
 
-def _cooldown_left(uid: int) -> float:
+
+  def _cooldown_left(uid: int) -> float:
     return max(0.0, _last_quote.get(uid, 0.0) + COOLDOWN - time.time())
 
 
@@ -471,23 +508,16 @@ async def _quote_and_send(update, ctx, as_reply: bool):
         await say(ctx, chat.id, T("only text messages can be quoted."), reply_to=msg.message_id)
         return
 
-    # ── Fetch the parent of the source message if it exists ──
-    # PTB does NOT populate nested reply_to_message beyond one level, so we
-    # have to fetch it explicitly. Without this, the sticker only shows the
-    # source message — not the message it was replying to.
-    parent_id = (
-        getattr(src, "reply_to_message_id", None)
-        or getattr(getattr(src, "reply_to_message", None), "message_id", None)
-    )
-    if parent_id and not getattr(src, "reply_to_message", None):
+    # ── Populate parent (for nested quote) ──
+    log.info("[sticker] src.reply_to_message present: %s", bool(getattr(src, "reply_to_message", None)))
+    parent = await _ensure_parent(ctx, chat.id, src)
+    if parent and parent is not getattr(src, "reply_to_message", None):
         try:
-            src.reply_to_message = await ctx.bot.get_messages(chat.id, parent_id)
-            log.info("[sticker] fetched parent message %s for nested quote", parent_id)
-        except Exception as e:
-            log.warning("[sticker] couldn't fetch parent %s: %s", parent_id, e)
-
-    if getattr(src, "reply_to_message", None):
-        log.info("[sticker] parent text: %r", _text_of(src.reply_to_message)[:60])
+            src.reply_to_message = parent
+        except Exception:
+            pass
+    if parent:
+        log.info("[sticker] parent text: %r", _text_of(parent)[:60])
     else:
         log.info("[sticker] no parent message found")
 
@@ -658,3 +688,4 @@ def register(app):
     dual_command(app, "q", q_cmd)
     dual_command(app, "qr", qr_cmd)
     dual_command(app, "kang", kang_cmd)
+  
