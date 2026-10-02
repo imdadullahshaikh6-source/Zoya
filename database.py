@@ -1,5 +1,5 @@
 """MongoDB layer. Everything persists across restarts/redeploys:
-welcome messages, rules, AFK status, bans, mutes, warns, and filters."""
+welcome messages, rules, AFK status, bans, mutes, warns, filters, and guardian."""
 import logging
 import time
 
@@ -22,6 +22,8 @@ async def init(uri: str, name: str):
     await _db.warns.create_index([("chat_id", 1), ("user_id", 1)])
     await _db.members.create_index("chat_id")
     await _db.filters.create_index([("chat_id", 1), ("keyword", 1)], unique=True)
+    # ← NEW: unique index on guardian per chat
+    await _db.guardian.create_index("chat_id", unique=True)
     log.info("MongoDB connected (db: %s)", name)
 
 
@@ -189,3 +191,46 @@ async def filter_list(chat_id: int):
 
 async def filter_count(chat_id: int) -> int:
     return await _db.filters.count_documents({"chat_id": chat_id})
+
+
+# ───────── guardian (anti-edit + anti-media, per chat) ─────────
+
+async def guardian_get(chat_id: int) -> dict | None:
+    """Return the guardian config for this chat (or None if not configured)."""
+    return await _db.guardian.find_one({"chat_id": chat_id})
+
+
+async def guardian_set(chat_id: int, delay_seconds: int | None = None,
+                        enabled: bool | None = None):
+    """Create or update guardian config. Only the fields you pass are changed."""
+    upd = {}
+    if delay_seconds is not None:
+        upd["delay_seconds"] = int(delay_seconds)
+    if enabled is not None:
+        upd["enabled"] = bool(enabled)
+    if upd:
+        await _db.guardian.update_one(
+            {"chat_id": chat_id}, {"$set": upd}, upsert=True,
+        )
+
+
+async def guardian_permit_add(chat_id: int, user_id: int, name: str):
+    """Add a user to the permit list. Replaces if already present."""
+    await _db.guardian.update_one(
+        {"chat_id": chat_id},
+        {"$pull": {"permitted_users": {"id": user_id}}},
+    )
+    await _db.guardian.update_one(
+        {"chat_id": chat_id},
+        {"$push": {"permitted_users": {"id": user_id, "name": name}}},
+        upsert=True,
+    )
+
+
+async def guardian_permit_remove(chat_id: int, user_id: int) -> bool:
+    """Remove a user from the permit list. Returns True if removed."""
+    res = await _db.guardian.update_one(
+        {"chat_id": chat_id},
+        {"$pull": {"permitted_users": {"id": user_id}}},
+    )
+    return res.modified_count > 0
