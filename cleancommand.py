@@ -4,13 +4,12 @@ Commands:
   .cleancommand [all|admin|users]  — enable cleaning
   .keepcommand                     — disable cleaning
 
-Categories:
-  all    → delete every command after it's used
-  admin  → only moderation/config commands (ban, mute, kick, promote, ...)
-  users  → only user-facing commands (q, kang, waifu, ...)
-
-The bot's own messages and its own replies are never touched.
-Data is stored in MongoDB per chat_id."""
+Design: the clean watcher runs in a HIGH group number (group=99), so it fires
+AFTER every command handler has already processed the update and sent its
+reply. Only then do we delete the user's command message. This avoids the
+old conflict where the delete ran first and ate the command before handlers
+could see it."""
+import asyncio
 import logging
 
 from telegram import Update
@@ -55,6 +54,11 @@ ADMIN_COMMANDS = {
 
 SELF_COMMANDS = {"cleancommand", "keepcommand"}
 
+# Delay (seconds) between command processing and message deletion.
+# Gives the command's reply a moment to land first, so the deletion
+# looks clean and natural.
+_DELETE_DELAY = 0.5
+
 
 async def _is_full_admin(ctx, chat_id: int, user_id: int) -> bool:
     try:
@@ -96,12 +100,12 @@ async def keep_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await say(ctx, chat.id, T("🧹 Clean command disabled — commands will stay in chat."), reply_to=msg.message_id)
 
 
-# ───────────── watcher ─────────────
+# ───────────── watcher (runs LAST) ─────────────
 
 async def _clean_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Runs at group=-2 so it fires before any command handler.
-    Deletes the user's command message if cleaning is on for this chat.
-    block=False so downstream command handlers still run."""
+    """Runs at group=99 → fires AFTER every command handler has finished.
+    By this point the reply has already been sent, so it's safe to delete
+    the user's original command message without breaking anything."""
     msg = update.effective_message
     chat = update.effective_chat
     user = update.effective_user
@@ -124,7 +128,6 @@ async def _clean_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     cfg = await dbase.clean_get(chat.id)
-    log.info("[clean] caught '%s' in chat %s — cfg=%s", first, chat.id, cfg)
     if not cfg or not cfg.get("enabled"):
         return
 
@@ -142,6 +145,10 @@ async def _clean_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         log.info("[clean] '%s' not in mode '%s' — skipping", first, mode)
         return
 
+    # Let the command's reply land first — command handlers have already
+    # finished by now (they run in lower groups), so this is purely cosmetic.
+    await asyncio.sleep(_DELETE_DELAY)
+
     try:
         await ctx.bot.delete_message(chat.id, msg.message_id)
         log.info("[clean] ✅ DELETED '%s' from chat %s", first, chat.id)
@@ -155,15 +162,13 @@ def register(app):
     dual_command(app, "cleancommand", clean_cmd)
     dual_command(app, "keepcommand", keep_cmd)
 
-    # group=-2 → runs before every other handler.
-    # block=False is passed to MessageHandler (NOT add_handler) so command
-    # handlers in higher groups still run — we only delete the user's
-    # command message, we don't consume the update.
+    # group=99 → runs AFTER every other handler (commands live in group 0,
+    # guardian in group 2, username tracker in group -1).
+    # No block=False needed — we're at the end of the chain anyway.
     app.add_handler(
         MessageHandler(
             (filters.TEXT | filters.CAPTION) & filters.ChatType.GROUPS,
             _clean_watcher,
-            block=False,
         ),
-        group=-2,
+        group=99,
     )
