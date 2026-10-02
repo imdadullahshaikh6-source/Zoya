@@ -1,305 +1,553 @@
-"""Filters module — Rose-style auto replies (Supports Native, Custom, and Rose buttons with colors)."""
+"""Sticker plugin:
+.q / .qr  — render the replied-to message as a Telegram-style quote sticker
+.kang     — steal a replied sticker/photo into the user's own auto-growing pack
+
+Quote generation flow:
+  1. Self-hosted quote-api (QUOTE_API env or common.py default)
+  2. Public fallback APIs (QUOTE_API_FALLBACKS env)
+  3. Local Pillow rendering (uses ./fonts/DejaVuSans*.ttf)
+
+The .kang command is unchanged — always uses Pillow + DejaVu fonts."""
+from __future__ import annotations
+
+import asyncio
+import base64
+import io
 import logging
 import re
+import time
 
-from telegram import (
-    ChatMember, InlineKeyboardButton, InlineKeyboardMarkup, Update,
-)
-from telegram.constants import ChatType, ParseMode
-from telegram.ext import (
-    Application, ContextTypes, MessageHandler,
-    filters as tg_filters,
-)
+import httpx
+from fontTools.ttLib import TTFont
+from PIL import Image, ImageDraw, ImageFont
+from telegram import InputSticker, MessageEntity
+from telegram.error import TelegramError
 
 import database as dbase
-from common import parse_buttons  # <-- Welcome wala same function import kiya!
-
-log = logging.getLogger("filters")
-
-
-COMMANDS = [
-    ("filter", "Set a new filter (reply to a message)"),
-    ("unfilter", "Remove a filter by keyword"),
-    ("filters", "List all filters in this chat"),
-    ("stop", "Delete all filters in this chat"),
-]
-
-HELP_TXT = (
-    "<b>🔍 Filters</b>\n\n"
-    "Filters send an automatic reply whenever a keyword appears in chat.\n\n"
-    "<b>Commands</b>\n"
-    "• <code>/filter &lt;keyword&gt;</code> — reply to any message to set it\n"
-    "• <code>/unfilter &lt;keyword&gt;</code> — delete one filter\n"
-    "• <code>/filters</code> — list all filters\n"
-    "• <code>/stop</code> — delete every filter\n\n"
-    "<b>Supported content</b>\n"
-    "Text, stickers, GIFs, audio, video, photos — anything you can reply to.\n\n"
-    "<b>Inline buttons</b>\n"
-    "Supports Native Telegram buttons, <code>[Text ~ URL]</code>, and Rose-style <code>[Text](buttonurl:URL:color)</code>.\n"
-    "Colors: <code>:danger</code> (Red), <code>:success</code> (Green), <code>:primary</code> (Blue)"
+from common import (
+    T, dual_command, esc, say,
+    QUOTE_API, QUOTE_API_FALLBACKS, QUOTE_BG,
+    QUOTE_TIMEOUT, QUOTE_TOTAL_TIMEOUT,
 )
 
+log = logging.getLogger("sticker")
 
-def _extract_native_buttons(reply_msg):
-    """Extract Telegram's native inline buttons (like JOIN buttons)."""
-    if not reply_msg or not reply_msg.reply_markup:
-        return None
-    markup = reply_msg.reply_markup
-    if not hasattr(markup, 'inline_keyboard') or not markup.inline_keyboard:
-        return None
-    
-    rows = []
-    for row in markup.inline_keyboard:
-        btn_row = []
-        for btn in row:
-            if btn.url:  # Only save URL buttons
-                btn_data = {"text": btn.text, "url": btn.url}
-                # Native buttons might have a style attribute
-                if hasattr(btn, 'style') and btn.style:
-                    btn_data["style"] = btn.style
-                btn_row.append(btn_data)
-        if btn_row:
-            rows.append(btn_row)
-    return rows if rows else None
+HELP_TXT = (
+    "<b>✦ stickers</b>\n\n"
+    "/q (or .q) — reply to any message to turn it into a quote sticker\n"
+    "/qr (or .qr) — same, but sent as a reply to the original message\n"
+    "/kang (or .kang) [emoji] — reply to a sticker or photo to add it to your "
+    "own sticker pack. the pack is created the first time and reused after that — "
+    "every later .kang just adds to it (a new part is started automatically if it fills up)."
+)
+COMMANDS = [("q", "Quote a message as a sticker"), ("kang", "Steal a sticker into your pack")]
 
+MAX_SIDE = 512
+EMOJI_RE = re.compile(r"^[\U0001F000-\U0001FAFF\u2600-\u27BF\u2190-\u21FF\u2B00-\u2BFF]+$")
 
-def _kb_from_stored(rows):
-    """Build InlineKeyboardMarkup safely, handling older PTB versions without style support."""
-    if not rows:
-        return None
-    
-    kb_rows = []
-    for row in rows:
-        kb_row = []
-        for b in row:
-            try:
-                if "style" in b and b["style"]:
-                    btn = InlineKeyboardButton(text=b["text"], url=b["url"], style=b["style"])
-                else:
-                    btn = InlineKeyboardButton(text=b["text"], url=b["url"])
-            except TypeError:
-                # If PTB version is old, fallback to normal button
-                btn = InlineKeyboardButton(text=b["text"], url=b["url"])
-            kb_row.append(btn)
-        kb_rows.append(kb_row)
-        
-    return InlineKeyboardMarkup(kb_rows)
+# ───────── runtime config ─────────
+_FALLBACKS = [u.strip() for u in (QUOTE_API_FALLBACKS or "").split(",") if u.strip()]
+TOTAL_TIMEOUT = QUOTE_TOTAL_TIMEOUT
 
+COOLDOWN = 8.0                       # seconds between quotes per user
+_AVATAR_TTL = 600                    # 10 min avatar cache
 
-def _get_args(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if ctx.args:
-        return ctx.args
-    text = update.effective_message.text or ""
-    parts = text.split(maxsplit=1)
-    if len(parts) > 1:
-        return [parts[1].strip()]
-    return []
+# ───────── runtime caches ─────────
+_last_quote: dict[int, float] = {}
+_avatar_cache: dict[int, tuple[float, str | None]] = {}
+
+# ───────── entity support ─────────
+_KEEP_ENTITIES = {
+    "bold", "italic", "underline", "strikethrough", "spoiler",
+    "code", "pre", "blockquote", "text_link", "text_mention",
+}
+_ENTITY_TYPE_STR = {
+    MessageEntity.BOLD: "bold",
+    MessageEntity.ITALIC: "italic",
+    MessageEntity.UNDERLINE: "underline",
+    MessageEntity.STRIKETHROUGH: "strikethrough",
+    MessageEntity.SPOILER: "spoiler",
+    MessageEntity.CODE: "code",
+    MessageEntity.PRE: "pre",
+    MessageEntity.BLOCKQUOTE: "blockquote",
+    MessageEntity.EXPANDABLE_BLOCKQUOTE: "blockquote",
+    MessageEntity.TEXT_LINK: "text_link",
+    MessageEntity.TEXT_MENTION: "text_mention",
+}
 
 
-async def _is_admin(update: Update) -> bool:
-    chat = update.effective_chat
-    if chat.type == ChatType.PRIVATE:
-        return False
-    try:
-        member = await chat.get_member(update.effective_user.id)
-        return member.status in (ChatMember.ADMINISTRATOR, ChatMember.OWNER)
-    except Exception:
-        return False
+# ───────── local Pillow helpers (fallback + .kang) ─────────
+FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts") if False else None
+import os as _os
+FONT_DIR = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "fonts")
+FONT_REGULAR = _os.path.join(FONT_DIR, "DejaVuSans.ttf")
+FONT_BOLD = _os.path.join(FONT_DIR, "DejaVuSans-Bold.ttf")
+
+BUBBLE_BG = (43, 43, 63, 255)
+PEER_COLORS = [
+    (225, 112, 118), (250, 167, 116), (166, 149, 231),
+    (123, 200, 98), (110, 201, 203), (101, 170, 221), (238, 122, 174),
+]
 
 
-async def filter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    msg, chat = update.effective_message, update.effective_chat
-
-    if chat.type == ChatType.PRIVATE:
-        await msg.reply_text("Filters only work inside groups.")
-        return
-
-    if not await _is_admin(update):
-        await msg.reply_text("❌ Only admins can set filters.")
-        return
-
-    args = _get_args(update, ctx)
-    if not args:
-        await msg.reply_text("⚠️ Usage: <code>/filter keyword</code> — reply to a message.")
-        return
-
-    keyword = args[0].strip().lower()
-    reply = msg.reply_to_message
-
-    if not reply:
-        await msg.reply_text("⚠️ Reply to the message you want me to send as the filter.")
-        return
-
-    data = {"type": "text", "content": "", "caption": "", "buttons": None, "set_by": update.effective_user.id}
-    native_btns = _extract_native_buttons(reply)
-
-    if reply.text:
-        # Ab raw HTML save hoga, parse_buttons common.py se load hoga runtime pe!
-        data.update(type="text", content=reply.text_html, buttons=native_btns)
-        
-    elif reply.sticker:
-        data.update(type="sticker", content=reply.sticker.file_id, buttons=native_btns)
-        
-    elif reply.photo:
-        data.update(type="photo", content=reply.photo[-1].file_id, caption=reply.caption_html or "", buttons=native_btns)
-        
-    elif reply.video:
-        data.update(type="video", content=reply.video.file_id, caption=reply.caption_html or "", buttons=native_btns)
-        
-    elif reply.animation:
-        data.update(type="animation", content=reply.animation.file_id, caption=reply.caption_html or "", buttons=native_btns)
-        
-    elif reply.audio:
-        data.update(type="audio", content=reply.audio.file_id, caption=reply.caption_html or "", buttons=native_btns)
-        
-    else:
-        await msg.reply_text("⚠️ Unsupported message type.")
-        return
-
-    await dbase.filter_set(chat.id, keyword, data)
-    await msg.reply_text(f"✅ Filter <b>{keyword}</b> saved with formatting and buttons.")
-
-
-async def unfilter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    msg, chat = update.effective_message, update.effective_chat
-    if not await _is_admin(update):
-        await msg.reply_text("❌ Only admins can remove filters.")
-        return
-    args = _get_args(update, ctx)
-    if not args:
-        await msg.reply_text("⚠️ Usage: <code>/unfilter keyword</code>")
-        return
-    keyword = args[0].strip().lower()
-    deleted = await dbase.filter_delete(chat.id, keyword)
-    if deleted:
-        await msg.reply_text(f"🗑 Filter <b>{keyword}</b> removed.")
-    else:
-        await msg.reply_text(f"❓ No filter named <b>{keyword}</b> in this chat.")
-
-
-async def list_filters_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    msg, chat = update.effective_message, update.effective_chat
-    rows = await dbase.filter_list(chat.id)
-    if not rows:
-        await msg.reply_text("No filters set in this chat yet.")
-        return
-    lines = [f"• <code>{r['keyword']}</code>  <i>({r.get('type', 'text')})</i>" for r in rows]
-    header = f"<b>🔍 Filters in this chat — {len(rows)}</b>\n\n"
-    await msg.reply_text(header + "\n".join(lines))
-
-
-async def stop_filters_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    msg, chat = update.effective_message, update.effective_chat
-    if not await _is_admin(update):
-        await msg.reply_text("❌ Only admins can wipe filters.")
-        return
-    n = await dbase.filter_delete_all(chat.id)
-    if n:
-        await msg.reply_text(f"🗑 Deleted <b>{n}</b> filter(s) from this chat.")
-    else:
-        await msg.reply_text("There were no filters to delete.")
-
-
-async def trigger_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    msg, chat = update.effective_message, update.effective_chat
-    if not msg:
-        return
-
-    text = msg.text or msg.caption
-    if not text:
-        return
-
-    if text.startswith(("/", ".")):
-        return
-
-    # Extract words including @mentions
-    words = set(re.findall(r"@?\w+", text.lower()))
-    if not words:
-        return
-
-    for word in words:
-        # Try matching exactly as it is
-        row = await dbase.filter_get(chat.id, word)
-        
-        # If not found and word has @, try without @
-        if not row and word.startswith("@"):
-            row = await dbase.filter_get(chat.id, word[1:])
-        
-        # If not found and word has no @, try with @
-        if not row and not word.startswith("@"):
-            row = await dbase.filter_get(chat.id, f"@{word}")
-
-        if not row:
-            continue
-
-        ftype = row.get("type", "text")
-        content = row.get("content", "")
-        caption = row.get("caption", "")
-
-        # Yahan common.py wala parse_buttons use hoga!
-        custom_kb = None
-        if ftype == "text" and content:
-            content, custom_kb = parse_buttons(content)
-        elif caption:
-            caption, custom_kb = parse_buttons(caption)
-            
-        # Combine native buttons with custom colour buttons
-        final_kb = custom_kb
-        saved_btns = row.get("buttons")
-        if saved_btns:
-            n_kb = _kb_from_stored(saved_btns)
-            if n_kb:
-                if final_kb and final_kb.inline_keyboard:
-                    final_kb = InlineKeyboardMarkup(final_kb.inline_keyboard + n_kb.inline_keyboard)
-                else:
-                    final_kb = n_kb
-
+def _load_font(bold: bool, size: int):
+    paths = [FONT_BOLD if bold else FONT_REGULAR]
+    if bold:
+        paths.append(FONT_REGULAR)
+    for path in paths:
         try:
-            if ftype == "text":
-                await msg.reply_text(content or "", reply_markup=final_kb, parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id)
-            elif ftype == "sticker":
-                await msg.reply_sticker(content, reply_markup=final_kb, reply_to_message_id=msg.message_id)
-            elif ftype == "photo":
-                await msg.reply_photo(content, caption=caption or None, reply_markup=final_kb, parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id)
-            elif ftype == "video":
-                await msg.reply_video(content, caption=caption or None, reply_markup=final_kb, parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id)
-            elif ftype == "animation":
-                await msg.reply_animation(content, caption=caption or None, reply_markup=final_kb, parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id)
-            elif ftype == "audio":
-                await msg.reply_audio(content, caption=caption or None, reply_markup=final_kb, parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id)
+            return ImageFont.truetype(path, size)
+        except OSError:
+            continue
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
+
+
+def _cmap_of(path):
+    try:
+        return set(TTFont(path, fontNumber=0, lazy=True).getBestCmap())
+    except Exception:
+        return set()
+
+
+_CMAP = {False: _cmap_of(FONT_REGULAR), True: _cmap_of(FONT_BOLD)}
+if not _CMAP[True]:
+    _CMAP[True] = _CMAP[False]
+_DROP_CATEGORIES = {"Cf", "Cc", "Co", "Cs", "Mn", "Me"}
+
+
+def _renderable(bold: bool, text: str, fallback: str = "") -> str:
+    import unicodedata
+    cmap = _CMAP[bold]
+    out = []
+    for ch in unicodedata.normalize("NFKD", text or ""):
+        if unicodedata.category(ch) in _DROP_CATEGORIES:
+            continue
+        if ch in (" ", "\n", "\t") or ord(ch) in cmap:
+            out.append(ch)
+    cleaned = re.sub(r"\s+", " ", "".join(out)).strip()
+    return cleaned or fallback
+
+
+def _peer_color(user_id: int):
+    return PEER_COLORS[abs(user_id) % len(PEER_COLORS)]
+
+
+def _fit_512(img: Image.Image) -> Image.Image:
+    w, h = img.size
+    scale = MAX_SIDE / max(w, h)
+    return img.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.LANCZOS)
+
+
+def _wrap(draw, text, font, max_w):
+    words = text.split() or [""]
+    lines, cur = [], ""
+    for w in words:
+        trial = (cur + " " + w).strip()
+        if draw.textlength(trial, font=font) <= max_w:
+            cur = trial
+        else:
+            if cur:
+                lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
+    return lines[:10] or [""]
+
+
+async def _fetch_avatar_bytes(ctx, user_id: int) -> bytes | None:
+    """Download the user's big profile photo. Never hangs."""
+    try:
+        async def _fetch():
+            photos = await ctx.bot.get_user_profile_photos(user_id, limit=1)
+            if not photos.total_count:
+                return None
+            file_id = photos.photos[0][-1].file_id
+            tgfile = await ctx.bot.get_file(file_id)
+            return bytes(await tgfile.download_as_bytearray())
+        return await asyncio.wait_for(_fetch(), timeout=6.0)
+    except (asyncio.TimeoutError, TelegramError, OSError) as e:
+        log.debug("avatar fetch failed for %s: %s", user_id, e)
+        return None
+
+
+async def _avatar_data_uri(ctx, user_id: int) -> str | None:
+    """Return a base64 data-URI of the user's avatar, cached for 10 min."""
+    now = time.time()
+    cached = _avatar_cache.get(user_id)
+    if cached is not None and cached[0] > now:
+        return cached[1]
+
+    raw = await _fetch_avatar_bytes(ctx, user_id)
+    uri = None
+    if raw:
+        uri = "data:image/jpeg;base64," + base64.b64encode(raw).decode("ascii")
+    _avatar_cache[user_id] = (now + _AVATAR_TTL, uri)
+    return uri
+
+
+# ───────── entity extraction (python-telegram-bot) ─────────
+
+def _extract_entities(msg) -> list[dict]:
+    """Convert MessageEntity objects to quote-api's JSON format."""
+    raw = list(msg.entities or []) + list(msg.caption_entities or [])
+    out = []
+    for e in raw:
+        kind = _ENTITY_TYPE_STR.get(e.type)
+        if not kind or kind not in _KEEP_ENTITIES:
+            continue
+        if not e.length or e.length <= 0:
+            continue
+        item = {"type": kind, "offset": int(e.offset), "length": int(e.length)}
+        if kind == "text_link" and getattr(e, "url", None):
+            item["url"] = e.url
+        if kind == "pre" and getattr(e, "language", None):
+            item["language"] = e.language
+        if kind == "text_mention" and getattr(e, "user", None):
+            item["user"] = {"id": e.user.id, "name": e.user.full_name}
+        out.append(item)
+    return out
+
+
+def _text_of(msg) -> str:
+    return (getattr(msg, "text", None) or getattr(msg, "caption", None) or "").strip()
+
+
+def _from_block(user) -> dict:
+    if user is None:
+        return {"id": 0, "first_name": "User", "name": "User"}
+    parts = [user.first_name or "", user.last_name or ""]
+    name = " ".join(p for p in parts if p).strip() or "User"
+    out = {"id": int(user.id or 0), "first_name": user.first_name or name, "name": name}
+    if getattr(user, "username", None):
+        out["username"] = user.username
+    return out
+
+
+def _build_message(msg, avatar: str | None = None) -> dict:
+    """One card entry — pure, no network."""
+    block = {
+        "entities": _extract_entities(msg),
+        "avatar": True,
+        "from": _from_block(getattr(msg, "from_user", None)),
+        "text": _text_of(msg),
+    }
+    if avatar:
+        block["from"]["photo"] = {"url": avatar}
+    reply = getattr(msg, "reply_to_message", None)
+    if reply is not None and _text_of(reply):
+        block["replyMessage"] = {
+            "entities": _extract_entities(reply),
+            "from": _from_block(getattr(reply, "from_user", None)),
+            "text": _text_of(reply),
+        }
+    return block
+
+
+def _build_payload(msg, avatar: str | None = None) -> dict:
+    return {
+        "type": "quote",
+        "format": "webp",
+        "backgroundColor": QUOTE_BG,
+        "width": 512,
+        "height": 512,
+        "scale": 1,
+        "emojiBrand": "apple",
+        "messages": [_build_message(msg, avatar)],
+    }
+
+
+# ───────── API path ─────────
+
+async def _try_one_api(client: httpx.AsyncClient, url: str, payload: dict) -> bytes | None:
+    try:
+        r = await client.post(url, json=payload)
+        if r.status_code != 200:
+            log.warning("⚠️ %s returned %s", url, r.status_code)
+            return None
+        data = r.content
+        if not data or len(data) < 100:
+            log.warning("⚠️ %s returned empty body", url)
+            return None
+        log.info("✅ quote built via %s (%d bytes)", url, len(data))
+        return data
+    except Exception as e:
+        log.warning("⚠️ %s failed: %s", url, e)
+        return None
+
+
+async def _build_quote_via_api(ctx, src_msg, sender) -> bytes | None:
+    text = _text_of(src_msg)
+    if not text:
+        return None
+
+    avatar_uri = await _avatar_data_uri(ctx, sender.id)
+    payload = _build_payload(src_msg, avatar_uri)
+
+    urls = [QUOTE_API] + _FALLBACKS
+    timeout = httpx.Timeout(QUOTE_TIMEOUT)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        tasks = [_try_one_api(client, url, payload) for url in urls]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for r in results:
+            if isinstance(r, bytes) and len(r) > 100:
+                return r
+    return None
+
+
+# ───────── Pillow fallback ─────────
+
+async def _build_quote_via_pillow(ctx, src_msg, sender) -> bytes:
+    log.info("[sticker] rendering locally with Pillow")
+    W = 512
+    outer_pad = 12
+    avatar_size = 92
+    gap = 14
+    inner_pad = 22
+
+    font_name = _load_font(True, 30)
+    font_text = _load_font(False, 36)
+
+    raw_text = _text_of(src_msg) or "[media]"
+    text = _renderable(False, raw_text, "[unsupported characters]")
+    sender_name = re.sub(r"\s+", " ", (sender.full_name or "Unknown")).strip()
+
+    bubble_x = outer_pad + avatar_size + gap
+    bubble_w = W - bubble_x - outer_pad
+    text_w = bubble_w - inner_pad * 2
+
+    probe = ImageDraw.Draw(Image.new("RGB", (10, 10)))
+    name_lines = _wrap(probe, sender_name, font_name, text_w)
+    name_line_h = font_name.getbbox("Ag")[3] + 6
+    text_lines = _wrap(probe, text, font_text, text_w)
+    text_line_h = font_text.getbbox("Ag")[3] + 12
+
+    gap_name_text = 12
+    body_h = name_line_h * len(name_lines) + gap_name_text + text_line_h * len(text_lines)
+    bubble_h = body_h + inner_pad * 2
+    H = max(avatar_size, bubble_h) + outer_pad * 2
+
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    by = (H - bubble_h) // 2
+    draw.rounded_rectangle(
+        (bubble_x, by, bubble_x + bubble_w, by + bubble_h),
+        radius=26, fill=BUBBLE_BG,
+    )
+
+    ty = by + inner_pad
+    name_color = _peer_color(sender.id) if sender else (255, 255, 255)
+    for ln in name_lines:
+        draw.text((bubble_x + inner_pad, ty), ln, font=font_name, fill=name_color)
+        ty += name_line_h
+    ty += gap_name_text
+    for ln in text_lines:
+        draw.text((bubble_x + inner_pad, ty), ln, font=font_text, fill=(255, 255, 255))
+        ty += text_line_h
+
+    photo = await _fetch_avatar_bytes(ctx, sender.id)
+    avatar = Image.new("RGBA", (avatar_size, avatar_size), (0, 0, 0, 0))
+    if photo:
+        try:
+            av = Image.open(io.BytesIO(photo)).convert("RGBA").resize((avatar_size, avatar_size))
+            mask = Image.new("L", (avatar_size, avatar_size), 0)
+            ImageDraw.Draw(mask).ellipse((0, 0, avatar_size, avatar_size), fill=255)
+            av.putalpha(mask)
+            avatar = av
+        except Exception:
+            photo = None
+    if not photo:
+        d = ImageDraw.Draw(avatar)
+        d.ellipse((0, 0, avatar_size, avatar_size), fill=_peer_color(sender.id))
+        f = _load_font(True, avatar_size // 2)
+        words = re.findall(r"[A-Za-z]+", sender_name)
+        initials = (words[0][0] + (words[1][0] if len(words) > 1 else "")).upper() if words else "?"
+        bbox = d.textbbox((0, 0), initials, font=f)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        d.text(((avatar_size - tw) / 2 - bbox[0], (avatar_size - th) / 2 - bbox[1]),
+               initials, font=f, fill=(255, 255, 255))
+    img.paste(avatar, (outer_pad, (H - avatar_size) // 2), avatar)
+
+    img = _fit_512(img)
+    out = io.BytesIO()
+    img.save(out, "WEBP")
+    return out.getvalue()
+
+
+# ───────── shared builder ─────────
+
+async def _build_quote_sticker(ctx, src_msg, sender) -> bytes:
+    try:
+        data = await _build_quote_via_api(ctx, src_msg, sender)
+        if data:
+            return data
+    except Exception as e:
+        log.warning("[sticker] API path raised: %s", e)
+    log.warning("[sticker] all APIs failed — using local Pillow fallback")
+    return await _build_quote_via_pillow(ctx, src_msg, sender)
+
+
+# ───────── command handler ─────────
+
+def _cooldown_left(uid: int) -> float:
+    return max(0.0, _last_quote.get(uid, 0.0) + COOLDOWN - time.time())
+
+
+async def _quote_and_send(update, ctx, as_reply: bool):
+    msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
+    src = msg.reply_to_message
+
+    if not src:
+        await say(ctx, chat.id, T("reply to a message with /q to turn it into a sticker."), reply_to=msg.message_id)
+        return
+    if not _text_of(src):
+        await say(ctx, chat.id, T("only text messages can be quoted."), reply_to=msg.message_id)
+        return
+
+    left = _cooldown_left(user.id)
+    if left > 0:
+        await say(ctx, chat.id, T(f"⏳ please wait {int(left) + 1}s before the next quote."), reply_to=msg.message_id)
+        return
+    _last_quote[user.id] = time.time()
+
+    sender = src.from_user or user
+    status = await say(ctx, chat.id, T("⏳ generating quote..."), reply_to=msg.message_id)
+
+    async def _auto_delete_status():
+        await asyncio.sleep(20)
+        try:
+            await status.delete()
+        except Exception:
+            pass
+
+    auto_task = asyncio.create_task(_auto_delete_status())
+
+    try:
+        sticker_bytes = await asyncio.wait_for(
+            _build_quote_sticker(ctx, src, sender), timeout=TOTAL_TIMEOUT
+        )
+    except asyncio.TimeoutError:
+        log.error("[sticker] total timeout reached")
+        auto_task.cancel()
+        try:
+            await status.edit_text(T("❌ quote generation timed out. try again."))
+        except Exception:
+            pass
+        return
+    except Exception as e:
+        log.error("[sticker] failed: %s", e, exc_info=True)
+        auto_task.cancel()
+        try:
+            await status.edit_text(T("❌ couldn't build that sticker:") + f" {esc(e)}")
+        except Exception:
+            pass
+        return
+
+    auto_task.cancel()
+    try:
+        await status.delete()
+    except Exception:
+        pass
+
+    # The buffer MUST be named .webp — Telegram refuses a static sticker
+    # whose declared mime is not image/webp.
+    buf = io.BytesIO(sticker_bytes)
+    buf.name = "quote.webp"
+
+    kwargs = {"reply_to_message_id": src.message_id} if as_reply else {}
+    try:
+        await ctx.bot.send_sticker(chat.id, buf, **kwargs)
+        log.info("[sticker] quote sent to chat %s", chat.id)
+    except Exception as e:
+        log.error("[sticker] send failed: %s", e)
+        await say(ctx, chat.id, T("❌ couldn't send that sticker:") + f" {esc(e)}", reply_to=msg.message_id)
+
+
+async def q_cmd(update, ctx):
+    await _quote_and_send(update, ctx, as_reply=False)
+
+
+async def qr_cmd(update, ctx):
+    await _quote_and_send(update, ctx, as_reply=True)
+
+
+# ───────── .kang (unchanged) ─────────
+
+async def _photo_to_sticker_file(ctx, photo):
+    tgfile = await ctx.bot.get_file(photo.file_id)
+    raw = await tgfile.download_as_bytearray()
+    im = Image.open(io.BytesIO(bytes(raw))).convert("RGBA")
+    im = _fit_512(im)
+    buf = io.BytesIO()
+    buf.name = "kang.png"
+    im.save(buf, "PNG")
+    buf.seek(0)
+    return buf
+
+
+async def kang_cmd(update, ctx):
+    msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
+    src = msg.reply_to_message
+    if not src or not (src.sticker or src.photo):
+        await say(ctx, chat.id, T("reply to a sticker or a photo with /kang to steal it into your pack."), reply_to=msg.message_id)
+        return
+
+    emoji = ctx.args[0] if ctx.args and EMOJI_RE.match(ctx.args[0]) else None
+    if src.sticker:
+        s = src.sticker
+        file_arg = s.file_id
+        fmt = "video" if s.is_video else ("animated" if s.is_animated else "static")
+        emoji = emoji or s.emoji or "🤔"
+    else:
+        try:
+            file_arg = await _photo_to_sticker_file(ctx, src.photo[-1])
         except Exception as e:
-            log.error("filter send failed [%s/%s]: %s", chat.id, word, e)
+            await say(ctx, chat.id, T("couldn't read that image:") + f" {esc(e)}", reply_to=msg.message_id)
+            return
+        fmt = "static"
+        emoji = emoji or "🤔"
+
+    me = ctx.application.bot_data["me"]
+    base = re.sub(r"[^a-zA-Z0-9_]", "", (user.username or f"u{user.id}")).lower() or f"u{user.id}"
+    sticker_obj = InputSticker(sticker=file_arg, emoji_list=[emoji], format=fmt)
+
+    async def _create(part: int):
+        name = f"a{part}_{base}_by_{me.username}"
+        title = f"{user.first_name or 'My'}'s Pack" + (f" {part}" if part > 1 else "")
+        await ctx.bot.create_new_sticker_set(user.id, name, title[:64], stickers=[sticker_obj])
+        return name
+
+    try:
+        rec = await dbase.kang_get(user.id)
+        if rec and rec.get("name"):
             try:
-                await msg.reply_text(f"❌ Error sending filter: <code>{e}</code>", reply_to_message_id=msg.message_id)
-            except:
-                pass
+                await ctx.bot.add_sticker_to_set(user.id, rec["name"], sticker=sticker_obj)
+                name, count = rec["name"], rec.get("count", 0) + 1
+                await dbase.kang_set(user.id, name, count, part=rec.get("part", 1))
+            except TelegramError as e:
+                s = str(e).lower()
+                if "invalid" in s or "too much" in s or "too many" in s:
+                    part = rec.get("part", 1) + 1
+                    name = await _create(part)
+                    count = 1
+                    await dbase.kang_set(user.id, name, count, part=part)
+                else:
+                    raise
+        else:
+            name = await _create(1)
+            count = 1
+            await dbase.kang_set(user.id, name, count, part=1)
+    except TelegramError as e:
+        await say(ctx, chat.id, T("kang failed:") + f" {esc(e)}", reply_to=msg.message_id)
+        return
 
-        break
+    link = f"https://t.me/addstickers/{name}"
+    await say(ctx, chat.id, T("✅ added to your pack ({c} stickers so far).\n{l}", c=count, l=esc(link)), reply_to=msg.message_id)
 
 
-def register(app: Application):
-    app.add_handler(MessageHandler(
-        tg_filters.Regex(r"^[./]filter(?:\s+(.+))?$") & tg_filters.ChatType.GROUPS,
-        filter_cmd
-    ), group=0)
-    
-    app.add_handler(MessageHandler(
-        tg_filters.Regex(r"^[./]unfilter(?:\s+(.+))?$") & tg_filters.ChatType.GROUPS,
-        unfilter_cmd
-    ), group=0)
-    
-    app.add_handler(MessageHandler(
-        tg_filters.Regex(r"^[./]filters$") & tg_filters.ChatType.GROUPS,
-        list_filters_cmd
-    ), group=0)
-    
-    app.add_handler(MessageHandler(
-        tg_filters.Regex(r"^[./]stop$") & tg_filters.ChatType.GROUPS,
-        stop_filters_cmd
-    ), group=0)
-
-    app.add_handler(MessageHandler(
-        (tg_filters.TEXT | tg_filters.CAPTION) & tg_filters.ChatType.GROUPS,
-        trigger_filter
-    ), group=-2)
-                                     
+def register(app):
+    dual_command(app, "q", q_cmd)
+    dual_command(app, "qr", qr_cmd)
+    dual_command(app, "kang", kang_cmd)
