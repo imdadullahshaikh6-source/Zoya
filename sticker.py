@@ -1,11 +1,20 @@
-"""Sticker plugin — fast version with aggressive timeouts and fallbacks."""
+"""Sticker plugin:
+.q / .qr  — render the replied-to message as a Telegram-style quote sticker
+.kang     — steal a replied sticker/photo into the user's own auto-growing pack
+
+Quote generation:
+  1. Try self-hosted quote-api first (QUOTE_API_URL env var)
+  2. Fall back to public quote APIs
+  3. Last resort: local Pillow rendering (always works)
+
+Preserves text entities (bold, italic, links, etc.) when using the API path.
+The .kang command is untouched — still uses Pillow + DejaVu fonts."""
 import asyncio
 import base64
 import io
 import logging
 import os
 import re
-import unicodedata
 
 import aiohttp
 from PIL import Image, ImageDraw, ImageFont
@@ -29,12 +38,18 @@ COMMANDS = [("q", "Quote a message as a sticker"), ("kang", "Steal a sticker int
 MAX_SIDE = 512
 EMOJI_RE = re.compile(r"^[\U0001F000-\U0001FAFF\u2600-\u27BF\u2190-\u21FF\u2B00-\u2BFF]+$")
 
-QUOTE_APIS = [
-    "https://bot.lyo.su/quote/generate",
-    "https://quotes-api.talle.workers.dev/quote/generate",
+# ───────── config (env-driven) ─────────
+QUOTE_API_URL = os.getenv("QUOTE_API_URL", "http://127.0.0.1:3000/generate")
+QUOTE_API_FALLBACKS = [
+    u.strip() for u in os.getenv(
+        "QUOTE_API_FALLBACKS",
+        "https://bot.lyo.su/quote/generate,"
+        "https://quotes-api.talle.workers.dev/quote/generate"
+    ).split(",") if u.strip()
 ]
-QUOTE_BG = "#1b1429"
-API_TIMEOUT = 8  # seconds — short so we don't hang
+QUOTE_BG = os.getenv("QUOTE_BG", "#1b1429")
+API_TIMEOUT = float(os.getenv("QUOTE_API_TIMEOUT", "8"))
+TOTAL_TIMEOUT = float(os.getenv("QUOTE_TOTAL_TIMEOUT", "20"))
 
 # ───────── Pillow fallback config ─────────
 BUBBLE_BG = (43, 43, 63, 255)
@@ -46,25 +61,16 @@ FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 FONT_REGULAR = os.path.join(FONT_DIR, "DejaVuSans.ttf")
 FONT_BOLD = os.path.join(FONT_DIR, "DejaVuSans-Bold.ttf")
 
-_NAME_LOOKALIKE = {
-    '˹': '[', '˺': ']', '˻': '[', '˼': ']', '˽': '|', '˾': '|', '˿': '|',
-    '「': '[', '」': ']', '『': '[', '』': ']', '【': '[', '】': ']',
-    '〖': '[', '〗': ']', '〔': '(', '〕': ')', '〈': '<', '〉': '>',
-    '《': '<', '》': '>', '•': '*', '·': '.', '‧': '.', '∙': '*', '◦': 'o',
-    'Λ': 'A', 'λ': 'A', 'Α': 'A', 'α': 'a', 'Β': 'B', 'β': 'B',
-    'Γ': 'G', 'γ': 'y', 'Δ': 'D', 'δ': 'd', 'Ε': 'E', 'ε': 'e',
-    'Ζ': 'Z', 'ζ': 'z', 'Η': 'H', 'η': 'n', 'Θ': 'O', 'θ': 'o',
-    'Ι': 'I', 'ι': 'i', 'Κ': 'K', 'κ': 'k', 'Μ': 'M', 'μ': 'u',
-    'Ν': 'N', 'ν': 'v', 'Ξ': 'X', 'ξ': 'x', 'Ο': 'O', 'ο': 'o',
-    'Π': 'P', 'π': 'n', 'Ρ': 'P', 'ρ': 'p', 'Σ': 'S', 'σ': 's',
-    'Τ': 'T', 'τ': 't', 'Υ': 'Y', 'υ': 'u', 'Φ': 'F', 'φ': 'f',
-    'Χ': 'X', 'χ': 'x', 'Ψ': 'Y', 'ψ': 'y', 'Ω': 'O', 'ω': 'w',
-    'А': 'A', 'В': 'B', 'Е': 'E', 'К': 'K', 'М': 'M', 'Н': 'H',
-    'О': 'O', 'Р': 'P', 'С': 'C', 'Т': 'T', 'У': 'Y', 'Х': 'X',
-    'а': 'a', 'в': 'b', 'е': 'e', 'к': 'k', 'м': 'm', 'н': 'h',
-    'о': 'o', 'р': 'p', 'с': 'c', 'т': 't', 'у': 'y', 'х': 'x',
+# Entity types that quote-api understands. Anything else is dropped.
+_SUPPORTED_ENTITY_TYPES = {
+    "bold", "italic", "underline", "strikethrough", "spoiler",
+    "code", "pre", "text_link", "text_mention", "mention",
+    "hashtag", "cashtag", "bot_command", "url", "email",
+    "phone_number", "custom_emoji",
 }
 
+
+# ───────── Pillow helpers (used only by fallback + .kang) ─────────
 
 def _load_font(bold: bool, size: int):
     paths = [FONT_BOLD if bold else FONT_REGULAR]
@@ -81,29 +87,14 @@ def _load_font(bold: bool, size: int):
         return ImageFont.load_default()
 
 
-def _font_safe_name(name: str) -> str:
-    text = re.sub(r"\s+", " ", (name or "").strip())
-    if not text:
-        return "Unknown"
-    out = []
-    for ch in text:
-        if ch == " " or len(ch.encode("utf-8")) <= 2:
-            out.append(ch)
-            continue
-        sub = _NAME_LOOKALIKE.get(ch)
-        out.append(sub if sub else "")
-    cleaned = re.sub(r"\s+", " ", "".join(out)).strip()
-    return cleaned or "Unknown"
-
-
-def _peer_color(user_id: int):
-    return PEER_COLORS[abs(user_id) % len(PEER_COLORS)]
-
-
 def _fit_512(img: Image.Image) -> Image.Image:
     w, h = img.size
     scale = MAX_SIDE / max(w, h)
     return img.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.LANCZOS)
+
+
+def _peer_color(user_id: int):
+    return PEER_COLORS[abs(user_id) % len(PEER_COLORS)]
 
 
 def _wrap(draw, text, font, max_w):
@@ -138,20 +129,79 @@ async def _profile_photo_bytes(ctx, user) -> bytes | None:
         return None
 
 
-# ───────────────────── API path ─────────────────────
+# ───────── entity extraction ─────────
+
+def _extract_entities(msg) -> list[dict]:
+    """Convert Telegram MessageEntity objects to quote-api's JSON format."""
+    raw = list(msg.entities or []) + list(msg.caption_entities or [])
+    out = []
+    for e in raw:
+        if e.type not in _SUPPORTED_ENTITY_TYPES:
+            continue
+        item = {"type": e.type, "offset": e.offset, "length": e.length}
+        if getattr(e, "url", None):
+            item["url"] = e.url
+        if getattr(e, "language", None):
+            item["language"] = e.language
+        if getattr(e, "user", None) and e.user:
+            item["user"] = {"id": e.user.id, "name": e.user.full_name}
+        if getattr(e, "custom_emoji_id", None):
+            item["custom_emoji_id"] = e.custom_emoji_id
+        out.append(item)
+    return out
+
+
+def _reply_context(msg) -> dict | None:
+    """If the replied message itself is a reply, pass minimal context."""
+    if not msg.reply_to_message:
+        return None
+    r = msg.reply_to_message
+    sender = r.from_user
+    return {
+        "name": (sender.first_name if sender else "User") or "User",
+        "text": r.text or r.caption or "",
+        "entities": _extract_entities(r),
+    }
+
+
+# ───────── API path ─────────
 
 async def _try_one_api(session, url, payload) -> bytes | None:
     try:
         async with session.post(url, json=payload) as resp:
-            if resp.status == 200:
-                data = await resp.read()
-                if data and len(data) > 100:
-                    log.info("✅ quote built via %s (%d bytes)", url, len(data))
-                    return data
-            log.warning("⚠️ %s returned %s", url, resp.status)
+            if resp.status != 200:
+                log.warning("⚠️ %s returned %s", url, resp.status)
+                return None
+
+            # Some APIs return JSON with base64; others return raw bytes.
+            ctype = (resp.headers.get("Content-Type") or "").lower()
+            data = await resp.read()
+            if not data or len(data) < 100:
+                log.warning("⚠️ %s returned empty/short body", url)
+                return None
+
+            if "application/json" in ctype:
+                try:
+                    j = await resp.json(content_type=None)
+                except Exception:
+                    log.warning("⚠️ %s claimed JSON but wasn't parseable", url)
+                    return None
+                b64 = j.get("result") or j.get("image") or j.get("data")
+                if not b64:
+                    log.warning("⚠️ %s JSON had no image field", url)
+                    return None
+                try:
+                    return base64.b64decode(b64)
+                except Exception as e:
+                    log.warning("⚠️ %s base64 decode failed: %s", url, e)
+                    return None
+
+            # Raw binary (image/webp)
+            log.info("✅ quote built via %s (%d bytes, %s)", url, len(data), ctype or "binary")
+            return data
     except Exception as e:
         log.warning("⚠️ %s failed: %s", url, e)
-    return None
+        return None
 
 
 async def _build_quote_via_api(ctx, src_msg, sender) -> bytes | None:
@@ -159,20 +209,18 @@ async def _build_quote_via_api(ctx, src_msg, sender) -> bytes | None:
     if not text:
         return None
 
-    log.info("[sticker] fetching profile photo...")
     photo_bytes = await _profile_photo_bytes(ctx, sender)
-    log.info("[sticker] photo: %s", "yes" if photo_bytes else "no")
-
     photo_url = (
         f"data:image/jpeg;base64,{base64.b64encode(photo_bytes).decode()}"
         if photo_bytes else ""
     )
+
     payload = {
         "type": "quote",
         "format": "webp",
         "backgroundColor": QUOTE_BG,
         "messages": [{
-            "entities": [],
+            "entities": _extract_entities(src_msg),
             "avatar": True,
             "from": {
                 "id": sender.id,
@@ -180,15 +228,15 @@ async def _build_quote_via_api(ctx, src_msg, sender) -> bytes | None:
                 "photo": {"url": photo_url} if photo_url else {},
             },
             "text": text,
-            "replyMessage": {},
+            "replyMessage": _reply_context(src_msg) or {},
         }],
     }
 
+    urls = [QUOTE_API_URL] + QUOTE_API_FALLBACKS
     timeout = aiohttp.ClientTimeout(total=API_TIMEOUT)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        # Try all APIs concurrently — first successful response wins
-        log.info("[sticker] trying %d APIs concurrently...", len(QUOTE_APIS))
-        tasks = [_try_one_api(session, url, payload) for url in QUOTE_APIS]
+        log.info("[sticker] trying %d APIs concurrently", len(urls))
+        tasks = [_try_one_api(session, url, payload) for url in urls]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for r in results:
             if isinstance(r, bytes) and len(r) > 100:
@@ -196,10 +244,10 @@ async def _build_quote_via_api(ctx, src_msg, sender) -> bytes | None:
     return None
 
 
-# ───────────────────── Pillow fallback ─────────────────────
+# ───────── Pillow fallback ─────────
 
 async def _build_quote_via_pillow(ctx, src_msg, sender) -> bytes:
-    log.info("[sticker] rendering locally with Pillow...")
+    log.info("[sticker] rendering locally with Pillow")
     W = 512
     outer_pad = 12
     avatar_size = 92
@@ -211,7 +259,7 @@ async def _build_quote_via_pillow(ctx, src_msg, sender) -> bytes:
 
     raw_text = src_msg.text or src_msg.caption or "[media]"
     text = re.sub(r"\s+", " ", raw_text).strip()
-    sender_name = _font_safe_name(sender.full_name if sender else "")
+    sender_name = re.sub(r"\s+", " ", (sender.full_name or "Unknown")).strip()
 
     bubble_x = outer_pad + avatar_size + gap
     bubble_w = W - bubble_x - outer_pad
@@ -272,11 +320,10 @@ async def _build_quote_via_pillow(ctx, src_msg, sender) -> bytes:
     img = _fit_512(img)
     out = io.BytesIO()
     img.save(out, "WEBP")
-    log.info("[sticker] local render done (%d bytes)", out.tell())
     return out.getvalue()
 
 
-# ───────────────────── shared ─────────────────────
+# ───────── shared ─────────
 
 async def _build_quote_sticker(ctx, src_msg, sender) -> bytes:
     try:
@@ -304,7 +351,7 @@ async def _quote_and_send(update, ctx, as_reply: bool):
 
     try:
         sticker_bytes = await asyncio.wait_for(
-            _build_quote_sticker(ctx, src, sender), timeout=25.0
+            _build_quote_sticker(ctx, src, sender), timeout=TOTAL_TIMEOUT
         )
     except asyncio.TimeoutError:
         log.error("[sticker] total timeout reached")
@@ -342,7 +389,7 @@ async def qr_cmd(update, ctx):
     await _quote_and_send(update, ctx, as_reply=True)
 
 
-# ───────────────────── .kang (unchanged) ─────────────────────
+# ───────── .kang (unchanged) ─────────
 
 async def _photo_to_sticker_file(ctx, photo):
     tgfile = await ctx.bot.get_file(photo.file_id)
