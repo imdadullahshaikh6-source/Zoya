@@ -16,10 +16,12 @@ from telegram.ext import (
 import admin
 import afk
 import ban
+import cleancommand
 import database as dbase
 import filters as bot_filters
 import fun
 import guardian
+import pin
 import ping
 import sticker
 import welcome
@@ -43,6 +45,7 @@ START_TXT = (
     "➤ ban, mute, warn — each with an undo button\n"
     "➤ afk tracking\n"
     "➤ guardian — anti-edit & anti-media defender\n"
+    "➤ clean command & pin tools\n"
     "➤ every command works with / or . in groups\n\n"
     "tap <b>command</b> below to see everything i can do."
 )
@@ -58,12 +61,14 @@ GUARDIAN_TXT = (
     "• <code>.setdelay 5m</code> — set deletion delay to 5 minutes.\n"
     "• <code>.setdelay 6h</code> — set deletion delay to 6 hours.\n"
     "<i>(setdelay range → 1 minute to 6 hours)</i>\n\n"
-    "<b>Permit Commands:</b>\n"
+    "<b>Permit Commands (owner only):</b>\n"
     "• <code>.permit</code> (reply) — whitelist a user (their edits/media won't be deleted).\n"
     "• <code>.unpermit</code> (reply) — remove a user from the permit list.\n"
     "• <code>.permitlist</code> — view permitted users.\n"
     "• <code>.guard on</code> / <code>.guard off</code> — enable/disable Guardian."
 )
+
+UTILITY_TXT = cleancommand.HELP_TXT + "\n\n" + pin.HELP_TXT
 
 PAGES = {
     "greet": ("🎉 𝙂𝙧𝙚𝙚𝙩𝙞𝙣𝙜𝙨", welcome.HELP_TXT),
@@ -73,6 +78,7 @@ PAGES = {
     "extra": ("🎁 𝙀𝙭𝙩𝙧𝙖", sticker.HELP_TXT + "\n\n" + fun.HELP_TXT),
     "filters": ("🔍 𝙁𝙞𝙡𝙩𝙚𝙧𝙨", bot_filters.HELP_TXT),
     "guardian": ("🛡 𝙂𝙪𝙖𝙧𝙙𝙞𝙖𝙣", GUARDIAN_TXT),
+    "utility": ("🧰 𝙐𝙩𝙞𝙡𝙞𝙩𝙮", UTILITY_TXT),
 }
 
 ALIASES = {
@@ -84,6 +90,8 @@ ALIASES = {
     "kang": "extra", "waifu": "extra", "couple": "extra", "fun": "extra",
     "filter": "filters", "filters": "filters", "f": "filters",
     "guardian": "guardian", "defender": "guardian", "setdelay": "guardian", "permit": "guardian",
+    "utility": "utility", "clean": "utility", "cleancommand": "utility",
+    "pin": "utility", "unpin": "utility",
 }
 
 
@@ -116,7 +124,8 @@ def main_page():
     for i in range(0, len(keys), 2):
         row = []
         for j, k in enumerate(keys[i:i + 2]):
-            btn_style = "danger" if k == "guardian" else colors[(i + j) % len(colors)]
+            # Guardian + Utility → red (danger) buttons
+            btn_style = "danger" if k in ("guardian", "utility") else colors[(i + j) % len(colors)]
             row.append(B(PAGES[k][0], f"help:{k}", style=btn_style))
         rows.append(row)
     rows.append([B("⬅ 𝘽𝙖𝙘𝙠", "help:home"), B("✖ 𝘾𝙡𝙤𝙨𝙚", "help:close", style="danger")])
@@ -235,7 +244,8 @@ async def post_init(app: Application):
     await dbase.init(MONGO_URI, DB_NAME)
     app.bot_data["me"] = await app.bot.get_me()
     cmds = [("start", "Start the bot"), ("help", "Show commands")]
-    for mod in (welcome, admin, afk, ban, sticker, fun, bot_filters, ping, guardian):
+    for mod in (welcome, admin, afk, ban, sticker, fun, bot_filters, ping,
+                guardian, cleancommand, pin):
         cmds += mod.COMMANDS
     await app.bot.set_my_commands(cmds)
     log.info("Started as @%s", app.bot_data["me"].username)
@@ -276,6 +286,8 @@ def main():
     bot_filters.register(app)
     ping.register(app)
     guardian.register(app)
+    cleancommand.register(app)
+    pin.register(app)
 
     app.add_error_handler(on_error)
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
