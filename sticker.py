@@ -1,4 +1,3 @@
-
 """Sticker plugin:
 .q / .qr  — render the replied-to message as a Telegram-style quote sticker
 .kang     — steal a replied sticker/photo into the user's own auto-growing pack
@@ -8,7 +7,8 @@ Quote generation flow:
   2. Public fallback APIs (QUOTE_API_FALLBACKS env)
   3. Local Pillow rendering (uses ./fonts/DejaVuSans*.ttf)
 
-The .kang command is unchanged — always uses Pillow + DejaVu fonts."""
+The .kang command crops photos to a square, resizes to 512x512, and saves as
+WEBP so Telegram accepts them as static stickers."""
 from __future__ import annotations
 
 import asyncio
@@ -141,6 +141,16 @@ def _fit_512(img: Image.Image) -> Image.Image:
     return img.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.LANCZOS)
 
 
+def _square_512(img: Image.Image) -> Image.Image:
+    """Crop to a centre square, then resize to exactly 512x512."""
+    w, h = img.size
+    side = min(w, h)
+    left = (w - side) // 2
+    top = (h - side) // 2
+    img = img.crop((left, top, left + side, top + side))
+    return img.resize((MAX_SIDE, MAX_SIDE), Image.LANCZOS)
+
+
 def _wrap(draw, text, font, max_w):
     words = text.split() or [""]
     lines, cur = [], ""
@@ -188,10 +198,9 @@ async def _avatar_data_uri(ctx, user_id: int) -> str | None:
     return uri
 
 
-# ───────── entity extraction (python-telegram-bot) ─────────
+# ───────── entity extraction ─────────
 
 def _extract_entities(msg) -> list[dict]:
-    """Convert MessageEntity objects to quote-api's JSON format."""
     raw = list(msg.entities or []) + list(msg.caption_entities or [])
     out = []
     for e in raw:
@@ -227,7 +236,6 @@ def _from_block(user) -> dict:
 
 
 def _build_message(msg, avatar: str | None = None) -> dict:
-    """One card entry — pure, no network."""
     block = {
         "entities": _extract_entities(msg),
         "avatar": True,
@@ -351,7 +359,11 @@ async def _build_quote_via_pillow(ctx, src_msg, sender) -> bytes:
     avatar = Image.new("RGBA", (avatar_size, avatar_size), (0, 0, 0, 0))
     if photo:
         try:
-            av = Image.open(io.BytesIO(photo)).convert("RGBA").resize((avatar_size, avatar_size))
+            av = Image.open(io.BytesIO(photo)).convert("RGBA")
+            w, h = av.size
+            side = min(w, h)
+            av = av.crop(((w - side) // 2, (h - side) // 2, (w + side) // 2, (h + side) // 2))
+            av = av.resize((avatar_size, avatar_size), Image.LANCZOS)
             mask = Image.new("L", (avatar_size, avatar_size), 0)
             ImageDraw.Draw(mask).ellipse((0, 0, avatar_size, avatar_size), fill=255)
             av.putalpha(mask)
@@ -473,16 +485,18 @@ async def qr_cmd(update, ctx):
     await _quote_and_send(update, ctx, as_reply=True)
 
 
-# ───────── .kang (unchanged) ─────────
+# ───────── .kang ─────────
 
 async def _photo_to_sticker_file(ctx, photo):
+    """Download the photo, crop to a centre square, resize to exactly
+    512x512, and save as WEBP — Telegram's preferred static sticker format."""
     tgfile = await ctx.bot.get_file(photo.file_id)
     raw = await tgfile.download_as_bytearray()
     im = Image.open(io.BytesIO(bytes(raw))).convert("RGBA")
-    im = _fit_512(im)
+    im = _square_512(im)
     buf = io.BytesIO()
-    buf.name = "kang.png"
-    im.save(buf, "PNG")
+    buf.name = "kang.webp"
+    im.save(buf, "WEBP", quality=90)
     buf.seek(0)
     return buf
 
