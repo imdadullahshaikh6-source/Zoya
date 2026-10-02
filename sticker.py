@@ -574,4 +574,27 @@ async def kang_cmd(update, ctx):
                 await dbase.kang_set(user.id, name, count, part=rec.get("part", 1))
             except TelegramError as e:
                 s = str(e).lower()
-                if "invalid" i
+                if "invalid" in s or "too much" in s or "too many" in s:
+                    part = rec.get("part", 1) + 1
+                    name = await _create(part)
+                    count = 1
+                    await dbase.kang_set(user.id, name, count, part=part)
+                else:
+                    raise
+        else:
+            name = await _create(1)
+            count = 1
+            await dbase.kang_set(user.id, name, count, part=1)
+    except TelegramError as e:
+        await say(ctx, chat.id, T("kang failed:") + f" {esc(e)}", reply_to=msg.message_id)
+        return
+
+    link = f"https://t.me/addstickers/{name}"
+    await say(ctx, chat.id, T("✅ added to your pack ({c} stickers so far).\n{l}", c=count, l=esc(link)), reply_to=msg.message_id)
+
+
+def register(app):
+    dual_command(app, "q", q_cmd)
+    dual_command(app, "qr", qr_cmd)
+    dual_command(app, "kang", kang_cmd)
+  
