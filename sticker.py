@@ -2,6 +2,11 @@
 .q / .qr  — render the replied-to message as a Telegram-style quote sticker
 .kang     — steal a replied sticker/photo into the user's own auto-growing pack
 
+Quote commands:
+  .q              → normal quote sticker
+  .q r / .q reply → quote sticker sent as a reply to the source message
+  .qr             → same as .q r (shortcut)
+
 Quote generation flow:
   1. Self-hosted quote-api (QUOTE_API env or common.py default)
   2. Public fallback APIs (QUOTE_API_FALLBACKS env)
@@ -45,7 +50,8 @@ log = logging.getLogger("sticker")
 HELP_TXT = (
     "<b>✦ stickers</b>\n\n"
     "/q (or .q) — reply to any message to turn it into a quote sticker\n"
-    "/qr (or .qr) — same, but sent as a reply to the original message\n"
+    "/q r (or .q r) — same, but sent as a reply to the original message\n"
+    "/qr (or .qr) — shortcut for .q r\n"
     "/kang (or .kang) [emoji] — reply to a sticker or photo to add it to your "
     "own sticker pack. the pack is created the first time and reused after that — "
     "every later .kang just adds to it (a new part is started automatically if it fills up)."
@@ -538,7 +544,13 @@ async def _quote_and_send(update, ctx, as_reply: bool):
 
 
 async def q_cmd(update, ctx):
-    await _quote_and_send(update, ctx, as_reply=False)
+    """Supports both:
+        .q              → normal quote
+        .q r / .q reply → quote as a reply to the source message
+    """
+    args = [a.lower() for a in (ctx.args or [])]
+    as_reply = bool(args) and args[0] in ("r", "reply", "re")
+    await _quote_and_send(update, ctx, as_reply=as_reply)
 
 
 async def qr_cmd(update, ctx):
@@ -546,6 +558,21 @@ async def qr_cmd(update, ctx):
 
 
 # ───────── .kang helpers ─────────
+
+async def _photo_to_sticker_file(ctx, photo):
+    """Download a photo, crop to a centre square, resize to 512x512, WEBP."""
+    tgfile = await ctx.bot.get_file(photo.file_id)
+    raw = await tgfile.download_as_bytearray()
+    im = Image.open(io.BytesIO(bytes(raw))).convert("RGBA")
+    im = _square_512(im)
+    buf = io.BytesIO()
+    buf.name = "kang.webp"
+    im.save(buf, "WEBP", quality=90)
+    buf.seek(0)
+    return buf
+
+
+# ───────── .kang ─────────
 
 async def kang_cmd(update, ctx):
     msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
@@ -619,4 +646,3 @@ def register(app):
     dual_command(app, "q", q_cmd)
     dual_command(app, "qr", qr_cmd)
     dual_command(app, "kang", kang_cmd)
-                                   
