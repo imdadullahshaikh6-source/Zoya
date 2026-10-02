@@ -2,13 +2,12 @@
 .q / .qr  — render the replied-to message as a Telegram-style quote sticker
 .kang     — steal a replied sticker/photo into the user's own auto-growing pack
 
-Quote generation:
-  1. Try self-hosted quote-api first (QUOTE_API_URL env var)
-  2. Fall back to public quote APIs
-  3. Last resort: local Pillow rendering (always works)
+Quote generation flow:
+  1. Self-hosted quote-api (QUOTE_API_URL env, default http://127.0.0.1:3000/generate)
+  2. Public fallback APIs (QUOTE_API_FALLBACKS env)
+  3. Local Pillow rendering (uses ./fonts/DejaVuSans*.ttf)
 
-Preserves text entities (bold, italic, links, etc.) when using the API path.
-The .kang command is untouched — still uses Pillow + DejaVu fonts."""
+The .kang command is unchanged — always uses Pillow + DejaVu fonts."""
 import asyncio
 import base64
 import io
@@ -31,7 +30,8 @@ HELP_TXT = (
     "/q (or .q) — reply to any message to turn it into a quote sticker\n"
     "/qr (or .qr) — same, but sent as a reply to the original message\n"
     "/kang (or .kang) [emoji] — reply to a sticker or photo to add it to your "
-    "own sticker pack."
+    "own sticker pack. the pack is created the first time and reused after that — "
+    "every later .kang just adds to it (a new part is started automatically if it fills up)."
 )
 COMMANDS = [("q", "Quote a message as a sticker"), ("kang", "Steal a sticker into your pack")]
 
@@ -43,8 +43,7 @@ QUOTE_API_URL = os.getenv("QUOTE_API_URL", "http://127.0.0.1:3000/generate")
 QUOTE_API_FALLBACKS = [
     u.strip() for u in os.getenv(
         "QUOTE_API_FALLBACKS",
-        "https://bot.lyo.su/quote/generate,"
-        "https://quotes-api.talle.workers.dev/quote/generate"
+        "https://bot.lyo.su/quote/generate"
     ).split(",") if u.strip()
 ]
 QUOTE_BG = os.getenv("QUOTE_BG", "#1b1429")
@@ -61,7 +60,7 @@ FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 FONT_REGULAR = os.path.join(FONT_DIR, "DejaVuSans.ttf")
 FONT_BOLD = os.path.join(FONT_DIR, "DejaVuSans-Bold.ttf")
 
-# Entity types that quote-api understands. Anything else is dropped.
+# Entity types quote-api understands. Anything else is dropped.
 _SUPPORTED_ENTITY_TYPES = {
     "bold", "italic", "underline", "strikethrough", "spoiler",
     "code", "pre", "text_link", "text_mention", "mention",
@@ -70,7 +69,7 @@ _SUPPORTED_ENTITY_TYPES = {
 }
 
 
-# ───────── Pillow helpers (used only by fallback + .kang) ─────────
+# ───────── Pillow helpers (used by fallback + .kang) ─────────
 
 def _load_font(bold: bool, size: int):
     paths = [FONT_BOLD if bold else FONT_REGULAR]
@@ -173,7 +172,6 @@ async def _try_one_api(session, url, payload) -> bytes | None:
                 log.warning("⚠️ %s returned %s", url, resp.status)
                 return None
 
-            # Some APIs return JSON with base64; others return raw bytes.
             ctype = (resp.headers.get("Content-Type") or "").lower()
             data = await resp.read()
             if not data or len(data) < 100:
@@ -196,7 +194,6 @@ async def _try_one_api(session, url, payload) -> bytes | None:
                     log.warning("⚠️ %s base64 decode failed: %s", url, e)
                     return None
 
-            # Raw binary (image/webp)
             log.info("✅ quote built via %s (%d bytes, %s)", url, len(data), ctype or "binary")
             return data
     except Exception as e:
