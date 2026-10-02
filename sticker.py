@@ -1,10 +1,5 @@
-"""Sticker plugin:
-.q / .qr  — render the replied-to message as a quote sticker
-.kang     — steal a replied sticker/photo into the user's own auto-growing pack
-
-Quote generation tries several public APIs in order (lyo.su first, then a
-mirror). If all APIs are down, it falls back to local Pillow rendering using
-the bundled DejaVu fonts. So the command never fully fails."""
+"""Sticker plugin — fast version with aggressive timeouts and fallbacks."""
+import asyncio
 import base64
 import io
 import logging
@@ -13,7 +8,6 @@ import re
 import unicodedata
 
 import aiohttp
-from fontTools.ttLib import TTFont
 from PIL import Image, ImageDraw, ImageFont
 from telegram import InputSticker
 from telegram.error import TelegramError
@@ -28,23 +22,21 @@ HELP_TXT = (
     "/q (or .q) — reply to any message to turn it into a quote sticker\n"
     "/qr (or .qr) — same, but sent as a reply to the original message\n"
     "/kang (or .kang) [emoji] — reply to a sticker or photo to add it to your "
-    "own sticker pack. the pack is created the first time and reused after that — "
-    "every later .kang just adds to it (a new part is started automatically if it fills up)."
+    "own sticker pack."
 )
 COMMANDS = [("q", "Quote a message as a sticker"), ("kang", "Steal a sticker into your pack")]
 
 MAX_SIDE = 512
 EMOJI_RE = re.compile(r"^[\U0001F000-\U0001FAFF\u2600-\u27BF\u2190-\u21FF\u2B00-\u2BFF]+$")
 
-# Public quote APIs, tried in order. First one wins.
 QUOTE_APIS = [
     "https://bot.lyo.su/quote/generate",
     "https://quotes-api.talle.workers.dev/quote/generate",
-    "https://quote-api.vercel.app/quote/generate",
 ]
 QUOTE_BG = "#1b1429"
+API_TIMEOUT = 8  # seconds — short so we don't hang
 
-# ───────── local Pillow fallback config ─────────
+# ───────── Pillow fallback config ─────────
 BUBBLE_BG = (43, 43, 63, 255)
 PEER_COLORS = [
     (225, 112, 118), (250, 167, 116), (166, 149, 231),
@@ -89,52 +81,17 @@ def _load_font(bold: bool, size: int):
         return ImageFont.load_default()
 
 
-def _cmap_of(path):
-    try:
-        return set(TTFont(path, fontNumber=0, lazy=True).getBestCmap())
-    except Exception:
-        return set()
-
-
-_CMAP = {False: _cmap_of(FONT_REGULAR), True: _cmap_of(FONT_BOLD)}
-if not _CMAP[True]:
-    _CMAP[True] = _CMAP[False]
-
-_DROP_CATEGORIES = {"Cf", "Cc", "Co", "Cs", "Mn", "Me"}
-
-
-def _renderable(bold: bool, text: str, fallback: str = "") -> str:
-    cmap = _CMAP[bold]
-    out = []
-    for ch in unicodedata.normalize("NFKD", text or ""):
-        if unicodedata.category(ch) in _DROP_CATEGORIES:
-            continue
-        if ch in (" ", "\n", "\t") or ord(ch) in cmap:
-            out.append(ch)
-    cleaned = re.sub(r"\s+", " ", "".join(out)).strip()
-    return cleaned or fallback
-
-
-def _font_safe_name(name: str, bold: bool = True) -> str:
+def _font_safe_name(name: str) -> str:
     text = re.sub(r"\s+", " ", (name or "").strip())
     if not text:
         return "Unknown"
-    cmap = _CMAP[bold]
     out = []
     for ch in text:
-        if ch == " ":
-            out.append(ch)
-            continue
-        if ord(ch) in cmap:
+        if ch == " " or len(ch.encode("utf-8")) <= 2:
             out.append(ch)
             continue
         sub = _NAME_LOOKALIKE.get(ch)
-        if sub and ord(sub) in cmap:
-            out.append(sub)
-            continue
-        for d in unicodedata.normalize("NFKD", ch):
-            if d == " " or ord(d) in cmap:
-                out.append(d)
+        out.append(sub if sub else "")
     cleaned = re.sub(r"\s+", " ", "".join(out)).strip()
     return cleaned or "Unknown"
 
@@ -166,32 +123,50 @@ def _wrap(draw, text, font, max_w):
 
 
 async def _profile_photo_bytes(ctx, user) -> bytes | None:
+    """Fetch profile photo with a hard timeout — never hangs."""
     try:
-        photos = await ctx.bot.get_user_profile_photos(user.id, limit=1)
-        if not photos.total_count:
-            return None
-        file_id = photos.photos[0][-1].file_id
-        tgfile = await ctx.bot.get_file(file_id)
-        return bytes(await tgfile.download_as_bytearray())
-    except (TelegramError, OSError) as e:
+        async def _fetch():
+            photos = await ctx.bot.get_user_profile_photos(user.id, limit=1)
+            if not photos.total_count:
+                return None
+            file_id = photos.photos[0][-1].file_id
+            tgfile = await ctx.bot.get_file(file_id)
+            return bytes(await tgfile.download_as_bytearray())
+        return await asyncio.wait_for(_fetch(), timeout=6.0)
+    except (asyncio.TimeoutError, TelegramError, OSError) as e:
         log.debug("profile photo fetch failed for %s: %s", user.id, e)
         return None
 
 
 # ───────────────────── API path ─────────────────────
 
+async def _try_one_api(session, url, payload) -> bytes | None:
+    try:
+        async with session.post(url, json=payload) as resp:
+            if resp.status == 200:
+                data = await resp.read()
+                if data and len(data) > 100:
+                    log.info("✅ quote built via %s (%d bytes)", url, len(data))
+                    return data
+            log.warning("⚠️ %s returned %s", url, resp.status)
+    except Exception as e:
+        log.warning("⚠️ %s failed: %s", url, e)
+    return None
+
+
 async def _build_quote_via_api(ctx, src_msg, sender) -> bytes | None:
-    """Try each public quote API in turn. Returns .webp bytes or None."""
     text = src_msg.text or src_msg.caption or ""
     if not text:
         return None
 
+    log.info("[sticker] fetching profile photo...")
     photo_bytes = await _profile_photo_bytes(ctx, sender)
+    log.info("[sticker] photo: %s", "yes" if photo_bytes else "no")
+
     photo_url = (
         f"data:image/jpeg;base64,{base64.b64encode(photo_bytes).decode()}"
         if photo_bytes else ""
     )
-
     payload = {
         "type": "quote",
         "format": "webp",
@@ -209,26 +184,22 @@ async def _build_quote_via_api(ctx, src_msg, sender) -> bytes | None:
         }],
     }
 
-    timeout = aiohttp.ClientTimeout(total=20)
+    timeout = aiohttp.ClientTimeout(total=API_TIMEOUT)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        for url in QUOTE_APIS:
-            try:
-                async with session.post(url, json=payload) as resp:
-                    if resp.status == 200:
-                        data = await resp.read()
-                        if data and len(data) > 100:
-                            log.info("quote built via %s (%d bytes)", url, len(data))
-                            return data
-                    log.warning("quote API %s returned %s", url, resp.status)
-            except Exception as e:
-                log.warning("quote API %s failed: %s", url, e)
+        # Try all APIs concurrently — first successful response wins
+        log.info("[sticker] trying %d APIs concurrently...", len(QUOTE_APIS))
+        tasks = [_try_one_api(session, url, payload) for url in QUOTE_APIS]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for r in results:
+            if isinstance(r, bytes) and len(r) > 100:
+                return r
     return None
 
 
-# ───────────────────── local Pillow fallback ─────────────────────
+# ───────────────────── Pillow fallback ─────────────────────
 
 async def _build_quote_via_pillow(ctx, src_msg, sender) -> bytes:
-    """Local rendering — same visual style as the API, using DejaVu fonts."""
+    log.info("[sticker] rendering locally with Pillow...")
     W = 512
     outer_pad = 12
     avatar_size = 92
@@ -239,8 +210,8 @@ async def _build_quote_via_pillow(ctx, src_msg, sender) -> bytes:
     font_text = _load_font(False, 36)
 
     raw_text = src_msg.text or src_msg.caption or "[media]"
-    text = _renderable(False, raw_text, "[unsupported characters]")
-    sender_name = _font_safe_name(sender.full_name if sender else "", bold=True)
+    text = re.sub(r"\s+", " ", raw_text).strip()
+    sender_name = _font_safe_name(sender.full_name if sender else "")
 
     bubble_x = outer_pad + avatar_size + gap
     bubble_w = W - bubble_x - outer_pad
@@ -259,7 +230,6 @@ async def _build_quote_via_pillow(ctx, src_msg, sender) -> bytes:
 
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-
     by = (H - bubble_h) // 2
     draw.rounded_rectangle(
         (bubble_x, by, bubble_x + bubble_w, by + bubble_h),
@@ -276,7 +246,6 @@ async def _build_quote_via_pillow(ctx, src_msg, sender) -> bytes:
         draw.text((bubble_x + inner_pad, ty), ln, font=font_text, fill=(255, 255, 255))
         ty += text_line_h
 
-    # Avatar
     photo = await _profile_photo_bytes(ctx, sender)
     avatar = Image.new("RGBA", (avatar_size, avatar_size), (0, 0, 0, 0))
     if photo:
@@ -303,17 +272,20 @@ async def _build_quote_via_pillow(ctx, src_msg, sender) -> bytes:
     img = _fit_512(img)
     out = io.BytesIO()
     img.save(out, "WEBP")
+    log.info("[sticker] local render done (%d bytes)", out.tell())
     return out.getvalue()
 
 
-# ───────────────────── shared command logic ─────────────────────
+# ───────────────────── shared ─────────────────────
 
 async def _build_quote_sticker(ctx, src_msg, sender) -> bytes:
-    """Try APIs first; fall back to local Pillow if all of them fail."""
-    data = await _build_quote_via_api(ctx, src_msg, sender)
-    if data:
-        return data
-    log.warning("all quote APIs failed — falling back to local Pillow rendering")
+    try:
+        data = await _build_quote_via_api(ctx, src_msg, sender)
+        if data:
+            return data
+    except Exception as e:
+        log.warning("[sticker] API path raised: %s", e)
+    log.warning("[sticker] all APIs failed — using local Pillow fallback")
     return await _build_quote_via_pillow(ctx, src_msg, sender)
 
 
@@ -331,9 +303,18 @@ async def _quote_and_send(update, ctx, as_reply: bool):
     status = await say(ctx, chat.id, T("⏳ generating quote..."), reply_to=msg.message_id)
 
     try:
-        sticker_bytes = await _build_quote_sticker(ctx, src, sender)
+        sticker_bytes = await asyncio.wait_for(
+            _build_quote_sticker(ctx, src, sender), timeout=25.0
+        )
+    except asyncio.TimeoutError:
+        log.error("[sticker] total timeout reached")
+        try:
+            await status.edit_text(T("❌ quote generation timed out. try again."))
+        except Exception:
+            pass
+        return
     except Exception as e:
-        log.error("quote generation failed: %s", e)
+        log.error("[sticker] failed: %s", e, exc_info=True)
         try:
             await status.edit_text(T("❌ couldn't build that sticker:") + f" {esc(e)}")
         except Exception:
@@ -346,7 +327,11 @@ async def _quote_and_send(update, ctx, as_reply: bool):
         pass
 
     kwargs = {"reply_to_message_id": src.message_id} if as_reply else {}
-    await ctx.bot.send_sticker(chat.id, io.BytesIO(sticker_bytes), **kwargs)
+    try:
+        await ctx.bot.send_sticker(chat.id, io.BytesIO(sticker_bytes), **kwargs)
+        log.info("[sticker] sticker sent to chat %s", chat.id)
+    except Exception as e:
+        log.error("[sticker] send failed: %s", e)
 
 
 async def q_cmd(update, ctx):
@@ -357,7 +342,7 @@ async def qr_cmd(update, ctx):
     await _quote_and_send(update, ctx, as_reply=True)
 
 
-# ───────────────────────── .kang (unchanged) ─────────────────────────
+# ───────────────────── .kang (unchanged) ─────────────────────
 
 async def _photo_to_sticker_file(ctx, photo):
     tgfile = await ctx.bot.get_file(photo.file_id)
