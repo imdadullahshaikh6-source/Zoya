@@ -41,24 +41,15 @@ COMMANDS = [
     ("keepcommand", "Stop auto-deleting commands"),
 ]
 
-# Commands that belong to the "admin" bucket.
-# Everything else is treated as a "users" command.
 ADMIN_COMMANDS = {
-    # ban.py
     "ban", "unban", "kick", "mute", "unmute", "warn", "unwarn",
     "resetwarn", "warns",
-    # admin.py
     "promote", "demote", "settitle",
-    # welcome.py
     "welcome", "setwelcome", "resetwelcome", "setwelcomepic",
-    # filters.py
     "filter", "filters", "setfilter", "rmfilter", "clearfilters",
     "filterlist", "stop",
-    # guardian.py
     "setdelay", "guard", "permit", "unpermit", "permitlist",
-    # afk
     "afk",
-    # pin.py
     "pin", "unpin", "unpinall",
 }
 
@@ -109,27 +100,31 @@ async def keep_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def _clean_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Runs at group=-2 so it fires before any command handler.
-    Deletes the user's command message if cleaning is on for this chat."""
+    Deletes the user's command message if cleaning is on for this chat.
+    block=False so downstream command handlers still run."""
     msg = update.effective_message
     chat = update.effective_chat
     user = update.effective_user
     if not msg or not chat or not user:
         return
-    if chat.type == ChatType.PRIVATE:
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         return
     if user.is_bot:
         return
 
-    text = msg.text or msg.caption or ""
+    text = (msg.text or msg.caption or "").lstrip()
     if not text or text[0] not in ("/", "."):
         return
 
-    # Extract command name (strip @botname suffix)
     first = text[1:].split()[0].split("@")[0].lower()
+    if not first:
+        return
     if first in SELF_COMMANDS:
-        return  # never delete the toggle commands themselves
+        log.info("[clean] skip self-command: %s", first)
+        return
 
     cfg = await dbase.clean_get(chat.id)
+    log.info("[clean] caught '%s' in chat %s — cfg=%s", first, chat.id, cfg)
     if not cfg or not cfg.get("enabled"):
         return
 
@@ -144,13 +139,14 @@ async def _clean_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         should = False
 
     if not should:
+        log.info("[clean] '%s' not in mode '%s' — skipping", first, mode)
         return
 
     try:
         await ctx.bot.delete_message(chat.id, msg.message_id)
-        log.debug("[clean] deleted %s from chat %s", first, chat.id)
+        log.info("[clean] ✅ DELETED '%s' from chat %s", first, chat.id)
     except TelegramError as e:
-        log.debug("[clean] delete failed: %s", e)
+        log.warning("[clean] ❌ delete failed for '%s': %s", first, e)
 
 
 # ───────────── registration ─────────────
@@ -159,8 +155,14 @@ def register(app):
     dual_command(app, "cleancommand", clean_cmd)
     dual_command(app, "keepcommand", keep_cmd)
 
-    # group=-2 → runs before every other handler
+    # group=-2 → runs before every other handler.
+    # block=False → command handlers in higher groups STILL run
+    # (we only delete the user's command message, we don't consume the update).
     app.add_handler(
-        MessageHandler(filters.ChatType.GROUPS & filters.ALL, _clean_watcher),
+        MessageHandler(
+            (filters.TEXT | filters.CAPTION) & filters.ChatType.GROUPS,
+            _clean_watcher,
+        ),
         group=-2,
-      )
+        block=False,
+    )
