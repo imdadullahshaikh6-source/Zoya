@@ -7,8 +7,11 @@ Quote generation flow:
   2. Public fallback APIs (QUOTE_API_FALLBACKS env)
   3. Local Pillow rendering (uses ./fonts/DejaVuSans*.ttf)
 
-The .kang command crops photos to a square, resizes to 512x512, and saves as
-WEBP so Telegram accepts them as static stickers."""
+.kang handling:
+  • Photos           → download, square-crop 512x512, WEBP
+  • Static stickers  → download, square-crop 512x512, WEBP (fix for Sticker_png_dimensions)
+  • Video stickers   → pass file_id directly (WEBM must stay video)
+  • Animated stickers→ pass file_id directly (TGS must stay animated)"""
 from __future__ import annotations
 
 import asyncio
@@ -463,8 +466,6 @@ async def _quote_and_send(update, ctx, as_reply: bool):
     except Exception:
         pass
 
-    # The buffer MUST be named .webp — Telegram refuses a static sticker
-    # whose declared mime is not image/webp.
     buf = io.BytesIO(sticker_bytes)
     buf.name = "quote.webp"
 
@@ -485,11 +486,10 @@ async def qr_cmd(update, ctx):
     await _quote_and_send(update, ctx, as_reply=True)
 
 
-# ───────── .kang ─────────
+# ───────── .kang helpers ─────────
 
 async def _photo_to_sticker_file(ctx, photo):
-    """Download the photo, crop to a centre square, resize to exactly
-    512x512, and save as WEBP — Telegram's preferred static sticker format."""
+    """Download a photo, crop to a centre square, resize to 512x512, WEBP."""
     tgfile = await ctx.bot.get_file(photo.file_id)
     raw = await tgfile.download_as_bytearray()
     im = Image.open(io.BytesIO(bytes(raw))).convert("RGBA")
@@ -501,6 +501,23 @@ async def _photo_to_sticker_file(ctx, photo):
     return buf
 
 
+async def _sticker_to_file(ctx, sticker):
+    """Download an existing static sticker, crop to square, resize to 512x512,
+    re-encode as WEBP — fixes the 'Sticker_png_dimensions' error Telegram
+    throws when the source sticker's dimensions don't match what it expects."""
+    tgfile = await ctx.bot.get_file(sticker.file_id)
+    raw = await tgfile.download_as_bytearray()
+    im = Image.open(io.BytesIO(bytes(raw))).convert("RGBA")
+    im = _square_512(im)
+    buf = io.BytesIO()
+    buf.name = "kang.webp"
+    im.save(buf, "WEBP", quality=90)
+    buf.seek(0)
+    return buf
+
+
+# ───────── .kang ─────────
+
 async def kang_cmd(update, ctx):
     msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
     src = msg.reply_to_message
@@ -509,11 +526,26 @@ async def kang_cmd(update, ctx):
         return
 
     emoji = ctx.args[0] if ctx.args and EMOJI_RE.match(ctx.args[0]) else None
+
     if src.sticker:
         s = src.sticker
-        file_arg = s.file_id
-        fmt = "video" if s.is_video else ("animated" if s.is_animated else "static")
         emoji = emoji or s.emoji or "🤔"
+        if s.is_video:
+            # video sticker → WEBM, must pass file_id directly
+            file_arg = s.file_id
+            fmt = "video"
+        elif s.is_animated:
+            # animated sticker → TGS, must pass file_id directly
+            file_arg = s.file_id
+            fmt = "animated"
+        else:
+            # static sticker → download + convert to clean 512x512 WEBP
+            try:
+                file_arg = await _sticker_to_file(ctx, s)
+            except Exception as e:
+                await say(ctx, chat.id, T("couldn't read that sticker:") + f" {esc(e)}", reply_to=msg.message_id)
+                return
+            fmt = "static"
     else:
         try:
             file_arg = await _photo_to_sticker_file(ctx, src.photo[-1])
@@ -542,26 +574,4 @@ async def kang_cmd(update, ctx):
                 await dbase.kang_set(user.id, name, count, part=rec.get("part", 1))
             except TelegramError as e:
                 s = str(e).lower()
-                if "invalid" in s or "too much" in s or "too many" in s:
-                    part = rec.get("part", 1) + 1
-                    name = await _create(part)
-                    count = 1
-                    await dbase.kang_set(user.id, name, count, part=part)
-                else:
-                    raise
-        else:
-            name = await _create(1)
-            count = 1
-            await dbase.kang_set(user.id, name, count, part=1)
-    except TelegramError as e:
-        await say(ctx, chat.id, T("kang failed:") + f" {esc(e)}", reply_to=msg.message_id)
-        return
-
-    link = f"https://t.me/addstickers/{name}"
-    await say(ctx, chat.id, T("✅ added to your pack ({c} stickers so far).\n{l}", c=count, l=esc(link)), reply_to=msg.message_id)
-
-
-def register(app):
-    dual_command(app, "q", q_cmd)
-    dual_command(app, "qr", qr_cmd)
-    dual_command(app, "kang", kang_cmd)
+                if "invalid" i
