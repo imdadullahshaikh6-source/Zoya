@@ -77,18 +77,18 @@ def home_page(user, ctx):
     me = ctx.application.bot_data["me"]
     text = T(START_TXT, m=mention(user))
     
-    # Row 1: Command
+    # Row 1: Command (Primary - Blue)
     rows = [
         [B("📜 𝘾𝙤𝙢𝙢𝙖𝙣𝙙", "help:main", style="primary")],
     ]
     
-    # Row 2: Owner + Channel
-    row2 = [B("👑 𝙊𝙬𝙣𝙚𝙧", url=SUPPORT_URL, style="primary")]
+    # Row 2: Owner + Channel (Dono Danger - Red)
+    row2 = [B("👑 𝙊𝙬𝙣𝙚𝙧", url=SUPPORT_URL, style="danger")]
     if CHANNEL_URL:
-        row2.append(B("🔔 𝘾𝙝𝙖𝙣𝙣𝙚𝙡", url=CHANNEL_URL))
+        row2.append(B("🔔 𝘾𝙝𝙖𝙣𝙣𝙚𝙡", url=CHANNEL_URL, style="danger"))
     rows.append(row2)
     
-    # Row 3: Add Me
+    # Row 3: Add Me (Success - Green)
     rows.append([B("➕ 𝘼𝙙𝙙 𝙈𝙚", url=add_me_url(me.username), style="success")])
     
     return text, InlineKeyboardMarkup(rows)
