@@ -6,7 +6,9 @@ Commands:
   .unpin               — unpin the last pinned message
   .unpinall            — unpin all pinned messages
 
-Only full admins can use these. The bot needs "Pin Messages" permission."""
+Cross-verification: only admins with `can_pin_messages` (or the owner) can use
+these — AND the bot itself must also have `can_pin_messages`. If either side
+lacks the permission, the command refuses with a clear message."""
 import logging
 
 from telegram import Update
@@ -25,7 +27,8 @@ HELP_TXT = (
     "• <code>.unpin</code> (reply) — unpin the replied message.\n"
     "• <code>.unpin</code> — unpin the last pinned message.\n"
     "• <code>.unpinall</code> — unpin all pinned messages in this chat.\n\n"
-    "<i>Only full admins can use these. Bot needs Pin Messages permission.</i>"
+    "<i>Only admins with <b>Pin Messages</b> permission can use these. "
+    "Bot also needs Pin Messages permission.</i>"
 )
 COMMANDS = [
     ("pin", "Pin a replied message"),
@@ -34,7 +37,8 @@ COMMANDS = [
 ]
 
 
-async def _is_full_admin(ctx, chat_id: int, user_id: int) -> bool:
+async def _user_can_pin(ctx, chat_id: int, user_id: int) -> bool:
+    """True only if the user is the owner or an admin with can_pin_messages."""
     try:
         m = await ctx.bot.get_chat_member(chat_id, user_id)
     except TelegramError:
@@ -46,14 +50,41 @@ async def _is_full_admin(ctx, chat_id: int, user_id: int) -> bool:
     return bool(getattr(m, "can_pin_messages", False))
 
 
+async def _bot_can_pin(ctx, chat_id: int) -> bool:
+    """True if the bot is an admin with can_pin_messages in this chat."""
+    me = ctx.application.bot_data.get("me")
+    if not me:
+        return False
+    try:
+        m = await ctx.bot.get_chat_member(chat_id, me.id)
+    except TelegramError:
+        return False
+    return (m.status == ChatMemberStatus.ADMINISTRATOR
+            and bool(getattr(m, "can_pin_messages", False)))
+
+
+async def _guard(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Shared permission check. Sends the right refusal and returns False
+    if either the user or the bot lacks pin permission."""
+    msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
+    if chat.type == ChatType.PRIVATE:
+        return False
+    if not await _user_can_pin(ctx, chat.id, user.id):
+        await say(ctx, chat.id, T("⚠️ you need <b>Pin Messages</b> permission to use this."),
+                  reply_to=msg.message_id)
+        return False
+    if not await _bot_can_pin(ctx, chat.id):
+        await say(ctx, chat.id, T("⚠️ give me <b>Pin Messages</b> permission first."),
+                  reply_to=msg.message_id)
+        return False
+    return True
+
+
 # ───────────── commands ─────────────
 
 async def pin_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
-    if chat.type == ChatType.PRIVATE:
-        return
-    if not await _is_full_admin(ctx, chat.id, user.id):
-        await say(ctx, chat.id, T("⚠️ only full-power admins can pin."), reply_to=msg.message_id)
+    msg, chat = update.effective_message, update.effective_chat
+    if not await _guard(update, ctx):
         return
     target = msg.reply_to_message
     if not target:
@@ -67,11 +98,8 @@ async def pin_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def unpin_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
-    if chat.type == ChatType.PRIVATE:
-        return
-    if not await _is_full_admin(ctx, chat.id, user.id):
-        await say(ctx, chat.id, T("⚠️ only full-power admins can unpin."), reply_to=msg.message_id)
+    msg, chat = update.effective_message, update.effective_chat
+    if not await _guard(update, ctx):
         return
     target = msg.reply_to_message
     try:
@@ -85,11 +113,8 @@ async def unpin_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def unpinall_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
-    if chat.type == ChatType.PRIVATE:
-        return
-    if not await _is_full_admin(ctx, chat.id, user.id):
-        await say(ctx, chat.id, T("⚠️ only full-power admins can unpin."), reply_to=msg.message_id)
+    msg, chat = update.effective_message, update.effective_chat
+    if not await _guard(update, ctx):
         return
     try:
         await ctx.bot.unpin_all_chat_messages(chat.id)
@@ -97,8 +122,6 @@ async def unpinall_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except TelegramError as e:
         await say(ctx, chat.id, T(f"❌ couldn't unpin all: {e}"), reply_to=msg.message_id)
 
-
-# ───────────── registration ─────────────
 
 def register(app):
     dual_command(app, "pin", pin_cmd)
