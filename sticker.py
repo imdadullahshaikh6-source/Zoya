@@ -1,27 +1,42 @@
 """Sticker plugin:
-.q / .qr  — render the replied-to message as a quote sticker
+.q / .qr  — render the replied-to message as a Telegram-style quote sticker
 .kang     — steal a replied sticker/photo into the user's own auto-growing pack
-            (the pack is created once per user and reused on every later .kang;
-            if it fills up, a new part is started automatically).
 
-Fonts are bundled in ./fonts (DejaVu Sans) so rendering never depends on
-whatever fonts happen to be installed on the server — DejaVu covers Latin,
-Cyrillic, Greek, and the IPA/phonetic "small caps" block that most fancy
-Telegram-name generators use, so stylised display names render properly
-instead of showing missing-glyph boxes."""
+Quote generation flow:
+  1. Self-hosted quote-api (config.QUOTE_API or QUOTE_API_URL env)
+  2. Public fallback APIs
+  3. Local Pillow rendering (uses ./fonts/DejaVuSans*.ttf)
+
+The .kang command is unchanged — always uses Pillow + DejaVu fonts.
+
+Improvements adapted from the reference quote.py (Pyrogram-based):
+  • per-user cooldown to prevent spam
+  • profile-photo data-URI cache (10 min TTL)
+  • entity preservation (bold, italic, links, spoiler, code, blockquote)
+  • one-level reply context (quoted parent included)
+  • config-driven API URL, timeout, background colour
+"""
+from __future__ import annotations
+
 import asyncio
+import base64
 import io
+import logging
 import os
 import re
-import unicodedata
+import time
 
+import httpx
 from fontTools.ttLib import TTFont
 from PIL import Image, ImageDraw, ImageFont
-from telegram import InputSticker
+from telegram import InputSticker, MessageEntity
 from telegram.error import TelegramError
 
+import config
 import database as dbase
 from common import T, dual_command, esc, say
+
+log = logging.getLogger("sticker")
 
 HELP_TXT = (
     "<b>✦ stickers</b>\n\n"
@@ -36,26 +51,77 @@ COMMANDS = [("q", "Quote a message as a sticker"), ("kang", "Steal a sticker int
 MAX_SIDE = 512
 EMOJI_RE = re.compile(r"^[\U0001F000-\U0001FAFF\u2600-\u27BF\u2190-\u21FF\u2B00-\u2BFF]+$")
 
+# ───────── config (env / config.py driven) ─────────
+def _cfg(name: str, default):
+    """Read from config.py if present, else fall back to env, else default."""
+    return getattr(config, name, os.getenv(name, default))
+
+
+QUOTE_API = _cfg("QUOTE_API", "http://127.0.0.1:3000/generate")
+QUOTE_API_FALLBACKS = [
+    u.strip() for u in _cfg(
+        "QUOTE_API_FALLBACKS",
+        "https://bot.lyo.su/quote/generate"
+    ).split(",") if u.strip()
+]
+QUOTE_BG = _cfg("QUOTE_BG", "#1b1429")
+QUOTE_TIMEOUT = float(_cfg("QUOTE_TIMEOUT", 10))
+TOTAL_TIMEOUT = float(_cfg("QUOTE_TOTAL_TIMEOUT", 22))
+
+COOLDOWN = 8.0                       # seconds between quotes per user
+_AVATAR_TTL = 600                    # 10 min avatar cache
+
+# ───────── runtime caches ─────────
+_last_quote: dict[int, float] = {}
+_avatar_cache: dict[int, tuple[float, str | None]] = {}
+
+# ───────── entity support ─────────
+_KEEP_ENTITIES = {
+    "bold", "italic", "underline", "strikethrough", "spoiler",
+    "code", "pre", "blockquote", "text_link", "text_mention",
+}
+_ENTITY_TYPE_STR = {
+    MessageEntity.BOLD: "bold",
+    MessageEntity.ITALIC: "italic",
+    MessageEntity.UNDERLINE: "underline",
+    MessageEntity.STRIKETHROUGH: "strikethrough",
+    MessageEntity.SPOILER: "spoiler",
+    MessageEntity.CODE: "code",
+    MessageEntity.PRE: "pre",
+    MessageEntity.BLOCKQUOTE: "blockquote",
+    MessageEntity.EXPANDABLE_BLOCKQUOTE: "blockquote",
+    MessageEntity.TEXT_LINK: "text_link",
+    MessageEntity.TEXT_MENTION: "text_mention",
+}
+
+
+# ───────── local Pillow helpers (fallback + .kang) ─────────
 FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 FONT_REGULAR = os.path.join(FONT_DIR, "DejaVuSans.ttf")
 FONT_BOLD = os.path.join(FONT_DIR, "DejaVuSans-Bold.ttf")
 
+BUBBLE_BG = (43, 43, 63, 255)
+PEER_COLORS = [
+    (225, 112, 118), (250, 167, 116), (166, 149, 231),
+    (123, 200, 98), (110, 201, 203), (101, 170, 221), (238, 122, 174),
+]
+
 
 def _load_font(bold: bool, size: int):
-    path = FONT_BOLD if bold else FONT_REGULAR
-    try:
-        return ImageFont.truetype(path, size)
-    except OSError:
+    paths = [FONT_BOLD if bold else FONT_REGULAR]
+    if bold:
+        paths.append(FONT_REGULAR)
+    for path in paths:
         try:
-            return ImageFont.load_default(size=size)
-        except TypeError:
-            return ImageFont.load_default()
+            return ImageFont.truetype(path, size)
+        except OSError:
+            continue
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
 
 
-# Real glyph coverage, read straight from each font's cmap table — checking
-# via rendered-mask bounding boxes is unreliable because a missing-glyph
-# "tofu" box also has a non-empty bbox, so that trick can't tell a real
-# character from a placeholder box. Loaded once at import time.
 def _cmap_of(path):
     try:
         return set(TTFont(path, fontNumber=0, lazy=True).getBestCmap())
@@ -64,16 +130,13 @@ def _cmap_of(path):
 
 
 _CMAP = {False: _cmap_of(FONT_REGULAR), True: _cmap_of(FONT_BOLD)}
-
-# Zero-width/control/combining-mark characters render invisibly or misalign
-# even when the font technically has a glyph for them, so they're dropped too.
+if not _CMAP[True]:
+    _CMAP[True] = _CMAP[False]
 _DROP_CATEGORIES = {"Cf", "Cc", "Co", "Cs", "Mn", "Me"}
 
 
 def _renderable(bold: bool, text: str, fallback: str = "") -> str:
-    # NFKD first: folds "fancy" letters built from compatibility blocks (bold/
-    # italic/fullwidth Unicode math letters, e.g. "𝙕𝙤𝙮𝙖") back to plain ASCII,
-    # while leaving true decorative marks (overlines, carets, ...) untouched.
+    import unicodedata
     cmap = _CMAP[bold]
     out = []
     for ch in unicodedata.normalize("NFKD", text or ""):
@@ -85,20 +148,11 @@ def _renderable(bold: bool, text: str, fallback: str = "") -> str:
     return cleaned or fallback
 
 
-def _color_for(seed: int):
-    palette = [(230, 126, 34), (155, 89, 182), (52, 152, 219), (231, 76, 60), (26, 188, 156), (241, 196, 15)]
-    return palette[seed % len(palette)]
-
-
-def _initials(name: str) -> str:
-    words = re.findall(r"[A-Za-z]+", name or "")
-    if not words:
-        return "?"
-    return (words[0][0] + (words[1][0] if len(words) > 1 else "")).upper()
+def _peer_color(user_id: int):
+    return PEER_COLORS[abs(user_id) % len(PEER_COLORS)]
 
 
 def _fit_512(img: Image.Image) -> Image.Image:
-    """Telegram static stickers need the longest side to be exactly 512px."""
     w, h = img.size
     scale = MAX_SIDE / max(w, h)
     return img.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.LANCZOS)
@@ -117,94 +171,267 @@ def _wrap(draw, text, font, max_w):
             cur = w
     if cur:
         lines.append(cur)
-    return lines[:8] or [""]
+    return lines[:10] or [""]
 
 
-async def _avatar(ctx, user, size=100) -> Image.Image:
+async def _fetch_avatar_bytes(ctx, user_id: int) -> bytes | None:
+    """Download the user's big profile photo. Never hangs."""
     try:
-        photos = await ctx.bot.get_user_profile_photos(user.id, limit=1)
-        if photos.photos:
-            tgfile = await ctx.bot.get_file(photos.photos[0][-1].file_id)
-            raw = await tgfile.download_as_bytearray()
-            im = Image.open(io.BytesIO(bytes(raw))).convert("RGBA").resize((size, size))
-            mask = Image.new("L", (size, size), 0)
-            ImageDraw.Draw(mask).ellipse((0, 0, size, size), fill=255)
-            im.putalpha(mask)
-            return im
-    except (TelegramError, OSError):
-        pass
-    im = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    d = ImageDraw.Draw(im)
-    d.ellipse((0, 0, size, size), fill=_color_for(user.id))
-    f = _load_font(True, size // 2)
-    initials = _initials(_renderable(True, user.full_name, "?"))
-    bbox = d.textbbox((0, 0), initials, font=f)
-    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    d.text(((size - tw) / 2 - bbox[0], (size - th) / 2 - bbox[1]), initials, font=f, fill=(255, 255, 255))
-    return im
+        async def _fetch():
+            photos = await ctx.bot.get_user_profile_photos(user_id, limit=1)
+            if not photos.total_count:
+                return None
+            file_id = photos.photos[0][-1].file_id
+            tgfile = await ctx.bot.get_file(file_id)
+            return bytes(await tgfile.download_as_bytearray())
+        return await asyncio.wait_for(_fetch(), timeout=6.0)
+    except (asyncio.TimeoutError, TelegramError, OSError) as e:
+        log.debug("avatar fetch failed for %s: %s", user_id, e)
+        return None
 
 
-async def build_quote_sticker(ctx, src_msg, sender) -> io.BytesIO:
-    W = 512  # design at the final sticker width so text never gets shrunk afterwards
-    outer_pad = 20
-    avatar_size = 100
+async def _avatar_data_uri(ctx, user_id: int) -> str | None:
+    """Return a base64 data-URI of the user's avatar, cached for 10 min."""
+    now = time.time()
+    cached = _avatar_cache.get(user_id)
+    if cached is not None and cached[0] > now:
+        return cached[1]
+
+    raw = await _fetch_avatar_bytes(ctx, user_id)
+    uri = None
+    if raw:
+        uri = "data:image/jpeg;base64," + base64.b64encode(raw).decode("ascii")
+    _avatar_cache[user_id] = (now + _AVATAR_TTL, uri)
+    return uri
+
+
+# ───────── entity extraction (python-telegram-bot) ─────────
+
+def _extract_entities(msg) -> list[dict]:
+    """Convert MessageEntity objects to quote-api's JSON format."""
+    raw = list(msg.entities or []) + list(msg.caption_entities or [])
+    out = []
+    for e in raw:
+        kind = _ENTITY_TYPE_STR.get(e.type)
+        if not kind or kind not in _KEEP_ENTITIES:
+            continue
+        if not e.length or e.length <= 0:
+            continue
+        item = {"type": kind, "offset": int(e.offset), "length": int(e.length)}
+        if kind == "text_link" and getattr(e, "url", None):
+            item["url"] = e.url
+        if kind == "pre" and getattr(e, "language", None):
+            item["language"] = e.language
+        if kind == "text_mention" and getattr(e, "user", None):
+            item["user"] = {"id": e.user.id, "name": e.user.full_name}
+        out.append(item)
+    return out
+
+
+def _text_of(msg) -> str:
+    return (getattr(msg, "text", None) or getattr(msg, "caption", None) or "").strip()
+
+
+def _from_block(user) -> dict:
+    if user is None:
+        return {"id": 0, "first_name": "User", "name": "User"}
+    parts = [user.first_name or "", user.last_name or ""]
+    name = " ".join(p for p in parts if p).strip() or "User"
+    out = {"id": int(user.id or 0), "first_name": user.first_name or name, "name": name}
+    if getattr(user, "username", None):
+        out["username"] = user.username
+    return out
+
+
+def _build_message(msg, avatar: str | None = None) -> dict:
+    """One card entry — pure, no network."""
+    block = {
+        "entities": _extract_entities(msg),
+        "avatar": True,
+        "from": _from_block(getattr(msg, "from_user", None)),
+        "text": _text_of(msg),
+    }
+    if avatar:
+        block["from"]["photo"] = {"url": avatar}
+    reply = getattr(msg, "reply_to_message", None)
+    if reply is not None and _text_of(reply):
+        block["replyMessage"] = {
+            "entities": _extract_entities(reply),
+            "from": _from_block(getattr(reply, "from_user", None)),
+            "text": _text_of(reply),
+        }
+    return block
+
+
+def _build_payload(msg, avatar: str | None = None) -> dict:
+    return {
+        "type": "quote",
+        "format": "webp",
+        "backgroundColor": QUOTE_BG,
+        "width": 512,
+        "height": 512,
+        "scale": 1,
+        "emojiBrand": "apple",
+        "messages": [_build_message(msg, avatar)],
+    }
+
+
+# ───────── API path ─────────
+
+async def _try_one_api(client: httpx.AsyncClient, url: str, payload: dict) -> bytes | None:
+    try:
+        r = await client.post(url, json=payload)
+        if r.status_code != 200:
+            log.warning("⚠️ %s returned %s", url, r.status_code)
+            return None
+        data = r.content
+        if not data or len(data) < 100:
+            log.warning("⚠️ %s returned empty body", url)
+            return None
+        log.info("✅ quote built via %s (%d bytes)", url, len(data))
+        return data
+    except Exception as e:
+        log.warning("⚠️ %s failed: %s", url, e)
+        return None
+
+
+async def _build_quote_via_api(ctx, src_msg, sender) -> bytes | None:
+    text = _text_of(src_msg)
+    if not text:
+        return None
+
+    avatar_uri = await _avatar_data_uri(ctx, sender.id)
+    payload = _build_payload(src_msg, avatar_uri)
+
+    urls = [QUOTE_API] + QUOTE_API_FALLBACKS
+    timeout = httpx.Timeout(QUOTE_TIMEOUT)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        tasks = [_try_one_api(client, url, payload) for url in urls]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for r in results:
+            if isinstance(r, bytes) and len(r) > 100:
+                return r
+    return None
+
+
+# ───────── Pillow fallback ─────────
+
+async def _build_quote_via_pillow(ctx, src_msg, sender) -> bytes:
+    log.info("[sticker] rendering locally with Pillow")
+    W = 512
+    outer_pad = 12
+    avatar_size = 92
     gap = 14
-    pad = 24
+    inner_pad = 22
 
-    font_name = _load_font(True, 34)
-    font_text = _load_font(False, 40)
+    font_name = _load_font(True, 30)
+    font_text = _load_font(False, 36)
 
-    name = _renderable(True, sender.full_name, "Someone")[:28]
-    raw_text = src_msg.text or src_msg.caption or "[media]"
+    raw_text = _text_of(src_msg) or "[media]"
     text = _renderable(False, raw_text, "[unsupported characters]")
+    sender_name = re.sub(r"\s+", " ", (sender.full_name or "Unknown")).strip()
 
     bubble_x = outer_pad + avatar_size + gap
     bubble_w = W - bubble_x - outer_pad
-    text_w = bubble_w - pad * 2
+    text_w = bubble_w - inner_pad * 2
 
     probe = ImageDraw.Draw(Image.new("RGB", (10, 10)))
-    lines = _wrap(probe, text, font_text, text_w)
-    line_h = font_text.getbbox("Ag")[3] + 16
-    name_h = font_name.getbbox("Ag")[3] + 18
-    body_h = line_h * len(lines)
-    bubble_h = name_h + body_h + pad * 2
+    name_lines = _wrap(probe, sender_name, font_name, text_w)
+    name_line_h = font_name.getbbox("Ag")[3] + 6
+    text_lines = _wrap(probe, text, font_text, text_w)
+    text_line_h = font_text.getbbox("Ag")[3] + 12
+
+    gap_name_text = 12
+    body_h = name_line_h * len(name_lines) + gap_name_text + text_line_h * len(text_lines)
+    bubble_h = body_h + inner_pad * 2
     H = max(avatar_size, bubble_h) + outer_pad * 2
 
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     by = (H - bubble_h) // 2
-    draw.rounded_rectangle((bubble_x, by, bubble_x + bubble_w, by + bubble_h), radius=28, fill=(24, 37, 51, 240))
+    draw.rounded_rectangle(
+        (bubble_x, by, bubble_x + bubble_w, by + bubble_h),
+        radius=26, fill=BUBBLE_BG,
+    )
 
-    draw.text((bubble_x + pad, by + pad - 2), name, font=font_name, fill=_color_for(sender.id))
-    ty = by + pad + name_h
-    for ln in lines:
-        draw.text((bubble_x + pad, ty), ln, font=font_text, fill=(255, 255, 255))
-        ty += line_h
+    ty = by + inner_pad
+    name_color = _peer_color(sender.id) if sender else (255, 255, 255)
+    for ln in name_lines:
+        draw.text((bubble_x + inner_pad, ty), ln, font=font_name, fill=name_color)
+        ty += name_line_h
+    ty += gap_name_text
+    for ln in text_lines:
+        draw.text((bubble_x + inner_pad, ty), ln, font=font_text, fill=(255, 255, 255))
+        ty += text_line_h
 
-    avatar = await _avatar(ctx, sender, avatar_size)
+    photo = await _fetch_avatar_bytes(ctx, sender.id)
+    avatar = Image.new("RGBA", (avatar_size, avatar_size), (0, 0, 0, 0))
+    if photo:
+        try:
+            av = Image.open(io.BytesIO(photo)).convert("RGBA").resize((avatar_size, avatar_size))
+            mask = Image.new("L", (avatar_size, avatar_size), 0)
+            ImageDraw.Draw(mask).ellipse((0, 0, avatar_size, avatar_size), fill=255)
+            av.putalpha(mask)
+            avatar = av
+        except Exception:
+            photo = None
+    if not photo:
+        d = ImageDraw.Draw(avatar)
+        d.ellipse((0, 0, avatar_size, avatar_size), fill=_peer_color(sender.id))
+        f = _load_font(True, avatar_size // 2)
+        words = re.findall(r"[A-Za-z]+", sender_name)
+        initials = (words[0][0] + (words[1][0] if len(words) > 1 else "")).upper() if words else "?"
+        bbox = d.textbbox((0, 0), initials, font=f)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        d.text(((avatar_size - tw) / 2 - bbox[0], (avatar_size - th) / 2 - bbox[1]),
+               initials, font=f, fill=(255, 255, 255))
     img.paste(avatar, (outer_pad, (H - avatar_size) // 2), avatar)
 
     img = _fit_512(img)
     out = io.BytesIO()
-    out.name = "quote.webp"
     img.save(out, "WEBP")
-    out.seek(0)
-    return out
+    return out.getvalue()
+
+
+# ───────── shared builder ─────────
+
+async def _build_quote_sticker(ctx, src_msg, sender) -> bytes:
+    try:
+        data = await _build_quote_via_api(ctx, src_msg, sender)
+        if data:
+            return data
+    except Exception as e:
+        log.warning("[sticker] API path raised: %s", e)
+    log.warning("[sticker] all APIs failed — using local Pillow fallback")
+    return await _build_quote_via_pillow(ctx, src_msg, sender)
+
+
+# ───────── command handler ─────────
+
+def _cooldown_left(uid: int) -> float:
+    return max(0.0, _last_quote.get(uid, 0.0) + COOLDOWN - time.time())
 
 
 async def _quote_and_send(update, ctx, as_reply: bool):
-    msg, chat = update.effective_message, update.effective_chat
+    msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
     src = msg.reply_to_message
+
     if not src:
         await say(ctx, chat.id, T("reply to a message with /q to turn it into a sticker."), reply_to=msg.message_id)
         return
+    if not _text_of(src):
+        await say(ctx, chat.id, T("only text messages can be quoted."), reply_to=msg.message_id)
+        return
 
-    sender = src.from_user or msg.from_user
+    left = _cooldown_left(user.id)
+    if left > 0:
+        await say(ctx, chat.id, T(f"⏳ please wait {int(left) + 1}s before the next quote."), reply_to=msg.message_id)
+        return
+    _last_quote[user.id] = time.time()
 
-    # ✅ Status message — "generating quote..." while image banti hai
+    sender = src.from_user or user
     status = await say(ctx, chat.id, T("⏳ generating quote..."), reply_to=msg.message_id)
 
-    # Safety net: agar 20 second tak kuch na ho, status khud delete ho jaye
     async def _auto_delete_status():
         await asyncio.sleep(20)
         try:
@@ -215,8 +442,19 @@ async def _quote_and_send(update, ctx, as_reply: bool):
     auto_task = asyncio.create_task(_auto_delete_status())
 
     try:
-        out = await build_quote_sticker(ctx, src, sender)
-    except Exception as e:  # image generation is best-effort, never crash the bot
+        sticker_bytes = await asyncio.wait_for(
+            _build_quote_sticker(ctx, src, sender), timeout=TOTAL_TIMEOUT
+        )
+    except asyncio.TimeoutError:
+        log.error("[sticker] total timeout reached")
+        auto_task.cancel()
+        try:
+            await status.edit_text(T("❌ quote generation timed out. try again."))
+        except Exception:
+            pass
+        return
+    except Exception as e:
+        log.error("[sticker] failed: %s", e, exc_info=True)
         auto_task.cancel()
         try:
             await status.edit_text(T("❌ couldn't build that sticker:") + f" {esc(e)}")
@@ -224,17 +462,24 @@ async def _quote_and_send(update, ctx, as_reply: bool):
             pass
         return
 
-    # Image ready — auto-delete task cancel karo, status delete karo
     auto_task.cancel()
     try:
         await status.delete()
     except Exception:
         pass
 
+    # The buffer MUST be named, and named .webp. Telegram refuses a static
+    # sticker without a .webp mime, and send_sticker reads the name for both
+    # the mime type and the filename.
+    buf = io.BytesIO(sticker_bytes)
+    buf.name = "quote.webp"
+
     kwargs = {"reply_to_message_id": src.message_id} if as_reply else {}
     try:
-        await ctx.bot.send_sticker(chat.id, out, **kwargs)
+        await ctx.bot.send_sticker(chat.id, buf, **kwargs)
+        log.info("[sticker] quote sent to chat %s", chat.id)
     except Exception as e:
+        log.error("[sticker] send failed: %s", e)
         await say(ctx, chat.id, T("❌ couldn't send that sticker:") + f" {esc(e)}", reply_to=msg.message_id)
 
 
@@ -245,6 +490,8 @@ async def q_cmd(update, ctx):
 async def qr_cmd(update, ctx):
     await _quote_and_send(update, ctx, as_reply=True)
 
+
+# ───────── .kang (unchanged) ─────────
 
 async def _photo_to_sticker_file(ctx, photo):
     tgfile = await ctx.bot.get_file(photo.file_id)
