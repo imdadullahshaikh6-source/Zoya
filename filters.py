@@ -1,273 +1,305 @@
-"""Filters plugin — keyword → auto-reply, per chat.
-
-Commands:
-  .filter <keyword> <reply>   — save a text filter (or reply to media with .filter <keyword>)
-  .filter                     — list every filter in the chat
-  .stop <keyword>             — delete one filter
-  .clearfilters               — delete every filter in the chat
-
-Filters can store:
-  • plain text replies
-  • any media (photo / video / sticker / gif / voice / audio / document)
-  • inline buttons via [Label](buttonurl://https://example.com) syntax
-
-All filters are stored in MongoDB per chat and survive restarts."""
+"""Filters module — Rose-style auto replies (Supports Native, Custom, and Rose buttons with colors)."""
 import logging
 import re
 
-from telegram import Update
-from telegram.constants import ChatType
-from telegram.error import TelegramError
-from telegram.ext import ContextTypes, MessageHandler, filters as tg_filters
+from telegram import (
+    ChatMember, InlineKeyboardButton, InlineKeyboardMarkup, Update,
+)
+from telegram.constants import ChatType, ParseMode
+from telegram.ext import (
+    Application, ContextTypes, MessageHandler,
+    filters as tg_filters,
+)
 
 import database as dbase
-from common import (
-    B, T, dual_command, esc, mention, parse_buttons, q, require_admin, say, sc,
-)
+from common import parse_buttons  # <-- Welcome wala same function import kiya!
 
 log = logging.getLogger("filters")
 
-HELP_TXT = (
-    "<b>🔍 𝙁𝙞𝙡𝙩𝙚𝙧𝙨</b>\n\n"
-    "Auto-reply whenever a keyword is said in chat.\n\n"
-    "<b>Commands (admin only):</b>\n"
-    "• <code>.filter keyword reply text</code> — save a text filter.\n"
-    "• <code>.filter keyword</code> (reply to media) — save a media filter.\n"
-    "• <code>.filter</code> — list every filter in this chat.\n"
-    "• <code>.stop keyword</code> — delete one filter.\n"
-    "• <code>.clearfilters</code> — delete every filter.\n\n"
-    "<b>Buttons in replies:</b>\n"
-    "<code>[Label](buttonurl://https://example.com)</code>\n"
-    "<code>[Label](buttonurl://https://example.com:same)</code> — same row\n"
-    "<code>[Label](buttonurl://https://example.com:danger)</code> — red button"
-)
+
 COMMANDS = [
-    ("filter", "Save a filter for a keyword"),
-    ("stop", "Delete a filter"),
-    ("clearfilters", "Delete every filter in this chat"),
+    ("filter", "Set a new filter (reply to a message)"),
+    ("unfilter", "Remove a filter by keyword"),
+    ("filters", "List all filters in this chat"),
+    ("stop", "Delete all filters in this chat"),
 ]
 
-MAX_FILTERS = 100
+HELP_TXT = (
+    "<b>🔍 Filters</b>\n\n"
+    "Filters send an automatic reply whenever a keyword appears in chat.\n\n"
+    "<b>Commands</b>\n"
+    "• <code>/filter &lt;keyword&gt;</code> — reply to any message to set it\n"
+    "• <code>/unfilter &lt;keyword&gt;</code> — delete one filter\n"
+    "• <code>/filters</code> — list all filters\n"
+    "• <code>/stop</code> — delete every filter\n\n"
+    "<b>Supported content</b>\n"
+    "Text, stickers, GIFs, audio, video, photos — anything you can reply to.\n\n"
+    "<b>Inline buttons</b>\n"
+    "Supports Native Telegram buttons, <code>[Text ~ URL]</code>, and Rose-style <code>[Text](buttonurl:URL:color)</code>.\n"
+    "Colors: <code>:danger</code> (Red), <code>:success</code> (Green), <code>:primary</code> (Blue)"
+)
 
 
-def _media_payload(src_msg) -> dict | None:
-    """Turn a replied message into a filter payload (media only)."""
-    if src_msg is None:
+def _extract_native_buttons(reply_msg):
+    """Extract Telegram's native inline buttons (like JOIN buttons)."""
+    if not reply_msg or not reply_msg.reply_markup:
         return None
-    if src_msg.text:
+    markup = reply_msg.reply_markup
+    if not hasattr(markup, 'inline_keyboard') or not markup.inline_keyboard:
         return None
-    if src_msg.photo:
-        return {"type": "photo", "content": src_msg.photo[-1].file_id,
-                "caption": src_msg.caption or ""}
-    if src_msg.video:
-        return {"type": "video", "content": src_msg.video.file_id,
-                "caption": src_msg.caption or ""}
-    if src_msg.animation:
-        return {"type": "animation", "content": src_msg.animation.file_id,
-                "caption": src_msg.caption or ""}
-    if src_msg.sticker:
-        return {"type": "sticker", "content": src_msg.sticker.file_id,
-                "caption": ""}
-    if src_msg.voice:
-        return {"type": "voice", "content": src_msg.voice.file_id,
-                "caption": src_msg.caption or ""}
-    if src_msg.audio:
-        return {"type": "audio", "content": src_msg.audio.file_id,
-                "caption": src_msg.caption or ""}
-    if src_msg.document:
-        return {"type": "document", "content": src_msg.document.file_id,
-                "caption": src_msg.caption or ""}
-    return None
+    
+    rows = []
+    for row in markup.inline_keyboard:
+        btn_row = []
+        for btn in row:
+            if btn.url:  # Only save URL buttons
+                btn_data = {"text": btn.text, "url": btn.url}
+                # Native buttons might have a style attribute
+                if hasattr(btn, 'style') and btn.style:
+                    btn_data["style"] = btn.style
+                btn_row.append(btn_data)
+        if btn_row:
+            rows.append(btn_row)
+    return rows if rows else None
 
 
-# ───────────── commands ─────────────
+def _kb_from_stored(rows):
+    """Build InlineKeyboardMarkup safely, handling older PTB versions without style support."""
+    if not rows:
+        return None
+    
+    kb_rows = []
+    for row in rows:
+        kb_row = []
+        for b in row:
+            try:
+                if "style" in b and b["style"]:
+                    btn = InlineKeyboardButton(text=b["text"], url=b["url"], style=b["style"])
+                else:
+                    btn = InlineKeyboardButton(text=b["text"], url=b["url"])
+            except TypeError:
+                # If PTB version is old, fallback to normal button
+                btn = InlineKeyboardButton(text=b["text"], url=b["url"])
+            kb_row.append(btn)
+        kb_rows.append(kb_row)
+        
+    return InlineKeyboardMarkup(kb_rows)
+
+
+def _get_args(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if ctx.args:
+        return ctx.args
+    text = update.effective_message.text or ""
+    parts = text.split(maxsplit=1)
+    if len(parts) > 1:
+        return [parts[1].strip()]
+    return []
+
+
+async def _is_admin(update: Update) -> bool:
+    chat = update.effective_chat
+    if chat.type == ChatType.PRIVATE:
+        return False
+    try:
+        member = await chat.get_member(update.effective_user.id)
+        return member.status in (ChatMember.ADMINISTRATOR, ChatMember.OWNER)
+    except Exception:
+        return False
+
 
 async def filter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg, chat = update.effective_message, update.effective_chat
+
     if chat.type == ChatType.PRIVATE:
-        await say(ctx, chat.id, T("filters only work inside groups."))
+        await msg.reply_text("Filters only work inside groups.")
         return
 
-    args = list(ctx.args or [])
+    if not await _is_admin(update):
+        await msg.reply_text("❌ Only admins can set filters.")
+        return
 
-    # No args → list all filters
+    args = _get_args(update, ctx)
     if not args:
-        rows = await dbase.filter_list(chat.id)
-        if not rows:
-            await say(ctx, chat.id, T("no filters set in this chat yet."), reply_to=msg.message_id)
-            return
-        lines = [T("<b>🔍 filters in this chat ({n}):</b>", n=len(rows))]
-        for r in rows[:60]:
-            lines.append(f"• <code>{esc(r['keyword'])}</code> — <i>{esc(r['type'])}</i>")
-        if len(rows) > 60:
-            lines.append(T("…and {n} more.", n=len(rows) - 60))
-        await say(ctx, chat.id, "\n".join(lines), reply_to=msg.message_id)
+        await msg.reply_text("⚠️ Usage: <code>/filter keyword</code> — reply to a message.")
         return
 
-    # Permission check for setting/deleting
-    if not await require_admin(update, ctx, right="delete_messages"):
-        return
-
-    keyword = args[0].lower()
-    if len(keyword) < 2 or len(keyword) > 64:
-        await say(ctx, chat.id, T("keyword must be 2-64 characters."), reply_to=msg.message_id)
-        return
-
-    existing = await dbase.filter_get(chat.id, keyword)
+    keyword = args[0].strip().lower()
     reply = msg.reply_to_message
 
-    # ── Delete if keyword already exists AND no new content given ──
-    if len(args) == 1 and existing and not reply:
-        await dbase.filter_delete(chat.id, keyword)
-        await say(ctx, chat.id, T("🗑️ deleted filter <code>{k}</code>.", k=esc(keyword)), reply_to=msg.message_id)
+    if not reply:
+        await msg.reply_text("⚠️ Reply to the message you want me to send as the filter.")
         return
 
-    # ── Build payload ──
-    if reply and (reply.photo or reply.video or reply.animation or reply.sticker
-                  or reply.voice or reply.audio or reply.document):
-        media = _media_payload(reply)
-        payload = {
-            "type": media["type"],
-            "content": media["content"],
-            "caption": media["caption"] or "",
-            "buttons": None,
-            "set_by": update.effective_user.id,
-        }
-    elif len(args) >= 2:
-        text = " ".join(args[1:]).strip()
-        if not text:
-            await say(ctx, chat.id, T("give me something to reply with."), reply_to=msg.message_id)
-            return
-        clean, kb = parse_buttons(text)
-        payload = {
-            "type": "text",
-            "content": clean,
-            "caption": "",
-            "buttons": [[{"text": b.text, "url": b.url,
-                          "style": (b.api_kwargs or {}).get("style")}
-                         for b in row] for row in (kb.inline_keyboard if kb else [])] or None,
-            "set_by": update.effective_user.id,
-        }
+    data = {"type": "text", "content": "", "caption": "", "buttons": None, "set_by": update.effective_user.id}
+    native_btns = _extract_native_buttons(reply)
+
+    if reply.text:
+        # Ab raw HTML save hoga, parse_buttons common.py se load hoga runtime pe!
+        data.update(type="text", content=reply.text_html, buttons=native_btns)
+        
+    elif reply.sticker:
+        data.update(type="sticker", content=reply.sticker.file_id, buttons=native_btns)
+        
+    elif reply.photo:
+        data.update(type="photo", content=reply.photo[-1].file_id, caption=reply.caption_html or "", buttons=native_btns)
+        
+    elif reply.video:
+        data.update(type="video", content=reply.video.file_id, caption=reply.caption_html or "", buttons=native_btns)
+        
+    elif reply.animation:
+        data.update(type="animation", content=reply.animation.file_id, caption=reply.caption_html or "", buttons=native_btns)
+        
+    elif reply.audio:
+        data.update(type="audio", content=reply.audio.file_id, caption=reply.caption_html or "", buttons=native_btns)
+        
     else:
-        await say(ctx, chat.id, T("usage: <code>.filter keyword reply</code> (or reply to media)."), reply_to=msg.message_id)
+        await msg.reply_text("⚠️ Unsupported message type.")
         return
 
-    # ── Cap filter count ──
-    if not existing:
-        count = await dbase.filter_count(chat.id)
-        if count >= MAX_FILTERS:
-            await say(ctx, chat.id, T("this chat has reached the {n}-filter limit.", n=MAX_FILTERS), reply_to=msg.message_id)
-            return
-
-    await dbase.filter_set(chat.id, keyword, payload)
-    action = "updated" if existing else "saved"
-    await say(ctx, chat.id, T("✅ {a} filter <code>{k}</code>", a=action, k=esc(keyword)), reply_to=msg.message_id)
+    await dbase.filter_set(chat.id, keyword, data)
+    await msg.reply_text(f"✅ Filter <b>{keyword}</b> saved with formatting and buttons.")
 
 
-async def stop_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def unfilter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg, chat = update.effective_message, update.effective_chat
-    if chat.type == ChatType.PRIVATE:
+    if not await _is_admin(update):
+        await msg.reply_text("❌ Only admins can remove filters.")
         return
-    if not await require_admin(update, ctx, right="delete_messages"):
+    args = _get_args(update, ctx)
+    if not args:
+        await msg.reply_text("⚠️ Usage: <code>/unfilter keyword</code>")
         return
-    if not ctx.args:
-        await say(ctx, chat.id, T("usage: <code>.stop keyword</code>"), reply_to=msg.message_id)
-        return
-    keyword = ctx.args[0].lower()
+    keyword = args[0].strip().lower()
     deleted = await dbase.filter_delete(chat.id, keyword)
     if deleted:
-        await say(ctx, chat.id, T("🗑️ deleted filter <code>{k}</code>.", k=esc(keyword)), reply_to=msg.message_id)
+        await msg.reply_text(f"🗑 Filter <b>{keyword}</b> removed.")
     else:
-        await say(ctx, chat.id, T("no filter called <code>{k}</code>.", k=esc(keyword)), reply_to=msg.message_id)
+        await msg.reply_text(f"❓ No filter named <b>{keyword}</b> in this chat.")
 
 
-async def clearfilters_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def list_filters_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg, chat = update.effective_message, update.effective_chat
-    if chat.type == ChatType.PRIVATE:
+    rows = await dbase.filter_list(chat.id)
+    if not rows:
+        await msg.reply_text("No filters set in this chat yet.")
         return
-    if not await require_admin(update, ctx, right="delete_messages"):
+    lines = [f"• <code>{r['keyword']}</code>  <i>({r.get('type', 'text')})</i>" for r in rows]
+    header = f"<b>🔍 Filters in this chat — {len(rows)}</b>\n\n"
+    await msg.reply_text(header + "\n".join(lines))
+
+
+async def stop_filters_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg, chat = update.effective_message, update.effective_chat
+    if not await _is_admin(update):
+        await msg.reply_text("❌ Only admins can wipe filters.")
         return
     n = await dbase.filter_delete_all(chat.id)
-    await say(ctx, chat.id, T("🗑️ cleared <b>{n}</b> filters.", n=n), reply_to=msg.message_id)
+    if n:
+        await msg.reply_text(f"🗑 Deleted <b>{n}</b> filter(s) from this chat.")
+    else:
+        await msg.reply_text("There were no filters to delete.")
 
 
-# ───────────── auto-reply watcher ─────────────
-
-async def _reply_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def trigger_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg, chat = update.effective_message, update.effective_chat
-    if not msg or not chat or chat.type == ChatType.PRIVATE:
+    if not msg:
         return
-    text = (msg.text or msg.caption or "").strip()
+
+    text = msg.text or msg.caption
     if not text:
         return
-    # Skip commands
-    if text[0] in ("/", "."):
+
+    if text.startswith(("/", ".")):
         return
 
-    lowered = text.lower()
-    # Word-boundary match so "hello" doesn't fire inside "othello"
-    for row in await dbase.filter_list(chat.id):
-        kw = row["keyword"]
-        if re.search(rf"(?<!\w){re.escape(kw)}(?!\w)", lowered):
-            await _send_reply(ctx, chat.id, row, reply_to=msg.message_id)
-            return
+    # Extract words including @mentions
+    words = set(re.findall(r"@?\w+", text.lower()))
+    if not words:
+        return
 
+    for word in words:
+        # Try matching exactly as it is
+        row = await dbase.filter_get(chat.id, word)
+        
+        # If not found and word has @, try without @
+        if not row and word.startswith("@"):
+            row = await dbase.filter_get(chat.id, word[1:])
+        
+        # If not found and word has no @, try with @
+        if not row and not word.startswith("@"):
+            row = await dbase.filter_get(chat.id, f"@{word}")
 
-async def _send_reply(ctx, chat_id: int, row: dict, reply_to: int | None = None):
-    """Send the stored filter response — text, media, buttons all supported."""
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters
+        if not row:
+            continue
 
-    kb = None
-    if row.get("buttons"):
+        ftype = row.get("type", "text")
+        content = row.get("content", "")
+        caption = row.get("caption", "")
+
+        # Yahan common.py wala parse_buttons use hoga!
+        custom_kb = None
+        if ftype == "text" and content:
+            content, custom_kb = parse_buttons(content)
+        elif caption:
+            caption, custom_kb = parse_buttons(caption)
+            
+        # Combine native buttons with custom colour buttons
+        final_kb = custom_kb
+        saved_btns = row.get("buttons")
+        if saved_btns:
+            n_kb = _kb_from_stored(saved_btns)
+            if n_kb:
+                if final_kb and final_kb.inline_keyboard:
+                    final_kb = InlineKeyboardMarkup(final_kb.inline_keyboard + n_kb.inline_keyboard)
+                else:
+                    final_kb = n_kb
+
         try:
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton(b["text"], url=b["url"],
-                                      api_kwargs={"style": b["style"]} if b.get("style") else {})
-                 for b in r]
-                for r in row["buttons"]
-            ])
-        except Exception:
-            kb = None
+            if ftype == "text":
+                await msg.reply_text(content or "", reply_markup=final_kb, parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id)
+            elif ftype == "sticker":
+                await msg.reply_sticker(content, reply_markup=final_kb, reply_to_message_id=msg.message_id)
+            elif ftype == "photo":
+                await msg.reply_photo(content, caption=caption or None, reply_markup=final_kb, parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id)
+            elif ftype == "video":
+                await msg.reply_video(content, caption=caption or None, reply_markup=final_kb, parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id)
+            elif ftype == "animation":
+                await msg.reply_animation(content, caption=caption or None, reply_markup=final_kb, parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id)
+            elif ftype == "audio":
+                await msg.reply_audio(content, caption=caption or None, reply_markup=final_kb, parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id)
+        except Exception as e:
+            log.error("filter send failed [%s/%s]: %s", chat.id, word, e)
+            try:
+                await msg.reply_text(f"❌ Error sending filter: <code>{e}</code>", reply_to_message_id=msg.message_id)
+            except:
+                pass
 
-    rp = ReplyParameters(message_id=reply_to, allow_sending_without_reply=True) if reply_to else None
-    kind = row.get("type", "text")
-    content = row.get("content", "")
-    caption = row.get("caption") or ""
-
-    try:
-        if kind == "text":
-            await ctx.bot.send_message(chat_id, content, reply_markup=kb, reply_parameters=rp)
-        elif kind == "photo":
-            await ctx.bot.send_photo(chat_id, content, caption=caption or None, reply_markup=kb, reply_parameters=rp)
-        elif kind == "video":
-            await ctx.bot.send_video(chat_id, content, caption=caption or None, reply_markup=kb, reply_parameters=rp)
-        elif kind == "animation":
-            await ctx.bot.send_animation(chat_id, content, caption=caption or None, reply_markup=kb, reply_parameters=rp)
-        elif kind == "sticker":
-            await ctx.bot.send_sticker(chat_id, content, reply_markup=kb, reply_parameters=rp)
-        elif kind == "voice":
-            await ctx.bot.send_voice(chat_id, content, caption=caption or None, reply_markup=kb, reply_parameters=rp)
-        elif kind == "audio":
-            await ctx.bot.send_audio(chat_id, content, caption=caption or None, reply_markup=kb, reply_parameters=rp)
-        elif kind == "document":
-            await ctx.bot.send_document(chat_id, content, caption=caption or None, reply_markup=kb, reply_parameters=rp)
-    except TelegramError as e:
-        log.warning("filter reply failed: %s", e)
+        break
 
 
-# ───────────── registration ─────────────
+def register(app: Application):
+    app.add_handler(MessageHandler(
+        tg_filters.Regex(r"^[./]filter(?:\s+(.+))?$") & tg_filters.ChatType.GROUPS,
+        filter_cmd
+    ), group=0)
+    
+    app.add_handler(MessageHandler(
+        tg_filters.Regex(r"^[./]unfilter(?:\s+(.+))?$") & tg_filters.ChatType.GROUPS,
+        unfilter_cmd
+    ), group=0)
+    
+    app.add_handler(MessageHandler(
+        tg_filters.Regex(r"^[./]filters$") & tg_filters.ChatType.GROUPS,
+        list_filters_cmd
+    ), group=0)
+    
+    app.add_handler(MessageHandler(
+        tg_filters.Regex(r"^[./]stop$") & tg_filters.ChatType.GROUPS,
+        stop_filters_cmd
+    ), group=0)
 
-def register(app):
-    dual_command(app, "filter", filter_cmd)
-    dual_command(app, "setfilter", filter_cmd)   # alias
-    dual_command(app, "stop", stop_cmd)
-    dual_command(app, "clearfilters", clearfilters_cmd)
-
-    # group=3 — runs after command handlers, before clean (99)
-    app.add_handler(
-        MessageHandler(
-            (tg_filters.TEXT | tg_filters.CAPTION) & tg_filters.ChatType.GROUPS,
-            _reply_watcher,
-        ),
-        group=3,
-  )
+    app.add_handler(MessageHandler(
+        (tg_filters.TEXT | tg_filters.CAPTION) & tg_filters.ChatType.GROUPS,
+        trigger_filter
+    ), group=-2)
+  
