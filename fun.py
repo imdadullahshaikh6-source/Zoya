@@ -195,7 +195,6 @@ async def waifu_cmd(update, ctx):
                 await chat.get_member(mutual["user_id"])
                 target_id = mutual["user_id"]
                 is_mutual = True
-                # lock it in: save user's waifu as mutual partner
                 await _save_waifu(chat.id, user.id, target_id)
             except Exception:
                 target_id = None
@@ -225,14 +224,24 @@ async def waifu_cmd(update, ctx):
     target_name = target_member.get("name", "Someone")
 
     reply_params = ReplyParameters(message_id=msg.message_id, allow_sending_without_reply=True)
-    mention_html = _html_mention(target_id, target_name)
+
+    # ✅ BOTH mentions — the command sender AND the waifu
+    sender_name = user.first_name or "Someone"
+    sender_mention = _html_mention(user.id, sender_name)
+    waifu_mention = _html_mention(target_id, target_name)
 
     if is_mutual:
-        cap = q(T("<b>💖 It's mutual! {name} is your waifu for today!</b>", name=mention_html))
+        cap = q(T(
+            "<b>💖 It's mutual!</b>\n{sender}, {waifu} is your waifu for today!",
+            sender=sender_mention, waifu=waifu_mention,
+        ))
     else:
-        cap = q(T("<b>💖 {name} is your waifu for today!</b>", name=mention_html))
+        cap = q(T(
+            "<b>💖 {sender}, {waifu} is your waifu for today!</b>",
+            sender=sender_mention, waifu=waifu_mention,
+        ))
 
-    # Try direct file_id send (fastest) — ✅ spoiler added
+    # Try direct file_id send (fastest) — spoiler
     try:
         photos = await ctx.bot.get_user_profile_photos(target_id, limit=1)
         if photos.total_count > 0:
@@ -244,7 +253,7 @@ async def waifu_cmd(update, ctx):
     except Exception as e:
         log.warning("send via file_id failed: %s", e)
 
-    # Fallback placeholder — ✅ spoiler added
+    # Fallback placeholder — spoiler
     img = await _get_avatar(ctx, target_id, target_name, 512)
     out = io.BytesIO()
     out.name = "waifu.png"
@@ -391,12 +400,10 @@ async def couple_cmd(update, ctx):
         await say(ctx, chat.id, T("couldn't build that image:") + f" {esc(e)}", reply_to=msg.message_id)
         return
 
-    # ✅ Clickable mentions for both
     a_mention = _html_mention(a_id, a_name)
     b_mention = _html_mention(b_id, b_name)
     cap = q(T("<b>💞 today's couple</b>\n{a} + {b}", a=a_mention, b=b_mention))
 
-    # ✅ spoiler added
     await ctx.bot.send_photo(
         chat.id, photo, caption=cap, parse_mode=ParseMode.HTML,
         reply_parameters=ReplyParameters(message_id=msg.message_id, allow_sending_without_reply=True),
