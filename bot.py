@@ -1,10 +1,13 @@
 """Entry point: creates the bot, wires up every plugin, and handles the
 DM /start experience (reaction + photo + buttons)."""
 import asyncio
-import aiofastnet
 import logging
 import os
 
+from dotenv import load_dotenv
+load_dotenv()  # ← .env file load karta hai (QUOTE_*, BOT_TOKEN, MONGO_URI, etc.)
+
+import aiofastnet
 from telegram import InlineKeyboardMarkup, LinkPreviewOptions, Update
 from telegram.constants import ChatType, ParseMode
 from telegram.error import TelegramError
@@ -33,7 +36,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 MONGO_URI = os.environ["MONGO_URI"]
 DB_NAME = os.getenv("DB_NAME", "zoya_bot")
 OWNER_USERNAME = "Ownerbackk"
-SUPPORT_URL = "https://t.me/Ownerbackk"
+SUPPORT_URL = os.getenv("SUPPORT_URL", "https://t.me/Ownerbackk")
 CHANNEL_URL = os.getenv("CHANNEL_URL", "")
 START_IMG = os.getenv("START_IMG", "https://graph.org/file/d3a2c17942e606f4ec811-9c0373fa8bb10f4448.jpg")
 
