@@ -7,10 +7,15 @@ Quote generation flow:
   2. Public fallback APIs (QUOTE_API_FALLBACKS env)
   3. Local Pillow rendering (uses ./fonts/DejaVuSans*.ttf)
 
+.kang handling:
+  • Photos           → download, square-crop 512x512, WEBP
+  • Static stickers  → pass file_id directly
+  • Video stickers   → pass file_id directly (WEBM)
+  • Animated stickers→ pass file_id directly (TGS)
+
 Avatar: we pass Telegram's direct file URL (not a data URI) because the
-quote-api uses axios, which cannot fetch data: URIs — avatars were being
-silently dropped. The URL contains the bot token, but the API runs on the
-same VPS and the token never leaves the host."""
+quote-api uses axios, which cannot fetch data: URIs. The URL contains the bot
+token, but the API runs on the same VPS, so the token never leaves the host."""
 from __future__ import annotations
 
 import asyncio
@@ -192,9 +197,7 @@ async def _avatar_url(ctx, user_id: int) -> str | None:
 
     Data URIs (data:image/jpeg;base64,...) do NOT work — the API silently
     drops them, which is why avatars were missing from the quote sticker.
-    We use Telegram's direct file URL instead. The bot token appears in the
-    URL, but the quote-api runs on the same VPS, so the token never leaves
-    the host."""
+    We use Telegram's direct file URL instead."""
     now = time.time()
     cached = _avatar_cache.get(user_id)
     if cached is not None and cached[0] > now:
@@ -509,13 +512,29 @@ async def _quote_and_send(update, ctx, as_reply: bool):
     buf = io.BytesIO(sticker_bytes)
     buf.name = "quote.webp"
 
-    kwargs = {"reply_to_message_id": src.message_id} if as_reply else {}
-    try:
-        await ctx.bot.send_sticker(chat.id, buf, **kwargs)
-        log.info("[sticker] quote sent to chat %s", chat.id)
-    except Exception as e:
-        log.error("[sticker] send failed: %s", e)
-        await say(ctx, chat.id, T("❌ couldn't send that sticker:") + f" {esc(e)}", reply_to=msg.message_id)
+    # Try to send as reply; if Telegram refuses (deleted msg / restrictions),
+    # fall back to a normal sticker send so the user still gets their quote.
+    sent = False
+    if as_reply:
+        try:
+            await ctx.bot.send_sticker(
+                chat.id, buf,
+                reply_to_message_id=src.message_id,
+                allow_sending_without_reply=True,
+            )
+            sent = True
+            log.info("[sticker] quote sent as reply to %s", src.message_id)
+        except Exception as e:
+            log.warning("[sticker] reply-send failed, retrying without reply: %s", e)
+            buf.seek(0)
+
+    if not sent:
+        try:
+            await ctx.bot.send_sticker(chat.id, buf)
+            log.info("[sticker] quote sent to chat %s", chat.id)
+        except Exception as e:
+            log.error("[sticker] send failed: %s", e)
+            await say(ctx, chat.id, T("❌ couldn't send that sticker:") + f" {esc(e)}", reply_to=msg.message_id)
 
 
 async def q_cmd(update, ctx):
@@ -527,21 +546,6 @@ async def qr_cmd(update, ctx):
 
 
 # ───────── .kang helpers ─────────
-
-async def _photo_to_sticker_file(ctx, photo):
-    """Download a photo, crop to a centre square, resize to 512x512, WEBP."""
-    tgfile = await ctx.bot.get_file(photo.file_id)
-    raw = await tgfile.download_as_bytearray()
-    im = Image.open(io.BytesIO(bytes(raw))).convert("RGBA")
-    im = _square_512(im)
-    buf = io.BytesIO()
-    buf.name = "kang.webp"
-    im.save(buf, "WEBP", quality=90)
-    buf.seek(0)
-    return buf
-
-
-# ───────── .kang ─────────
 
 async def kang_cmd(update, ctx):
     msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
@@ -615,4 +619,4 @@ def register(app):
     dual_command(app, "q", q_cmd)
     dual_command(app, "qr", qr_cmd)
     dual_command(app, "kang", kang_cmd)
-  
+                                   
