@@ -7,6 +7,10 @@ Quote commands:
   .q r / .q reply → quote sticker sent as a reply to the source message
   .qr             → same as .q r (shortcut)
 
+Nested quotes: if the replied-to message was itself a reply, we fetch its
+parent and include it in the sticker (like the baka bot). This gives the
+classic two-message stacked quote look.
+
 Quote generation flow:
   1. Self-hosted quote-api (QUOTE_API env or common.py default)
   2. Public fallback APIs (QUOTE_API_FALLBACKS env)
@@ -19,8 +23,7 @@ Quote generation flow:
   • Animated stickers→ pass file_id directly (TGS)
 
 Avatar: we pass Telegram's direct file URL (not a data URI) because the
-quote-api uses axios, which cannot fetch data: URIs. The URL contains the bot
-token, but the API runs on the same VPS, so the token never leaves the host."""
+quote-api uses axios, which cannot fetch data: URIs."""
 from __future__ import annotations
 
 import asyncio
@@ -199,11 +202,7 @@ async def _fetch_avatar_bytes(ctx, user_id: int) -> bytes | None:
 
 async def _avatar_url(ctx, user_id: int) -> str | None:
     """Return a URL to the user's Telegram profile photo that the quote-api
-    can fetch with axios.
-
-    Data URIs (data:image/jpeg;base64,...) do NOT work — the API silently
-    drops them, which is why avatars were missing from the quote sticker.
-    We use Telegram's direct file URL instead."""
+    can fetch with axios. Data URIs do NOT work — the API silently drops them."""
     now = time.time()
     cached = _avatar_cache.get(user_id)
     if cached is not None and cached[0] > now:
@@ -470,6 +469,15 @@ async def _quote_and_send(update, ctx, as_reply: bool):
         await say(ctx, chat.id, T("only text messages can be quoted."), reply_to=msg.message_id)
         return
 
+    # If the src message was itself a reply, fetch its parent so the sticker
+    # shows the nested quote context (like the baka bot).
+    if getattr(src, "reply_to_message_id", None) and not src.reply_to_message:
+        try:
+            src.reply_to_message = await ctx.bot.get_messages(chat.id, src.reply_to_message_id)
+            log.info("[sticker] fetched parent message for nested quote")
+        except Exception as e:
+            log.debug("[sticker] couldn't fetch parent message: %s", e)
+
     left = _cooldown_left(user.id)
     if left > 0:
         await say(ctx, chat.id, T(f"⏳ please wait {int(left) + 1}s before the next quote."), reply_to=msg.message_id)
@@ -646,3 +654,4 @@ def register(app):
     dual_command(app, "q", q_cmd)
     dual_command(app, "qr", qr_cmd)
     dual_command(app, "kang", kang_cmd)
+      
