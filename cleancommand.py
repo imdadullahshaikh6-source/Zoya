@@ -156,13 +156,14 @@ def register(app):
     dual_command(app, "keepcommand", keep_cmd)
 
     # group=-2 → runs before every other handler.
-    # block=False → command handlers in higher groups STILL run
-    # (we only delete the user's command message, we don't consume the update).
+    # block=False is passed to MessageHandler (NOT add_handler) so command
+    # handlers in higher groups still run — we only delete the user's
+    # command message, we don't consume the update.
     app.add_handler(
         MessageHandler(
             (filters.TEXT | filters.CAPTION) & filters.ChatType.GROUPS,
             _clean_watcher,
+            block=False,
         ),
         group=-2,
-        block=False,
     )
