@@ -1,14 +1,11 @@
 """Sticker plugin:
 .q / .qr  — render the replied-to message as a quote sticker
 .kang     — steal a replied sticker/photo into the user's own auto-growing pack
-            (the pack is created once per user and reused on every later .kang;
-            if it fills up, a new part is started automatically).
 
-The sender's NAME is drawn INTO the sticker image itself, at the top of the
-message bubble, in Telegram's mention blue (no @username — just the display
-name, however decorative). The message BODY is drawn below it in white.
-The bundled DejaVu fonts in ./fonts cover all the glyphs we need for both
-the name and the body, plus the avatar-initials fallback."""
+The sender's DISPLAY NAME is baked into the sticker image itself, at the top
+of the message bubble, in Telegram's mention blue — exactly the same way a
+real mention renders. No @username, only the display name (however decorative).
+The message BODY is drawn below it in white."""
 import io
 import os
 import re
@@ -35,9 +32,9 @@ COMMANDS = [("q", "Quote a message as a sticker"), ("kang", "Steal a sticker int
 MAX_SIDE = 512
 EMOJI_RE = re.compile(r"^[\U0001F000-\U0001FAFF\u2600-\u27BF\u2190-\u21FF\u2B00-\u2BFF]+$")
 
-# Telegram's mention colour (dark theme) — same blue the client uses when it
-# renders a clickable mention. We bake it into the sticker so the name inside
-# the image looks identical to a real mention.
+# Telegram client's mention colour (dark theme) — same blue used when a real
+# clickable mention is rendered. We bake it into the sticker so the name inside
+# the image looks identical to a mention in chat.
 MENTION_BLUE = (106, 179, 243)
 
 FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
@@ -68,6 +65,8 @@ _DROP_CATEGORIES = {"Cf", "Cc", "Co", "Cs", "Mn", "Me"}
 
 
 def _renderable(bold: bool, text: str, fallback: str = "") -> str:
+    """Used only for the message BODY — drops invisible/control chars and
+    anything the font can't draw, so the bubble never shows tofu boxes."""
     cmap = _CMAP[bold]
     out = []
     for ch in unicodedata.normalize("NFKD", text or ""):
@@ -77,6 +76,14 @@ def _renderable(bold: bool, text: str, fallback: str = "") -> str:
             out.append(ch)
     cleaned = re.sub(r"\s+", " ", "".join(out)).strip()
     return cleaned or fallback
+
+
+def _clean_name(text: str) -> str:
+    """Display name passthrough. We do NOT drop any characters here — every
+    decorative glyph the user put in their name is kept as-is so it renders
+    exactly like Telegram's own mention does."""
+    cleaned = re.sub(r"\s+", " ", (text or "").strip())
+    return cleaned or "Unknown"
 
 
 def _color_for(seed: int):
@@ -130,7 +137,7 @@ async def _avatar(ctx, user, size=100) -> Image.Image:
     d = ImageDraw.Draw(im)
     d.ellipse((0, 0, size, size), fill=_color_for(user.id))
     f = _load_font(True, size // 2)
-    initials = _initials(_renderable(True, user.full_name, "?"))
+    initials = _initials(_clean_name(user.full_name))
     bbox = d.textbbox((0, 0), initials, font=f)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
     d.text(((size - tw) / 2 - bbox[0], (size - th) / 2 - bbox[1]), initials, font=f, fill=(255, 255, 255))
@@ -138,24 +145,25 @@ async def _avatar(ctx, user, size=100) -> Image.Image:
 
 
 async def build_quote_sticker(ctx, src_msg, sender) -> io.BytesIO:
-    """Draws the avatar + a message bubble containing:
-       • the sender's DISPLAY NAME at the top, in mention-blue (no @username)
-       • the message body underneath, in white
-    The name is baked into the image so it's always visible inside the sticker."""
+    """Draws avatar + message bubble containing:
+         • sender's DISPLAY NAME at the top, in mention-blue (no @username)
+         • the message body below it, in white.
+    The name is baked into the image itself, so it's always visible inside the sticker."""
     W = 512
     outer_pad = 20
-    avatar_size = 100
+    avatar_size = 110
     gap = 14
     pad = 24
 
-    font_name = _load_font(True, 34)   # bold, smaller — reads like a mention
+    font_name = _load_font(True, 36)   # bold, mention-like
     font_text = _load_font(False, 40)
 
     raw_text = src_msg.text or src_msg.caption or "[media]"
     text = _renderable(False, raw_text, "[unsupported characters]")
 
-    # Display name only — never @username
-    sender_name = _renderable(True, (sender.full_name if sender else ""), "Unknown")
+    # Display name only — decorative glyphs preserved, never @username.
+    sender_name = _clean_name(sender.full_name if sender else "")
+    print(f"[sticker] rendering name: {sender_name!r}")
 
     bubble_x = outer_pad + avatar_size + gap
     bubble_w = W - bubble_x - outer_pad
@@ -164,12 +172,12 @@ async def build_quote_sticker(ctx, src_msg, sender) -> io.BytesIO:
     probe = ImageDraw.Draw(Image.new("RGB", (10, 10)))
 
     name_lines = _wrap(probe, sender_name, font_name, text_w)
-    name_line_h = font_name.getbbox("Ag")[3] + 8
+    name_line_h = font_name.getbbox("Ag")[3] + 10
 
     text_lines = _wrap(probe, text, font_text, text_w)
     text_line_h = font_text.getbbox("Ag")[3] + 16
 
-    gap_after_name = 14
+    gap_after_name = 16
     name_block_h = name_line_h * len(name_lines)
     text_block_h = text_line_h * len(text_lines)
     body_h = name_block_h + gap_after_name + text_block_h
@@ -186,12 +194,12 @@ async def build_quote_sticker(ctx, src_msg, sender) -> io.BytesIO:
     )
 
     ty = by + pad
-    # Name first — mention blue
+    # 1) Name first — mention blue, bold
     for ln in name_lines:
         draw.text((bubble_x + pad, ty), ln, font=font_name, fill=MENTION_BLUE)
         ty += name_line_h
     ty += gap_after_name
-    # Then the message body — white
+    # 2) Then the message body — white
     for ln in text_lines:
         draw.text((bubble_x + pad, ty), ln, font=font_text, fill=(255, 255, 255))
         ty += text_line_h
@@ -216,7 +224,7 @@ async def _quote_and_send(update, ctx, as_reply: bool):
     sender = src.from_user or msg.from_user
     try:
         out = await build_quote_sticker(ctx, src, sender)
-    except Exception as e:  # image generation is best-effort, never crash the bot
+    except Exception as e:
         await say(ctx, chat.id, T("couldn't build that sticker:") + f" {esc(e)}", reply_to=msg.message_id)
         return
     kwargs = {"reply_to_message_id": src.message_id} if as_reply else {}
