@@ -1,6 +1,7 @@
 """Shared helpers used by every plugin: styling, buttons, permissions, dot-commands."""
 import html
 import logging
+import os
 import re
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters
@@ -12,6 +13,22 @@ import database as dbase
 
 log = logging.getLogger("bot")
 OWNER, ADMIN = ChatMemberStatus.OWNER, ChatMemberStatus.ADMINISTRATOR
+
+# ───────────────────── QUOTE / STICKER CONFIG ─────────────────────
+# Env-driven — override on the VPS via .env (already in .env.example):
+#   QUOTE_API=http://127.0.0.1:3000/generate
+#   QUOTE_API_FALLBACKS=https://bot.lyo.su/quote/generate
+#   QUOTE_BG=#1b1429
+#   QUOTE_TIMEOUT=10
+#   QUOTE_TOTAL_TIMEOUT=22
+QUOTE_API = os.getenv("QUOTE_API", "http://127.0.0.1:3000/generate")
+QUOTE_API_FALLBACKS = os.getenv(
+    "QUOTE_API_FALLBACKS",
+    "https://bot.lyo.su/quote/generate",
+)
+QUOTE_BG = os.getenv("QUOTE_BG", "#1b1429")
+QUOTE_TIMEOUT = float(os.getenv("QUOTE_TIMEOUT", "10"))
+QUOTE_TOTAL_TIMEOUT = float(os.getenv("QUOTE_TOTAL_TIMEOUT", "22"))
 
 # ───────────────────── FONT / STYLE ─────────────────────
 _SC = dict(zip("abcdefghijklmnopqrstuvwxyz", "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘǫʀꜱᴛᴜᴠᴡxʏᴢ"))
@@ -256,4 +273,3 @@ def human_delta(seconds: float) -> str:
     if not parts:
         parts.append(f"{seconds}s")
     return " ".join(parts[:2])
-    
