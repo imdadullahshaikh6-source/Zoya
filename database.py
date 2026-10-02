@@ -1,5 +1,6 @@
 """MongoDB layer. Everything persists across restarts/redeploys:
-welcome messages, rules, AFK status, bans, mutes, warns, filters, and guardian."""
+welcome messages, rules, AFK status, bans, mutes, warns, filters,
+guardian, and clean-command settings."""
 import logging
 import time
 
@@ -22,8 +23,9 @@ async def init(uri: str, name: str):
     await _db.warns.create_index([("chat_id", 1), ("user_id", 1)])
     await _db.members.create_index("chat_id")
     await _db.filters.create_index([("chat_id", 1), ("keyword", 1)], unique=True)
-    # ← NEW: unique index on guardian per chat
     await _db.guardian.create_index("chat_id", unique=True)
+    # ← NEW: unique index on clean-command per chat
+    await _db.clean.create_index("chat_id", unique=True)
     log.info("MongoDB connected (db: %s)", name)
 
 
@@ -234,3 +236,19 @@ async def guardian_permit_remove(chat_id: int, user_id: int) -> bool:
         {"$pull": {"permitted_users": {"id": user_id}}},
     )
     return res.modified_count > 0
+
+
+# ───────── clean command (auto-delete commands in groups) ─────────
+
+async def clean_get(chat_id: int) -> dict | None:
+    """Return the clean-command config for this chat (or None if not set)."""
+    return await _db.clean.find_one({"chat_id": chat_id})
+
+
+async def clean_set(chat_id: int, enabled: bool, mode: str = "all"):
+    """Set the clean-command config. mode is 'all', 'admin', 'users', or 'off'."""
+    await _db.clean.update_one(
+        {"chat_id": chat_id},
+        {"$set": {"enabled": bool(enabled), "mode": mode}},
+        upsert=True,
+    )
