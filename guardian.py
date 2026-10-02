@@ -1,21 +1,4 @@
-"""Guardian — anti-edit + anti-media defender with delayed deletion.
-
-Only works when the bot is a full admin (can_delete_messages) in the group.
-Only admins with delete permissions (or the group owner) can configure it.
-
-Commands:
-  .setdelay <1m..6h>   — set deletion delay for this chat
-  .guard on|off        — enable/disable guardian in this chat
-  .permit   (reply)    — whitelist a user (their edits/media won't be deleted)
-  .unpermit (reply)    — remove a user from the whitelist
-  .permitlist          — show whitelisted users
-
-NOTE: Once enabled, ALL users' edited messages and media get deleted after the
-delay — including admins and the group owner. Only the bot's own messages and
-permitted users are exempt.
-
-All data is stored in MongoDB per chat_id, so it survives bot restarts.
-"""
+"""Guardian — anti-edit + anti-media defender with delayed deletion."""
 import asyncio
 import logging
 import re
@@ -41,7 +24,7 @@ HELP_TXT = (
     "• <code>.setdelay 5m</code> — set deletion delay to 5 minutes.\n"
     "• <code>.setdelay 6h</code> — set deletion delay to 6 hours.\n"
     "<i>(setdelay range → 1 minute to 6 hours)</i>\n\n"
-    "<b>Permit Commands:</b>\n"
+    "<b>Permit Commands (owner only):</b>\n"
     "• <code>.permit</code> (reply) — whitelist a user (their edits/media won't be deleted).\n"
     "• <code>.unpermit</code> (reply) — remove a user from the permit list.\n"
     "• <code>.permitlist</code> — view permitted users.\n"
@@ -55,10 +38,10 @@ COMMANDS = [
     ("permitlist", "Show permitted users"),
 ]
 
-MIN_DELAY = 60           # 1 minute
-MAX_DELAY = 6 * 60 * 60  # 6 hours
+MIN_DELAY = 60
+MAX_DELAY = 6 * 60 * 60
 _DELAY_RE = re.compile(r"^(\d+)\s*([smh])$", re.IGNORECASE)
-_NOTE_LIFETIME = 10      # seconds — the notice itself auto-deletes after this
+_NOTE_LIFETIME = 10
 
 
 def _parse_delay(arg: str):
@@ -70,7 +53,17 @@ def _parse_delay(arg: str):
     return n * mult
 
 
+async def _is_owner(ctx, chat_id: int, user_id: int) -> bool:
+    """True only if the user is the group owner (creator)."""
+    try:
+        m = await ctx.bot.get_chat_member(chat_id, user_id)
+    except TelegramError:
+        return False
+    return m.status == ChatMemberStatus.OWNER
+
+
 async def _is_full_admin(ctx, chat_id: int, user_id: int) -> bool:
+    """True if the user is the owner OR an admin who can delete messages."""
     try:
         m = await ctx.bot.get_chat_member(chat_id, user_id)
     except TelegramError:
@@ -147,8 +140,9 @@ async def permit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
     if chat.type == ChatType.PRIVATE:
         return
-    if not await _is_full_admin(ctx, chat.id, user.id):
-        await say(ctx, chat.id, T("⚠️ only full-power admins can use this."), reply_to=msg.message_id)
+    # ✅ ONLY the group owner can permit
+    if not await _is_owner(ctx, chat.id, user.id):
+        await say(ctx, chat.id, T("⚠️ only the <b>group owner</b> can use this."), reply_to=msg.message_id)
         return
     target = msg.reply_to_message.from_user if msg.reply_to_message else None
     if not target:
@@ -162,8 +156,9 @@ async def unpermit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
     if chat.type == ChatType.PRIVATE:
         return
-    if not await _is_full_admin(ctx, chat.id, user.id):
-        await say(ctx, chat.id, T("⚠️ only full-power admins can use this."), reply_to=msg.message_id)
+    # ✅ ONLY the group owner can unpermit
+    if not await _is_owner(ctx, chat.id, user.id):
+        await say(ctx, chat.id, T("⚠️ only the <b>group owner</b> can use this."), reply_to=msg.message_id)
         return
     target = msg.reply_to_message.from_user if msg.reply_to_message else None
     if not target:
@@ -177,8 +172,12 @@ async def unpermit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def permitlist_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    msg, chat = update.effective_message, update.effective_chat
+    msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
     if chat.type == ChatType.PRIVATE:
+        return
+    # ✅ ONLY the group owner can view the permit list
+    if not await _is_owner(ctx, chat.id, user.id):
+        await say(ctx, chat.id, T("⚠️ only the <b>group owner</b> can use this."), reply_to=msg.message_id)
         return
     cfg = await dbase.guardian_get(chat.id) or {}
     users = cfg.get("permitted_users", [])
@@ -202,8 +201,6 @@ def _msg_has_media(msg) -> bool:
 
 
 async def _delete_after(ctx, chat_id: int, message_id: int, delay: int, note_text: str):
-    """Wait `delay` seconds, delete the original message, post a short note,
-    then delete that note after `_NOTE_LIFETIME` seconds."""
     await asyncio.sleep(delay)
     try:
         await ctx.bot.delete_message(chat_id, message_id)
@@ -223,11 +220,6 @@ async def _delete_after(ctx, chat_id: int, message_id: int, delay: int, note_tex
 
 
 async def _should_guard(ctx, chat, user) -> int:
-    """Return the delay in seconds if guardian should act, else 0.
-
-    Everyone's messages get deleted (admins and owner included) — the ONLY
-    exemptions are the bot's own messages and explicitly permitted users.
-    """
     if not chat or chat.type == ChatType.PRIVATE:
         return 0
     me = ctx.application.bot_data.get("me")
@@ -254,8 +246,6 @@ async def _should_guard(ctx, chat, user) -> int:
 
 
 async def _guardian_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Single robust watcher — fires on EVERY group message and decides
-    internally whether it's an edit or new media that needs guarding."""
     msg = update.effective_message
     chat = update.effective_chat
     user = update.effective_user
@@ -291,8 +281,6 @@ async def _guardian_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     asyncio.create_task(_delete_after(ctx, chat.id, msg.message_id, delay, note))
 
 
-# ───────────── registration ─────────────
-
 def register(app):
     dual_command(app, "setdelay", setdelay_cmd)
     dual_command(app, "guard", guard_cmd)
@@ -300,9 +288,7 @@ def register(app):
     dual_command(app, "unpermit", unpermit_cmd)
     dual_command(app, "permitlist", permitlist_cmd)
 
-    # Single catch-all watcher — handles both edits and media.
-    # group=2 so it doesn't clash with other handlers.
     app.add_handler(
         MessageHandler(filters.ChatType.GROUPS & filters.ALL, _guardian_watcher),
         group=2,
-  )
+                 )
