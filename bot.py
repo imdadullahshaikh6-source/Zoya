@@ -45,6 +45,28 @@ START_TXT = (
     "tap <b>command</b> below to see everything i can do."
 )
 
+# Guardian Module Help Text (Added exactly as requested)
+GUARDIAN_TXT = (
+    "<b>🛡 𝙂𝙪𝙖𝙧𝙙𝙞𝙖𝙣 — Media & Edit Defender</b>\n\n"
+    "<b>Features Overview:</b>\n"
+    "• Advanced Delayed Edited Message Deletion.\n"
+    "• Delayed Media (Video, Photo, Voice) Deletion.\n"
+    "• Configurable Deletion Timer.\n"
+    "• Permit System for Trusted Users and Channels.\n\n"
+    "<b>Timer Commands:</b>\n"
+    "• <code>.setdelay 6m</code> — Set Deletion Delay to 6 Minutes.\n"
+    "• <code>.setdelay 2h</code> — Set Deletion Delay to 2 hours.\n"
+    "<i>(setdelay range → Can Be Set From 1min to 6 hours)</i>\n\n"
+    "<b>Permit & Info Commands:</b>\n"
+    "• <code>.permit</code> — Whitelist a user (their media/edits won't be deleted).\n"
+    "• <code>.permitlist</code> — View Permitted Users.\n"
+    "• <code>.unpermitchannel</code> — Remove a Channel from the Permit List.\n"
+    "• <code>.pchannels</code> — View Permitted Channels.\n"
+    "• <code>.Arise</code> — Set A Paragraph Limit To Avoid unnecessary Strike.\n"
+    "• <code>.id</code> — To Get Ids Of User And Channel.\n"
+    "• <code>.info</code> — To get Complete information About A User Or A Channel."
+)
+
 PAGES = {
     "greet": ("🎉 𝙂𝙧𝙚𝙚𝙩𝙞𝙣𝙜𝙨", welcome.HELP_TXT),
     "admin": ("👮 𝘼𝙙𝙢𝙞𝙣", admin.HELP_TXT),
@@ -52,6 +74,7 @@ PAGES = {
     "mod": ("🛡 𝙈𝙤𝙙𝙚𝙧𝙖𝙩𝙞𝙤𝙣", ban.HELP_TXT),
     "extra": ("🎁 𝙀𝙭𝙩𝙧𝙖", sticker.HELP_TXT + "\n\n" + fun.HELP_TXT),
     "filters": ("🔍 𝙁𝙞𝙡𝙩𝙚𝙧𝙨", bot_filters.HELP_TXT),
+    "guardian": ("🛡 𝙂𝙪𝙖𝙧𝙙𝙞𝙖𝙣", GUARDIAN_TXT),
 }
 
 ALIASES = {
@@ -62,6 +85,7 @@ ALIASES = {
     "extra": "extra", "sticker": "extra", "stickers": "extra", "q": "extra",
     "kang": "extra", "waifu": "extra", "couple": "extra", "fun": "extra",
     "filter": "filters", "filters": "filters", "f": "filters",
+    "guardian": "guardian", "defender": "guardian", "setdelay": "guardian", "permit": "guardian",
 }
 
 
@@ -101,7 +125,9 @@ def main_page():
     for i in range(0, len(keys), 2):
         row = []
         for j, k in enumerate(keys[i:i + 2]):
-            row.append(B(PAGES[k][0], f"help:{k}", style=colors[(i + j) % len(colors)]))
+            # Sirf Guardian button ko red (danger) color assign karna
+            btn_style = "danger" if k == "guardian" else colors[(i + j) % len(colors)]
+            row.append(B(PAGES[k][0], f"help:{k}", style=btn_style))
         rows.append(row)
     rows.append([B("⬅ 𝘽𝙖𝙘𝙠", "help:home"), B("✖ 𝘾𝙡𝙤𝙨𝙚", "help:close", style="danger")])
     return text, InlineKeyboardMarkup(rows)
