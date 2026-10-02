@@ -4,14 +4,11 @@
             (the pack is created once per user and reused on every later .kang;
             if it fills up, a new part is started automatically).
 
-The sender's NAME is deliberately not drawn into the sticker image anymore —
-it's sent as a real Telegram mention right after the sticker instead. Telegram's
-own client renders any name (however decorative) perfectly, since it has full
-font fallback built in; we can't match that by drawing pixels with one bundled
-font, however good its coverage. The message BODY still has to be drawn into
-the image itself (that's the whole point of a "sticker"), so the bundled
-DejaVu fonts in ./fonts are still required for that and for the avatar-
-initials fallback — only the name-in-the-image part was removed."""
+The sender's NAME is drawn INTO the sticker image itself, at the top of the
+message bubble, in Telegram's mention blue (no @username — just the display
+name, however decorative). The message BODY is drawn below it in white.
+The bundled DejaVu fonts in ./fonts cover all the glyphs we need for both
+the name and the body, plus the avatar-initials fallback."""
 import io
 import os
 import re
@@ -19,12 +16,11 @@ import unicodedata
 
 from fontTools.ttLib import TTFont
 from PIL import Image, ImageDraw, ImageFont
-from telegram import InputSticker, ReplyParameters
-from telegram.constants import ParseMode
+from telegram import InputSticker
 from telegram.error import TelegramError
 
 import database as dbase
-from common import T, dual_command, esc, mention, q, say
+from common import T, dual_command, esc, say
 
 HELP_TXT = (
     "<b>✦ stickers</b>\n\n"
@@ -38,6 +34,11 @@ COMMANDS = [("q", "Quote a message as a sticker"), ("kang", "Steal a sticker int
 
 MAX_SIDE = 512
 EMOJI_RE = re.compile(r"^[\U0001F000-\U0001FAFF\u2600-\u27BF\u2190-\u21FF\u2B00-\u2BFF]+$")
+
+# Telegram's mention colour (dark theme) — same blue the client uses when it
+# renders a clickable mention. We bake it into the sticker so the name inside
+# the image looks identical to a real mention.
+MENTION_BLUE = (106, 179, 243)
 
 FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 FONT_REGULAR = os.path.join(FONT_DIR, "DejaVuSans.ttf")
@@ -137,40 +138,63 @@ async def _avatar(ctx, user, size=100) -> Image.Image:
 
 
 async def build_quote_sticker(ctx, src_msg, sender) -> io.BytesIO:
-    """Draws the avatar + message bubble only — no name text baked in. The
-    name is sent as a real Telegram mention right after the sticker instead
-    (see _quote_and_send), so it always renders correctly."""
+    """Draws the avatar + a message bubble containing:
+       • the sender's DISPLAY NAME at the top, in mention-blue (no @username)
+       • the message body underneath, in white
+    The name is baked into the image so it's always visible inside the sticker."""
     W = 512
     outer_pad = 20
     avatar_size = 100
     gap = 14
     pad = 24
 
+    font_name = _load_font(True, 34)   # bold, smaller — reads like a mention
     font_text = _load_font(False, 40)
 
     raw_text = src_msg.text or src_msg.caption or "[media]"
     text = _renderable(False, raw_text, "[unsupported characters]")
+
+    # Display name only — never @username
+    sender_name = _renderable(True, (sender.full_name if sender else ""), "Unknown")
 
     bubble_x = outer_pad + avatar_size + gap
     bubble_w = W - bubble_x - outer_pad
     text_w = bubble_w - pad * 2
 
     probe = ImageDraw.Draw(Image.new("RGB", (10, 10)))
-    lines = _wrap(probe, text, font_text, text_w)
-    line_h = font_text.getbbox("Ag")[3] + 16
-    body_h = line_h * len(lines)
+
+    name_lines = _wrap(probe, sender_name, font_name, text_w)
+    name_line_h = font_name.getbbox("Ag")[3] + 8
+
+    text_lines = _wrap(probe, text, font_text, text_w)
+    text_line_h = font_text.getbbox("Ag")[3] + 16
+
+    gap_after_name = 14
+    name_block_h = name_line_h * len(name_lines)
+    text_block_h = text_line_h * len(text_lines)
+    body_h = name_block_h + gap_after_name + text_block_h
     bubble_h = body_h + pad * 2
     H = max(avatar_size, bubble_h) + outer_pad * 2
 
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
+
     by = (H - bubble_h) // 2
-    draw.rounded_rectangle((bubble_x, by, bubble_x + bubble_w, by + bubble_h), radius=28, fill=(24, 37, 51, 240))
+    draw.rounded_rectangle(
+        (bubble_x, by, bubble_x + bubble_w, by + bubble_h),
+        radius=28, fill=(24, 37, 51, 240),
+    )
 
     ty = by + pad
-    for ln in lines:
+    # Name first — mention blue
+    for ln in name_lines:
+        draw.text((bubble_x + pad, ty), ln, font=font_name, fill=MENTION_BLUE)
+        ty += name_line_h
+    ty += gap_after_name
+    # Then the message body — white
+    for ln in text_lines:
         draw.text((bubble_x + pad, ty), ln, font=font_text, fill=(255, 255, 255))
-        ty += line_h
+        ty += text_line_h
 
     avatar = await _avatar(ctx, sender, avatar_size)
     img.paste(avatar, (outer_pad, (H - avatar_size) // 2), avatar)
@@ -196,15 +220,7 @@ async def _quote_and_send(update, ctx, as_reply: bool):
         await say(ctx, chat.id, T("couldn't build that sticker:") + f" {esc(e)}", reply_to=msg.message_id)
         return
     kwargs = {"reply_to_message_id": src.message_id} if as_reply else {}
-    sent = await ctx.bot.send_sticker(chat.id, out, **kwargs)
-    # Stickers can't carry a caption, and drawing the name as pixels meant
-    # fighting font coverage for every possible fancy name — a real mention
-    # lets Telegram's own client render it exactly like it looks everywhere
-    # else, with zero font issues (this is the name, never the @username).
-    await ctx.bot.send_message(
-        chat.id, q(T("— {m}", m=mention(sender))), parse_mode=ParseMode.HTML,
-        reply_parameters=ReplyParameters(message_id=sent.message_id, allow_sending_without_reply=True),
-    )
+    await ctx.bot.send_sticker(chat.id, out, **kwargs)
 
 
 async def q_cmd(update, ctx):
@@ -291,4 +307,3 @@ def register(app):
     dual_command(app, "q", q_cmd)
     dual_command(app, "qr", qr_cmd)
     dual_command(app, "kang", kang_cmd)
-            
