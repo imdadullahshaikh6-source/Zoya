@@ -7,11 +7,10 @@ Quote generation flow:
   2. Public fallback APIs (QUOTE_API_FALLBACKS env)
   3. Local Pillow rendering (uses ./fonts/DejaVuSans*.ttf)
 
-.kang handling:
-  • Photos           → download, square-crop 512x512, WEBP
-  • Static stickers  → pass file_id directly
-  • Video stickers   → pass file_id directly (WEBM)
-  • Animated stickers→ pass file_id directly (TGS)"""
+Avatar: we pass Telegram's direct file URL (not a data URI) because the
+quote-api uses axios, which cannot fetch data: URIs — avatars were being
+silently dropped. The URL contains the bot token, but the API runs on the
+same VPS and the token never leaves the host."""
 from __future__ import annotations
 
 import asyncio
@@ -56,7 +55,7 @@ _FALLBACKS = [u.strip() for u in (QUOTE_API_FALLBACKS or "").split(",") if u.str
 TOTAL_TIMEOUT = QUOTE_TOTAL_TIMEOUT
 
 COOLDOWN = 8.0                       # seconds between quotes per user
-_AVATAR_TTL = 600                    # 10 min avatar cache
+_AVATAR_TTL = 600                    # 10 min avatar URL cache
 
 # ───────── runtime caches ─────────
 _last_quote: dict[int, float] = {}
@@ -187,19 +186,35 @@ async def _fetch_avatar_bytes(ctx, user_id: int) -> bytes | None:
         return None
 
 
-async def _avatar_data_uri(ctx, user_id: int) -> str | None:
-    """Return a base64 data-URI of the user's avatar, cached for 10 min."""
+async def _avatar_url(ctx, user_id: int) -> str | None:
+    """Return a URL to the user's Telegram profile photo that the quote-api
+    can fetch with axios.
+
+    Data URIs (data:image/jpeg;base64,...) do NOT work — the API silently
+    drops them, which is why avatars were missing from the quote sticker.
+    We use Telegram's direct file URL instead. The bot token appears in the
+    URL, but the quote-api runs on the same VPS, so the token never leaves
+    the host."""
     now = time.time()
     cached = _avatar_cache.get(user_id)
     if cached is not None and cached[0] > now:
         return cached[1]
 
-    raw = await _fetch_avatar_bytes(ctx, user_id)
-    uri = None
-    if raw:
-        uri = "data:image/jpeg;base64," + base64.b64encode(raw).decode("ascii")
-    _avatar_cache[user_id] = (now + _AVATAR_TTL, uri)
-    return uri
+    url = None
+    try:
+        bot_token = os.environ.get("BOT_TOKEN", "").strip()
+        if bot_token:
+            photos = await ctx.bot.get_user_profile_photos(user_id, limit=1)
+            if photos.total_count:
+                file_id = photos.photos[0][-1].file_id
+                tgfile = await ctx.bot.get_file(file_id)
+                if tgfile.file_path:
+                    url = f"https://api.telegram.org/file/bot{bot_token}/{tgfile.file_path}"
+    except (TelegramError, OSError) as e:
+        log.debug("avatar url failed for %s: %s", user_id, e)
+
+    _avatar_cache[user_id] = (now + _AVATAR_TTL, url)
+    return url
 
 
 # ───────── entity extraction ─────────
@@ -285,8 +300,6 @@ async def _try_one_api(client: httpx.AsyncClient, url: str, payload: dict) -> by
             return None
 
         # LyoSU quote-api returns JSON: {"ok":true,"result":{"image":"<base64>"}}
-        # Decode the base64 payload — otherwise Telegram gets JSON and
-        # silently accepts it, then fails to render the sticker.
         try:
             j = json.loads(data)
         except Exception:
@@ -320,8 +333,9 @@ async def _build_quote_via_api(ctx, src_msg, sender) -> bytes | None:
     if not text:
         return None
 
-    avatar_uri = await _avatar_data_uri(ctx, sender.id)
-    payload = _build_payload(src_msg, avatar_uri)
+    avatar_url = await _avatar_url(ctx, sender.id)
+    log.info("[sticker] avatar url: %s", "yes" if avatar_url else "none")
+    payload = _build_payload(src_msg, avatar_url)
 
     urls = [QUOTE_API] + _FALLBACKS
     timeout = httpx.Timeout(QUOTE_TIMEOUT)
@@ -601,3 +615,4 @@ def register(app):
     dual_command(app, "q", q_cmd)
     dual_command(app, "qr", qr_cmd)
     dual_command(app, "kang", kang_cmd)
+  
