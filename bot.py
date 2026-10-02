@@ -46,12 +46,12 @@ START_TXT = (
 )
 
 PAGES = {
-    "greet": ("🎉 Greetings", welcome.HELP_TXT),
-    "admin": ("👮 Admin", admin.HELP_TXT),
-    "afk": ("💤 AFK", afk.HELP_TXT),
-    "mod": ("🛡 Moderation", ban.HELP_TXT),
-    "extra": ("🎁 Extra", sticker.HELP_TXT + "\n\n" + fun.HELP_TXT),
-    "filters": ("🔍 Filters", bot_filters.HELP_TXT),
+    "greet": ("🎉 𝙂𝙧𝙚𝙚𝙩𝙞𝙣𝙜𝙨", welcome.HELP_TXT),
+    "admin": ("👮 𝘼𝙙𝙢𝙞𝙣", admin.HELP_TXT),
+    "afk": ("💤 𝘼𝙁𝙆", afk.HELP_TXT),
+    "mod": ("🛡 𝙈𝙤𝙙𝙚𝙧𝙖𝙩𝙞𝙤𝙣", ban.HELP_TXT),
+    "extra": ("🎁 𝙀𝙭𝙩𝙧𝙖", sticker.HELP_TXT + "\n\n" + fun.HELP_TXT),
+    "filters": ("🔍 𝙁𝙞𝙡𝙩𝙚𝙧𝙨", bot_filters.HELP_TXT),
 }
 
 ALIASES = {
@@ -77,11 +77,11 @@ def home_page(user, ctx):
     me = ctx.application.bot_data["me"]
     text = T(START_TXT, m=mention(user))
     rows = [
-        [B("📜 Command", "help:main", style="primary")],
-        [B("👑 Support", url=SUPPORT_URL, style="primary"), B("➕ Add Me", url=add_me_url(me.username), style="success")],
+        [B("📜 𝘾𝙤𝙢𝙢𝙖𝙣𝙙", "help:main", style="primary")],
+        [B("👑 𝙊𝙬𝙣𝙚𝙧", url=SUPPORT_URL, style="primary"), B("➕ 𝘼𝙙𝙙 𝙈𝙚", url=add_me_url(me.username), style="success")],
     ]
     if CHANNEL_URL:
-        rows.append([B("🔔 Channel", url=CHANNEL_URL)])
+        rows.append([B("🔔 𝘾𝙝𝙖𝙣𝙣𝙚𝙡", url=CHANNEL_URL)])
     return text, InlineKeyboardMarkup(rows)
 
 
@@ -94,13 +94,13 @@ def main_page():
         for j, k in enumerate(keys[i:i + 2]):
             row.append(B(PAGES[k][0], f"help:{k}", style=colors[(i + j) % len(colors)]))
         rows.append(row)
-    rows.append([B("⬅ Back", "help:home"), B("✖ Close", "help:close", style="danger")])
+    rows.append([B("⬅ 𝘽𝙖𝙘𝙠", "help:home"), B("✖ 𝘾𝙡𝙤𝙨𝙚", "help:close", style="danger")])
     return text, InlineKeyboardMarkup(rows)
 
 
 def section_page(key):
     label, body = PAGES[key]
-    return sc(body), InlineKeyboardMarkup([[B("⬅ Back", "help:main"), B("✖ Close", "help:close", style="danger")]])
+    return sc(body), InlineKeyboardMarkup([[B("⬅ 𝘽𝙖𝙘𝙠", "help:main"), B("✖ 𝘾𝙡𝙤𝙨𝙚", "help:close", style="danger")]])
 
 
 async def edit_page(qy, text, kb):
@@ -260,3 +260,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
