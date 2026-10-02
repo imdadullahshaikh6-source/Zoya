@@ -58,7 +58,7 @@ COMMANDS = [
 MIN_DELAY = 60           # 1 minute
 MAX_DELAY = 6 * 60 * 60  # 6 hours
 _DELAY_RE = re.compile(r"^(\d+)\s*([smh])$", re.IGNORECASE)
-_NOTE_LIFETIME = 10      # seconds — the notice itself auto-deletes after this
+_NOTE_LIFETIME = 5       # seconds — the notice itself auto-deletes after this
 
 
 def _parse_delay(arg: str):
@@ -318,4 +318,4 @@ def register(app):
     app.add_handler(
         MessageHandler(filters.ChatType.GROUPS & filters.ALL, _guardian_watcher),
         group=2,
-    )
+                 )
