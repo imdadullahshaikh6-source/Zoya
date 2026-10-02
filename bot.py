@@ -29,8 +29,8 @@ logging.basicConfig(format="%(asctime)s | %(levelname)s | %(name)s | %(message)s
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 MONGO_URI = os.environ["MONGO_URI"]
 DB_NAME = os.getenv("DB_NAME", "zoya_bot")
-OWNER_USERNAME = os.getenv("OWNER_USERNAME", "Ownerbackk").lstrip("@")
-SUPPORT_URL = os.getenv("SUPPORT_URL", f"https://t.me/{OWNER_USERNAME}")
+OWNER_USERNAME = "Ownerbackk"
+SUPPORT_URL = "https://t.me/Ownerbackk"  # <-- Yahan direct tumhara ID set kar diya
 CHANNEL_URL = os.getenv("CHANNEL_URL", "")
 START_IMG = os.getenv("START_IMG", "https://graph.org/file/d3a2c17942e606f4ec811-9c0373fa8bb10f4448.jpg")
 
@@ -260,4 +260,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+            
