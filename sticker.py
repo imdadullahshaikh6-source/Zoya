@@ -8,19 +8,8 @@ Quote commands:
   .qr             → same as .q r (shortcut)
 
 Nested quotes: if the replied-to message was itself a reply, we fetch its
-parent and include it in the sticker (like the baka bot). This gives the
-classic two-message stacked quote look.
-
-Quote generation flow:
-  1. Self-hosted quote-api (QUOTE_API env or common.py default)
-  2. Public fallback APIs (QUOTE_API_FALLBACKS env)
-  3. Local Pillow rendering (uses ./fonts/DejaVuSans*.ttf)
-
-.kang handling:
-  • Photos           → download, square-crop 512x512, WEBP
-  • Static stickers  → pass file_id directly
-  • Video stickers   → pass file_id directly (WEBM)
-  • Animated stickers→ pass file_id directly (TGS)
+parent and include it in the sticker (like the baka bot). The replyMessage
+object needs a top-level `name` field for LyoSU quote-api to render it.
 
 Avatar: we pass Telegram's direct file URL (not a data URI) because the
 quote-api uses axios, which cannot fetch data: URIs."""
@@ -56,26 +45,22 @@ HELP_TXT = (
     "/q r (or .q r) — same, but sent as a reply to the original message\n"
     "/qr (or .qr) — shortcut for .q r\n"
     "/kang (or .kang) [emoji] — reply to a sticker or photo to add it to your "
-    "own sticker pack. the pack is created the first time and reused after that — "
-    "every later .kang just adds to it (a new part is started automatically if it fills up)."
+    "own sticker pack."
 )
 COMMANDS = [("q", "Quote a message as a sticker"), ("kang", "Steal a sticker into your pack")]
 
 MAX_SIDE = 512
 EMOJI_RE = re.compile(r"^[\U0001F000-\U0001FAFF\u2600-\u27BF\u2190-\u21FF\u2B00-\u2BFF]+$")
 
-# ───────── runtime config ─────────
 _FALLBACKS = [u.strip() for u in (QUOTE_API_FALLBACKS or "").split(",") if u.strip()]
 TOTAL_TIMEOUT = QUOTE_TOTAL_TIMEOUT
 
-COOLDOWN = 8.0                       # seconds between quotes per user
-_AVATAR_TTL = 600                    # 10 min avatar URL cache
+COOLDOWN = 8.0
+_AVATAR_TTL = 600
 
-# ───────── runtime caches ─────────
 _last_quote: dict[int, float] = {}
 _avatar_cache: dict[int, tuple[float, str | None]] = {}
 
-# ───────── entity support ─────────
 _KEEP_ENTITIES = {
     "bold", "italic", "underline", "strikethrough", "spoiler",
     "code", "pre", "blockquote", "text_link", "text_mention",
@@ -95,7 +80,7 @@ _ENTITY_TYPE_STR = {
 }
 
 
-# ───────── local Pillow helpers (fallback + .kang) ─────────
+# ───────── Pillow helpers (fallback + .kang) ─────────
 FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 FONT_REGULAR = os.path.join(FONT_DIR, "DejaVuSans.ttf")
 FONT_BOLD = os.path.join(FONT_DIR, "DejaVuSans-Bold.ttf")
@@ -159,7 +144,6 @@ def _fit_512(img: Image.Image) -> Image.Image:
 
 
 def _square_512(img: Image.Image) -> Image.Image:
-    """Crop to a centre square, then resize to exactly 512x512."""
     w, h = img.size
     side = min(w, h)
     left = (w - side) // 2
@@ -185,7 +169,6 @@ def _wrap(draw, text, font, max_w):
 
 
 async def _fetch_avatar_bytes(ctx, user_id: int) -> bytes | None:
-    """Download the user's big profile photo. Never hangs."""
     try:
         async def _fetch():
             photos = await ctx.bot.get_user_profile_photos(user_id, limit=1)
@@ -201,8 +184,6 @@ async def _fetch_avatar_bytes(ctx, user_id: int) -> bytes | None:
 
 
 async def _avatar_url(ctx, user_id: int) -> str | None:
-    """Return a URL to the user's Telegram profile photo that the quote-api
-    can fetch with axios. Data URIs do NOT work — the API silently drops them."""
     now = time.time()
     cached = _avatar_cache.get(user_id)
     if cached is not None and cached[0] > now:
@@ -262,6 +243,27 @@ def _from_block(user) -> dict:
     return out
 
 
+def _build_reply_block(reply) -> dict | None:
+    """Build the replyMessage sub-object in the shape LyoSU quote-api expects.
+
+    The API needs a top-level `name` field (not just `from.name`) — without it
+    it silently ignores the nested parent, which is why the sticker was only
+    showing the source message and not the message it replied to."""
+    if reply is None:
+        return None
+    text = _text_of(reply)
+    if not text:
+        return None
+    frm = _from_block(getattr(reply, "from_user", None))
+    return {
+        "name": frm.get("name") or "User",
+        "text": text,
+        "entities": _extract_entities(reply),
+        "chatId": int(getattr(reply, "chat_id", 0) or 0),
+        "from": frm,
+    }
+
+
 def _build_message(msg, avatar: str | None = None) -> dict:
     block = {
         "entities": _extract_entities(msg),
@@ -271,13 +273,9 @@ def _build_message(msg, avatar: str | None = None) -> dict:
     }
     if avatar:
         block["from"]["photo"] = {"url": avatar}
-    reply = getattr(msg, "reply_to_message", None)
-    if reply is not None and _text_of(reply):
-        block["replyMessage"] = {
-            "entities": _extract_entities(reply),
-            "from": _from_block(getattr(reply, "from_user", None)),
-            "text": _text_of(reply),
-        }
+    reply_block = _build_reply_block(getattr(msg, "reply_to_message", None))
+    if reply_block:
+        block["replyMessage"] = reply_block
     return block
 
 
@@ -307,7 +305,6 @@ async def _try_one_api(client: httpx.AsyncClient, url: str, payload: dict) -> by
             log.warning("⚠️ %s returned empty body", url)
             return None
 
-        # LyoSU quote-api returns JSON: {"ok":true,"result":{"image":"<base64>"}}
         try:
             j = json.loads(data)
         except Exception:
@@ -343,7 +340,14 @@ async def _build_quote_via_api(ctx, src_msg, sender) -> bytes | None:
 
     avatar_url = await _avatar_url(ctx, sender.id)
     log.info("[sticker] avatar url: %s", "yes" if avatar_url else "none")
+
     payload = _build_payload(src_msg, avatar_url)
+    # Log whether a nested parent was included
+    msg0 = payload["messages"][0]
+    if "replyMessage" in msg0:
+        log.info("[sticker] nested replyMessage included: %r", msg0["replyMessage"].get("text", "")[:40])
+    else:
+        log.info("[sticker] no nested replyMessage")
 
     urls = [QUOTE_API] + _FALLBACKS
     timeout = httpx.Timeout(QUOTE_TIMEOUT)
@@ -439,8 +443,6 @@ async def _build_quote_via_pillow(ctx, src_msg, sender) -> bytes:
     return out.getvalue()
 
 
-# ───────── shared builder ─────────
-
 async def _build_quote_sticker(ctx, src_msg, sender) -> bytes:
     try:
         data = await _build_quote_via_api(ctx, src_msg, sender)
@@ -469,14 +471,25 @@ async def _quote_and_send(update, ctx, as_reply: bool):
         await say(ctx, chat.id, T("only text messages can be quoted."), reply_to=msg.message_id)
         return
 
-    # If the src message was itself a reply, fetch its parent so the sticker
-    # shows the nested quote context (like the baka bot).
-    if getattr(src, "reply_to_message_id", None) and not src.reply_to_message:
+    # ── Fetch the parent of the source message if it exists ──
+    # PTB does NOT populate nested reply_to_message beyond one level, so we
+    # have to fetch it explicitly. Without this, the sticker only shows the
+    # source message — not the message it was replying to.
+    parent_id = (
+        getattr(src, "reply_to_message_id", None)
+        or getattr(getattr(src, "reply_to_message", None), "message_id", None)
+    )
+    if parent_id and not getattr(src, "reply_to_message", None):
         try:
-            src.reply_to_message = await ctx.bot.get_messages(chat.id, src.reply_to_message_id)
-            log.info("[sticker] fetched parent message for nested quote")
+            src.reply_to_message = await ctx.bot.get_messages(chat.id, parent_id)
+            log.info("[sticker] fetched parent message %s for nested quote", parent_id)
         except Exception as e:
-            log.debug("[sticker] couldn't fetch parent message: %s", e)
+            log.warning("[sticker] couldn't fetch parent %s: %s", parent_id, e)
+
+    if getattr(src, "reply_to_message", None):
+        log.info("[sticker] parent text: %r", _text_of(src.reply_to_message)[:60])
+    else:
+        log.info("[sticker] no parent message found")
 
     left = _cooldown_left(user.id)
     if left > 0:
@@ -526,8 +539,6 @@ async def _quote_and_send(update, ctx, as_reply: bool):
     buf = io.BytesIO(sticker_bytes)
     buf.name = "quote.webp"
 
-    # Try to send as reply; if Telegram refuses (deleted msg / restrictions),
-    # fall back to a normal sticker send so the user still gets their quote.
     sent = False
     if as_reply:
         try:
@@ -552,10 +563,6 @@ async def _quote_and_send(update, ctx, as_reply: bool):
 
 
 async def q_cmd(update, ctx):
-    """Supports both:
-        .q              → normal quote
-        .q r / .q reply → quote as a reply to the source message
-    """
     args = [a.lower() for a in (ctx.args or [])]
     as_reply = bool(args) and args[0] in ("r", "reply", "re")
     await _quote_and_send(update, ctx, as_reply=as_reply)
@@ -568,7 +575,6 @@ async def qr_cmd(update, ctx):
 # ───────── .kang helpers ─────────
 
 async def _photo_to_sticker_file(ctx, photo):
-    """Download a photo, crop to a centre square, resize to 512x512, WEBP."""
     tgfile = await ctx.bot.get_file(photo.file_id)
     raw = await tgfile.download_as_bytearray()
     im = Image.open(io.BytesIO(bytes(raw))).convert("RGBA")
@@ -594,8 +600,6 @@ async def kang_cmd(update, ctx):
     if src.sticker:
         s = src.sticker
         emoji = emoji or s.emoji or "🤔"
-        # Pass file_id directly — Telegram already has this file. Works for
-        # static, video, AND animated stickers without re-uploading.
         file_arg = s.file_id
         if s.is_video:
             fmt = "video"
@@ -654,4 +658,3 @@ def register(app):
     dual_command(app, "q", q_cmd)
     dual_command(app, "qr", qr_cmd)
     dual_command(app, "kang", kang_cmd)
-      
