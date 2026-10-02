@@ -1,4 +1,21 @@
-"""Guardian — anti-edit + anti-media defender with delayed deletion."""
+"""Guardian — anti-edit + anti-media defender with delayed deletion.
+
+Only works when the bot is a full admin (can_delete_messages) in the group.
+Only admins with delete permissions (or the group owner) can configure it.
+
+Commands:
+  .setdelay <1m..6h>   — set deletion delay for this chat
+  .guard on|off        — enable/disable guardian in this chat
+  .permit   (reply)    — whitelist a user (owner only)
+  .unpermit (reply)    — remove a user from the whitelist (owner only)
+  .permitlist          — show whitelisted users (owner only)
+
+NOTE: Once enabled, ALL users' edited messages and media get deleted after the
+delay — including admins and the group owner. Only the bot's own messages and
+permitted users are exempt.
+
+All data is stored in MongoDB per chat_id, so it survives bot restarts.
+"""
 import asyncio
 import logging
 import re
@@ -38,10 +55,10 @@ COMMANDS = [
     ("permitlist", "Show permitted users"),
 ]
 
-MIN_DELAY = 60
-MAX_DELAY = 6 * 60 * 60
+MIN_DELAY = 60           # 1 minute
+MAX_DELAY = 6 * 60 * 60  # 6 hours
 _DELAY_RE = re.compile(r"^(\d+)\s*([smh])$", re.IGNORECASE)
-_NOTE_LIFETIME = 10
+_NOTE_LIFETIME = 10      # seconds — the notice itself auto-deletes after this
 
 
 def _parse_delay(arg: str):
@@ -140,7 +157,6 @@ async def permit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
     if chat.type == ChatType.PRIVATE:
         return
-    # ✅ ONLY the group owner can permit
     if not await _is_owner(ctx, chat.id, user.id):
         await say(ctx, chat.id, T("⚠️ only the <b>group owner</b> can use this."), reply_to=msg.message_id)
         return
@@ -156,7 +172,6 @@ async def unpermit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
     if chat.type == ChatType.PRIVATE:
         return
-    # ✅ ONLY the group owner can unpermit
     if not await _is_owner(ctx, chat.id, user.id):
         await say(ctx, chat.id, T("⚠️ only the <b>group owner</b> can use this."), reply_to=msg.message_id)
         return
@@ -175,7 +190,6 @@ async def permitlist_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
     if chat.type == ChatType.PRIVATE:
         return
-    # ✅ ONLY the group owner can view the permit list
     if not await _is_owner(ctx, chat.id, user.id):
         await say(ctx, chat.id, T("⚠️ only the <b>group owner</b> can use this."), reply_to=msg.message_id)
         return
@@ -201,6 +215,8 @@ def _msg_has_media(msg) -> bool:
 
 
 async def _delete_after(ctx, chat_id: int, message_id: int, delay: int, note_text: str):
+    """Wait `delay` seconds, delete the original message, post a quote-block
+    notice, then delete that notice after `_NOTE_LIFETIME` seconds."""
     await asyncio.sleep(delay)
     try:
         await ctx.bot.delete_message(chat_id, message_id)
@@ -220,6 +236,11 @@ async def _delete_after(ctx, chat_id: int, message_id: int, delay: int, note_tex
 
 
 async def _should_guard(ctx, chat, user) -> int:
+    """Return the delay in seconds if guardian should act, else 0.
+
+    Everyone's messages get deleted (admins and owner included) — the ONLY
+    exemptions are the bot's own messages and explicitly permitted users.
+    """
     if not chat or chat.type == ChatType.PRIVATE:
         return 0
     me = ctx.application.bot_data.get("me")
@@ -246,6 +267,8 @@ async def _should_guard(ctx, chat, user) -> int:
 
 
 async def _guardian_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Single robust watcher — fires on EVERY group message and decides
+    internally whether it's an edit or new media that needs guarding."""
     msg = update.effective_message
     chat = update.effective_chat
     user = update.effective_user
@@ -272,14 +295,18 @@ async def _guardian_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not delay:
         return
 
+    # ✅ Quote block formatting
     if is_edit:
-        note = T(f"🗑️ {mention(user)}'s <b>edited message</b> was deleted.")
+        body = f"🗑️ {mention(user)}'s <b>edited message</b> was deleted."
     else:
-        note = T(f"🗑️ {mention(user)}'s <b>media</b> was deleted.")
+        body = f"🗑️ {mention(user)}'s <b>media</b> was deleted."
+    note = f"<blockquote>{body}</blockquote>"
 
     log.info("[guardian] scheduling deletion of msg %s in %ss", msg.message_id, delay)
     asyncio.create_task(_delete_after(ctx, chat.id, msg.message_id, delay, note))
 
+
+# ───────────── registration ─────────────
 
 def register(app):
     dual_command(app, "setdelay", setdelay_cmd)
@@ -291,4 +318,4 @@ def register(app):
     app.add_handler(
         MessageHandler(filters.ChatType.GROUPS & filters.ALL, _guardian_watcher),
         group=2,
-                 )
+    )
