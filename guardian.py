@@ -71,7 +71,6 @@ def _parse_delay(arg: str):
 
 
 async def _is_full_admin(ctx, chat_id: int, user_id: int) -> bool:
-    """True if the user is the owner or an admin who can delete messages."""
     try:
         m = await ctx.bot.get_chat_member(chat_id, user_id)
     except TelegramError:
@@ -192,7 +191,15 @@ async def permitlist_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await say(ctx, chat.id, T("\n".join(lines)), reply_to=msg.message_id)
 
 
-# ───────────── watchers ─────────────
+# ───────────── watcher ─────────────
+
+def _msg_has_media(msg) -> bool:
+    return bool(
+        msg.photo or msg.video or msg.video_note
+        or msg.voice or msg.audio or msg.document
+        or msg.animation or msg.sticker
+    )
+
 
 async def _delete_after(ctx, chat_id: int, message_id: int, delay: int, note_text: str):
     """Wait `delay` seconds, delete the original message, post a short note,
@@ -200,8 +207,9 @@ async def _delete_after(ctx, chat_id: int, message_id: int, delay: int, note_tex
     await asyncio.sleep(delay)
     try:
         await ctx.bot.delete_message(chat_id, message_id)
+        log.info("[guardian] deleted msg %s in chat %s", message_id, chat_id)
     except TelegramError as e:
-        log.debug("guardian delete failed: %s", e)
+        log.warning("[guardian] delete failed for msg %s: %s", message_id, e)
         return
     try:
         note = await ctx.bot.send_message(chat_id, note_text, parse_mode=ParseMode.HTML)
@@ -211,7 +219,7 @@ async def _delete_after(ctx, chat_id: int, message_id: int, delay: int, note_tex
         except TelegramError:
             pass
     except TelegramError as e:
-        log.debug("guardian note failed: %s", e)
+        log.warning("[guardian] note failed: %s", e)
 
 
 async def _should_guard(ctx, chat, user) -> int:
@@ -229,35 +237,57 @@ async def _should_guard(ctx, chat, user) -> int:
         return 0
     cfg = await dbase.guardian_get(chat.id)
     if not cfg or not cfg.get("enabled"):
+        log.debug("[guardian] skip: not enabled for chat %s", chat.id)
         return 0
     delay = int(cfg.get("delay_seconds") or 0)
     if delay < MIN_DELAY:
+        log.debug("[guardian] skip: delay too small (%s)", delay)
         return 0
     permitted = {u.get("id") for u in cfg.get("permitted_users", [])}
     if user.id in permitted:
+        log.debug("[guardian] skip: user %s permitted", user.id)
         return 0
     if not await _bot_can_guard(ctx, chat.id):
+        log.debug("[guardian] skip: bot lacks delete permission in %s", chat.id)
         return 0
     return delay
 
 
-async def on_edited(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
+async def _guardian_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Single robust watcher — fires on EVERY group message and decides
+    internally whether it's an edit or new media that needs guarding."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not msg or not chat or not user:
+        return
+    if chat.type == ChatType.PRIVATE:
+        return
+    if user.is_bot:
+        return
+
+    is_edit = bool(msg.edit_date)
+    is_media = _msg_has_media(msg)
+
+    if not is_edit and not is_media:
+        return
+
+    log.info(
+        "[guardian] caught update: chat=%s user=%s edit=%s media=%s msg_id=%s",
+        chat.id, user.id, is_edit, is_media, msg.message_id,
+    )
+
     delay = await _should_guard(ctx, chat, user)
+    log.info("[guardian] delay_seconds=%s", delay)
     if not delay:
         return
-    note = T(f"🗑️ {mention(user)}'s <b>edited message</b> was deleted.")
-    asyncio.create_task(_delete_after(ctx, chat.id, msg.message_id, delay, note))
 
+    if is_edit:
+        note = T(f"🗑️ {mention(user)}'s <b>edited message</b> was deleted.")
+    else:
+        note = T(f"🗑️ {mention(user)}'s <b>media</b> was deleted.")
 
-async def on_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
-    if msg.edit_date:
-        return
-    delay = await _should_guard(ctx, chat, user)
-    if not delay:
-        return
-    note = T(f"🗑️ {mention(user)}'s <b>media</b> was deleted.")
+    log.info("[guardian] scheduling deletion of msg %s in %ss", msg.message_id, delay)
     asyncio.create_task(_delete_after(ctx, chat.id, msg.message_id, delay, note))
 
 
@@ -270,16 +300,9 @@ def register(app):
     dual_command(app, "unpermit", unpermit_cmd)
     dual_command(app, "permitlist", permitlist_cmd)
 
+    # Single catch-all watcher — handles both edits and media.
+    # group=2 so it doesn't clash with other handlers.
     app.add_handler(
-        MessageHandler(filters.UpdateType.EDITED_MESSAGE & filters.ChatType.GROUPS, on_edited),
-        group=1,
-    )
-    app.add_handler(
-        MessageHandler(
-            (filters.PHOTO | filters.VIDEO | filters.VIDEO_NOTE
-             | filters.VOICE | filters.AUDIO | filters.Document.ALL)
-            & filters.ChatType.GROUPS,
-            on_media,
-        ),
-        group=1,
-    )
+        MessageHandler(filters.ChatType.GROUPS & filters.ALL, _guardian_watcher),
+        group=2,
+  )
