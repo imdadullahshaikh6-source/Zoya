@@ -19,6 +19,7 @@ import ban
 import database as dbase
 import filters as bot_filters
 import fun
+import guardian
 import ping
 import sticker
 import welcome
@@ -41,30 +42,27 @@ START_TXT = (
     "➤ promote / demote with a live power panel\n"
     "➤ ban, mute, warn — each with an undo button\n"
     "➤ afk tracking\n"
+    "➤ guardian — anti-edit & anti-media defender\n"
     "➤ every command works with / or . in groups\n\n"
     "tap <b>command</b> below to see everything i can do."
 )
 
-# Guardian Module Help Text (Added exactly as requested)
 GUARDIAN_TXT = (
     "<b>🛡 𝙂𝙪𝙖𝙧𝙙𝙞𝙖𝙣 — Media & Edit Defender</b>\n\n"
     "<b>Features Overview:</b>\n"
     "• Advanced Delayed Edited Message Deletion.\n"
-    "• Delayed Media (Video, Photo, Voice) Deletion.\n"
-    "• Configurable Deletion Timer.\n"
-    "• Permit System for Trusted Users and Channels.\n\n"
+    "• Delayed Media (Photo, Video, Voice, Audio, Doc) Deletion.\n"
+    "• Configurable Deletion Timer per chat.\n"
+    "• Permit System for trusted users.\n\n"
     "<b>Timer Commands:</b>\n"
-    "• <code>.setdelay 6m</code> — Set Deletion Delay to 6 Minutes.\n"
-    "• <code>.setdelay 2h</code> — Set Deletion Delay to 2 hours.\n"
-    "<i>(setdelay range → Can Be Set From 1min to 6 hours)</i>\n\n"
-    "<b>Permit & Info Commands:</b>\n"
-    "• <code>.permit</code> — Whitelist a user (their media/edits won't be deleted).\n"
-    "• <code>.permitlist</code> — View Permitted Users.\n"
-    "• <code>.unpermitchannel</code> — Remove a Channel from the Permit List.\n"
-    "• <code>.pchannels</code> — View Permitted Channels.\n"
-    "• <code>.Arise</code> — Set A Paragraph Limit To Avoid unnecessary Strike.\n"
-    "• <code>.id</code> — To Get Ids Of User And Channel.\n"
-    "• <code>.info</code> — To get Complete information About A User Or A Channel."
+    "• <code>.setdelay 5m</code> — set deletion delay to 5 minutes.\n"
+    "• <code>.setdelay 6h</code> — set deletion delay to 6 hours.\n"
+    "<i>(setdelay range → 1 minute to 6 hours)</i>\n\n"
+    "<b>Permit Commands:</b>\n"
+    "• <code>.permit</code> (reply) — whitelist a user (their edits/media won't be deleted).\n"
+    "• <code>.unpermit</code> (reply) — remove a user from the permit list.\n"
+    "• <code>.permitlist</code> — view permitted users.\n"
+    "• <code>.guard on</code> / <code>.guard off</code> — enable/disable Guardian."
 )
 
 PAGES = {
@@ -100,21 +98,14 @@ def add_me_url(username: str) -> str:
 def home_page(user, ctx):
     me = ctx.application.bot_data["me"]
     text = T(START_TXT, m=mention(user))
-    
-    # Row 1: Command (Primary - Blue)
     rows = [
         [B("📜 𝘾𝙤𝙢𝙢𝙖𝙣𝙙", "help:main", style="primary")],
     ]
-    
-    # Row 2: Owner + Channel (Dono Danger - Red)
     row2 = [B("👑 𝙊𝙬𝙣𝙚𝙧", url=SUPPORT_URL, style="danger")]
     if CHANNEL_URL:
         row2.append(B("🔔 𝘾𝙝𝙖𝙣𝙣𝙚𝙡", url=CHANNEL_URL, style="danger"))
     rows.append(row2)
-    
-    # Row 3: Add Me (Success - Green)
     rows.append([B("➕ 𝘼𝙙𝙙 𝙈𝙚", url=add_me_url(me.username), style="success")])
-    
     return text, InlineKeyboardMarkup(rows)
 
 
@@ -125,7 +116,6 @@ def main_page():
     for i in range(0, len(keys), 2):
         row = []
         for j, k in enumerate(keys[i:i + 2]):
-            # Sirf Guardian button ko red (danger) color assign karna
             btn_style = "danger" if k == "guardian" else colors[(i + j) % len(colors)]
             row.append(B(PAGES[k][0], f"help:{k}", style=btn_style))
         rows.append(row)
@@ -182,7 +172,6 @@ async def start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """/help [section] — jumps straight to that section instead of the main menu."""
     msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
     arg = (ctx.args[0].lower() if ctx.args else "")
     key = ALIASES.get(arg)
@@ -246,20 +235,18 @@ async def post_init(app: Application):
     await dbase.init(MONGO_URI, DB_NAME)
     app.bot_data["me"] = await app.bot.get_me()
     cmds = [("start", "Start the bot"), ("help", "Show commands")]
-    for mod in (welcome, admin, afk, ban, sticker, fun, bot_filters, ping):
+    for mod in (welcome, admin, afk, ban, sticker, fun, bot_filters, ping, guardian):
         cmds += mod.COMMANDS
     await app.bot.set_my_commands(cmds)
     log.info("Started as @%s", app.bot_data["me"].username)
 
 
 def main():
-    # ✅ FIX: Python 3.11 ke liye fresh event loop set karo
     try:
         asyncio.get_event_loop()
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
 
-    # ✅ aiofastnet install karo (uvloop ki jagah, crash nahi karega)
     try:
         aiofastnet.install_policy()
         log.info("aiofastnet installed — faster HTTPS connections 🚀")
@@ -288,6 +275,7 @@ def main():
     fun.register(app)
     bot_filters.register(app)
     ping.register(app)
+    guardian.register(app)
 
     app.add_error_handler(on_error)
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
@@ -295,4 +283,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
