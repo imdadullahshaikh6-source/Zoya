@@ -30,7 +30,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 MONGO_URI = os.environ["MONGO_URI"]
 DB_NAME = os.getenv("DB_NAME", "zoya_bot")
 OWNER_USERNAME = "Ownerbackk"
-SUPPORT_URL = "https://t.me/Ownerbackk"  # <-- Yahan direct tumhara ID set kar diya
+SUPPORT_URL = "https://t.me/Ownerbackk"
 CHANNEL_URL = os.getenv("CHANNEL_URL", "")
 START_IMG = os.getenv("START_IMG", "https://graph.org/file/d3a2c17942e606f4ec811-9c0373fa8bb10f4448.jpg")
 
@@ -76,12 +76,21 @@ def add_me_url(username: str) -> str:
 def home_page(user, ctx):
     me = ctx.application.bot_data["me"]
     text = T(START_TXT, m=mention(user))
+    
+    # Row 1: Command
     rows = [
         [B("📜 𝘾𝙤𝙢𝙢𝙖𝙣𝙙", "help:main", style="primary")],
-        [B("👑 𝙊𝙬𝙣𝙚𝙧", url=SUPPORT_URL, style="primary"), B("➕ 𝘼𝙙𝙙 𝙈𝙚", url=add_me_url(me.username), style="success")],
     ]
+    
+    # Row 2: Owner + Channel
+    row2 = [B("👑 𝙊𝙬𝙣𝙚𝙧", url=SUPPORT_URL, style="primary")]
     if CHANNEL_URL:
-        rows.append([B("🔔 𝘾𝙝𝙖𝙣𝙣𝙚𝙡", url=CHANNEL_URL)])
+        row2.append(B("🔔 𝘾𝙝𝙖𝙣𝙣𝙚𝙡", url=CHANNEL_URL))
+    rows.append(row2)
+    
+    # Row 3: Add Me
+    rows.append([B("➕ 𝘼𝙙𝙙 𝙈𝙚", url=add_me_url(me.username), style="success")])
+    
     return text, InlineKeyboardMarkup(rows)
 
 
@@ -260,4 +269,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-            
+    
