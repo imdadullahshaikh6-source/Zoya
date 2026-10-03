@@ -11,7 +11,6 @@ from telegram.ext import ContextTypes, MessageHandler, filters, CallbackQueryHan
 
 import database as dbase
 from common import B, T, dual_command, mention, q, say, resolve_target
-from lock import is_message_locked  # ✅ Locks compatibility
 
 log = logging.getLogger("guardian")
 
@@ -324,7 +323,6 @@ async def _delete_after(ctx, chat_id: int, message_id: int, delay: int, note_tex
         log.warning("[guardian] delete failed for msg %s: %s", message_id, e)
         return
     
-    # ✅ FIX: Agar note_text empty hai, toh note skip kar do (media ke case mein)
     if not note_text:
         return
         
@@ -339,7 +337,7 @@ async def _delete_after(ctx, chat_id: int, message_id: int, delay: int, note_tex
         log.warning("[guardian] note failed: %s", e)
 
 
-async def _should_guard(ctx, chat, user, msg) -> int:
+async def _should_guard(ctx, chat, user) -> int:
     if not chat or chat.type == ChatType.PRIVATE:
         return 0
     me = ctx.application.bot_data.get("me")
@@ -366,10 +364,7 @@ async def _should_guard(ctx, chat, user, msg) -> int:
     if not await _bot_can_guard(ctx, chat.id):
         return 0
 
-    # Locks compatibility
-    if msg is not None and is_message_locked(ctx.bot_data, chat.id, msg):
-        return 0
-
+    # ✅ FIX: Locks compatibility hataya — dono independent kaam karein
     return delay
 
 
@@ -389,15 +384,15 @@ async def _guardian_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_edit and not is_media:
         return
 
-    delay = await _should_guard(ctx, chat, user, msg)
+    delay = await _should_guard(ctx, chat, user)
     if not delay:
         return
 
-    # ✅ FIX: Sirf edited message ka note aayega, media ka nahi
+    # Sirf edited message ka note, media ka nahi
     if is_edit:
         note = f"<blockquote>🗑️ {_safe_name(user)}'s <b>edited message</b> was deleted.</blockquote>"
     else:
-        note = ""  # Media ka note nahi
+        note = ""
 
     asyncio.create_task(_delete_after(ctx, chat.id, msg.message_id, delay, note))
 
