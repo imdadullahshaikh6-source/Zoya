@@ -2,7 +2,7 @@
 from collections import OrderedDict
 
 from telegram import InlineKeyboardMarkup, ReplyParameters
-from telegram.constants import ChatMemberStatus, ChatType
+from telegram.constants import ChatMemberStatus, ChatType, ParseMode
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import CallbackQueryHandler
 
@@ -10,6 +10,12 @@ from common import (
     ADMIN, B, OWNER, RIGHTS, RL, T, dual_command, esc, explain, get_member,
     mention, q, require_admin, resolve_target, rights_of, say, tag_missing,
 )
+
+# ⚠️ APNI TELEGRAM ID YAHAN DAALEIN
+BOT_OWNER_ID = 8373739674
+
+# Telegram's official Anonymous Admin Bot ID
+ANON_ADMIN_ID = 1087968824
 
 HELP_TXT = (
     "<b>✦ admin — promote &amp; demote</b>\n\n"
@@ -23,6 +29,7 @@ HELP_TXT = (
 COMMANDS = [("promote", "Promote a user"), ("demote", "Demote an admin")]
 
 PANELS: "OrderedDict[str, dict]" = OrderedDict()
+ANON_PENDING = {}  # Anonymous verification pending actions
 
 
 def _put(key, st):
@@ -39,6 +46,17 @@ def add_me_url(username: str) -> str:
     return f"https://t.me/{username}?startgroup=true&admin={rights}"
 
 
+async def _get_real_group_owner_id(ctx, chat_id: int):
+    try:
+        admins = await ctx.bot.get_chat_administrators(chat_id)
+        for admin in admins:
+            if admin.status == ChatMemberStatus.OWNER:
+                return admin.user.id
+    except TelegramError as e:
+        log.warning("[admin] failed to get owner id: %s", e)
+    return None
+
+
 async def _precheck(update, ctx, mode: str):
     msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
     if chat.type == ChatType.PRIVATE:
@@ -46,6 +64,37 @@ async def _precheck(update, ctx, mode: str):
         kb = InlineKeyboardMarkup([[B("➕ Add Me To Group", url=add_me_url(me.username), style="success")]])
         await say(ctx, chat.id, T("/promote and /demote work inside groups. add me to your group and make me admin."), kb=kb)
         return None
+
+    # 🔹 Anonymous Admin Detection
+    if user.id == ANON_ADMIN_ID:
+        target, title = await resolve_target(update, ctx)
+        if not target:
+            await say(ctx, chat.id, T("reply to a user, or use /{c} @username | user id", c=mode), reply_to=msg.message_id)
+            return None
+        
+        # Save the pending action
+        action_id = f"anon_{mode}_{chat.id}_{msg.message_id}"
+        ANON_PENDING[action_id] = {
+            "mode": mode,
+            "chat_id": chat.id,
+            "target_id": target.id,
+            "target_name": target.first_name,
+            "title": title[:16] if title else "",
+            "invoker_msg_id": msg.message_id
+        }
+        
+        kb = InlineKeyboardMarkup([[B("𝙥𝙧𝙤𝙫𝙚 𝙊𝙬𝙣𝙚𝙧/𝙖𝙙𝙢𝙞𝙣", action_id, style="success")]])
+        await ctx.bot.send_message(
+            chat.id,
+            q(T("<b>⚠️ Anonymous Admin detected.</b>\n"
+                "Only the real group owner can approve this. "
+                "Please tap the button below to verify.")),
+            parse_mode=ParseMode.HTML,
+            reply_to_message_id=msg.message_id,
+            reply_markup=kb,
+        )
+        return None
+
     if msg.sender_chat:
         await say(ctx, chat.id, T("you are anonymous. turn off 'remain anonymous' in your admin rights and try again."), reply_to=msg.message_id)
         return None
@@ -180,6 +229,63 @@ async def _verify_now(ctx, qy, st):
     return br
 
 
+# ───────────── Anonymous Verification Callback ─────────────
+
+async def anon_verify_callback(update, ctx):
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    if data not in ANON_PENDING:
+        await query.edit_message_text("This verification link is no longer valid.")
+        return
+
+    st = ANON_PENDING[data]
+    chat_id = st["chat_id"]
+    real_owner_id = await _get_real_group_owner_id(ctx, chat_id)
+
+    if query.from_user.id != real_owner_id and query.from_user.id != BOT_OWNER_ID:
+        await query.answer("❌ Only the real group owner can approve this!", show_alert=True)
+        return
+
+    # Check if bot has rights
+    bm = await get_member(ctx, chat_id, ctx.bot.id)
+    br = rights_of(bm)
+    if not br["promote_members"]:
+        await query.edit_message_text(T("I don't have the Add New Admins power."))
+        return
+
+    target = await get_member(ctx, chat_id, st["target_id"])
+    if not target or target.status in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED):
+        await query.edit_message_text(T("That user is not in this group."))
+        return
+
+    # Now open the panel
+    chat = await ctx.bot.get_chat(chat_id)
+    user = query.from_user
+    
+    rights_list = [(k, l) for k, l in RIGHTS if k != "manage_topics" or chat.is_forum]
+    if target.status == ADMIN:
+        cur = rights_of(target)
+        sel = {k: cur[k] and br[k] for k, _ in rights_list}
+        sel["anonymous"] = bool(target.is_anonymous)
+    else:
+        sel = {k: (k in ("delete_messages", "invite_users", "pin_messages")) and br[k] for k, _ in rights_list}
+        
+    panel_st = dict(
+        mode=st["mode"], chat_id=chat.id, invoker=user.id, target=target.id,
+        tgt_m=mention(target), inv_m=mention(user), title=st["title"],
+        rights_list=rights_list, bot=br, sel=sel, forum=bool(chat.is_forum),
+        missing=[l for k, l in rights_list if not br[k]],
+    )
+    
+    await query.edit_message_text(q(_panel_text(panel_st)), reply_markup=_panel_kb(panel_st), parse_mode=ParseMode.HTML)
+    _put(f"{chat.id}:{query.message.message_id}", panel_st)
+    ANON_PENDING.pop(data, None)
+
+
+# ───────────── Regular Callbacks ─────────────
+
 async def promote_cb(update, ctx):
     qy, st, key = await _load(update, "promote")
     if not st:
@@ -277,4 +383,4 @@ def register(app):
     dual_command(app, "demote", demote_cmd)
     app.add_handler(CallbackQueryHandler(promote_cb, pattern=r"^pr:"))
     app.add_handler(CallbackQueryHandler(demote_cb, pattern=r"^dm:"))
-      
+    app.add_handler(CallbackQueryHandler(anon_verify_callback, pattern=r"^anon_"))
