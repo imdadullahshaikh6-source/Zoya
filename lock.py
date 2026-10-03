@@ -58,8 +58,8 @@ def get_locktypes_kb():
     for lt in LOCKTYPES:
         # Capitalize display with Sans-Serif Bold font
         display_name = "".join([chr(ord(c) - 97 + 0x1D68A) if 'a' <= c <= 'z' else c for c in lt])
-        # ✅ FIX: InlineKeyboardButton ki jagah B() use kiya (jo style support karta hai)
-        row.append(B(display_name, callback_data=f"lockinfo:{lt}", style="primary"))
+        # ✅ FIX: B() uses positional args (text, callback_data, style)
+        row.append(B(display_name, f"lockinfo:{lt}", style="primary"))
         if len(row) == 3:
             buttons.append(row)
             row = []
@@ -160,7 +160,6 @@ async def _locks_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not active:
         return
 
-    # Admin Bypass
     try:
         member = await ctx.bot.get_chat_member(chat.id, user.id)
         if member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
@@ -168,7 +167,6 @@ async def _locks_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except TelegramError:
         pass
 
-    # Bot Permission Check
     me = ctx.bot_data.get("me")
     if me:
         try:
