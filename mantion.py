@@ -1,5 +1,5 @@
 """Mention plugin:
-@admin / @admins — tags all admins in the group.
+@admin / @admins — tags all admins in the group (invisible mentions).
 /admins / /adminlist — shows the list of admins.
 """
 import html
@@ -7,32 +7,35 @@ import re
 
 from telegram import Update
 from telegram.constants import ChatMemberStatus, ChatType
-from telegram.error import TelegramError  # ✅ FIX: ChatAdminRequired hata kar TelegramError kar diya
+from telegram.error import TelegramError
 from telegram.ext import ContextTypes, MessageHandler, filters
 
 from common import T, dual_command, say
 
 ANON_ADMIN_ID = 1087968824
 
+# Invisible character (Word Joiner) for silent mentions
+INVISIBLE = "\u2060"
+
 
 async def get_admin_info(ctx, chat_id: int):
     try:
         admins = await ctx.bot.get_chat_administrators(chat_id)
-    except TelegramError:  # ✅ FIX: Yahan bhi TelegramError catch kar liya
+    except TelegramError:
         return None, None, "I need to be an admin to see the admin list!"
 
     admin_list = []
-    admin_tags = []
+    admin_mentions = []  # list of (user_id, tag) for invisible tagging
     
     for admin in admins:
-        if admin.user.id == ANON_ADMIN_ID:
-            continue  # Skip anonymous admin dummy user
+        if admin.user.id == ANON_ADMIN_ID or admin.user.is_bot:
+            continue  # Skip anonymous admin dummy user and bots
             
         name = admin.user.first_name or "Admin"
         if admin.user.last_name:
             name += f" {admin.user.last_name}"
         
-        # Tag logic: @username if exists, otherwise HTML link
+        # Visible tag for /adminlist
         if admin.user.username:
             tag = f"@{admin.user.username}"
         else:
@@ -46,16 +49,16 @@ async def get_admin_info(ctx, chat_id: int):
         else:
             title = ""
         
-        # Format exactly like Rose: Tag (Title)
+        # Format for /adminlist
         if title:
             entry = f"- {tag} ({title})"
         else:
             entry = f"- {tag}"
             
         admin_list.append(entry)
-        admin_tags.append(tag)
+        admin_mentions.append(admin.user.id)
         
-    return admin_list, admin_tags, None
+    return admin_list, admin_mentions, None
 
 
 async def admins_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -90,16 +93,18 @@ async def admin_mention_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not re.search(r'(?i)@admins?\b', text):
         return
         
-    _, admin_tags, error = await get_admin_info(ctx, chat.id)
-    if error or not admin_tags:
+    _, admin_mentions, error = await get_admin_info(ctx, chat.id)
+    if error or not admin_mentions:
         return
         
-    # Tag max 5 admins to avoid Telegram spam detection
-    chunk = admin_tags[:5]
+    # Telegram limits mentions to 5 per message to avoid spam flags
+    chunk = admin_mentions[:5]
     
-    # Bold font wala header
-    header = "👑 𝙰𝚍𝚖𝚒𝚗𝚜:"
-    reply_text = header + "\n" + " ".join(chunk)
+    # ✅ FIX: Create invisible mentions
+    hidden_mentions = " ".join([f"<a href='tg://user?id={uid}'>{INVISIBLE}</a>" for uid in chunk])
+    
+    # Sirf yeh text dikhega, mentions chhupe rahenge
+    reply_text = "𝙍𝙚𝙥𝙤𝙧𝙩𝙚𝙙 𝙖𝙙𝙢𝙞𝙣𝙨\n" + hidden_mentions
     
     await say(ctx, chat.id, T(reply_text), reply_to=msg.message_id)
 
