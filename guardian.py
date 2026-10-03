@@ -6,9 +6,9 @@ Only admins with delete permissions (or the group owner) can configure it.
 Commands:
   .setdelay <1m..6h>   — set deletion delay for this chat
   .guard on|off        — enable/disable guardian in this chat
-  .permit   (reply)    — whitelist a user (owner only)
-  .unpermit (reply)    — remove a user from the whitelist (owner only)
-  .permitlist          — show whitelisted users (owner only)
+  .permit   (reply | <id> | @username)    — whitelist a user
+  .unpermit (reply | <id> | @username)    — remove a user from the whitelist
+  .permitlist          — show whitelisted users
 
 NOTE: Once enabled, ALL users' edited messages and media get deleted after the
 delay — including admins and the group owner. Only the bot's own messages and
@@ -34,7 +34,7 @@ log = logging.getLogger("guardian")
 # ⚠️ APNI TELEGRAM ID YAHAN DAALEIN (numeric ID, e.g. 123456789)
 # Ye ID group owner ke barabar power rakhegi — permit/unpermit/permitlist
 # kar sakti hai kisi bhi group mein, chahe group owner na ho.
-BOT_OWNER_ID = 8751364561 # <-- yahan apna ID daalein
+BOT_OWNER_ID = 123456789  # <-- yahan apna ID daalein
 
 HELP_TXT = (
     "<b>🛡 𝙂𝙪𝙖𝙧𝙙𝙞𝙖𝙣 — Media & Edit Defender</b>\n\n"
@@ -48,8 +48,8 @@ HELP_TXT = (
     "• <code>.setdelay 6h</code> — set deletion delay to 6 hours.\n"
     "<i>(setdelay range → 1 minute to 6 hours)</i>\n\n"
     "<b>Permit Commands (owner only):</b>\n"
-    "• <code>.permit</code> (reply) — whitelist a user (their edits/media won't be deleted).\n"
-    "• <code>.unpermit</code> (reply) — remove a user from the permit list.\n"
+    "• <code>.permit</code> (reply, or ID, or @username) — whitelist a user.\n"
+    "• <code>.unpermit</code> (reply, or ID, or @username) — remove a user.\n"
     "• <code>.permitlist</code> — view permitted users.\n"
     "• <code>.guard on</code> / <code>.guard off</code> — enable/disable Guardian."
 )
@@ -86,7 +86,6 @@ def _safe_mention(user) -> str:
 
 async def _is_owner(ctx, chat_id: int, user_id: int) -> bool:
     """True if the user is the group owner OR the bot owner (hardcoded)."""
-    # ✅ Bot owner (personal ID) — full power everywhere
     if user_id == BOT_OWNER_ID:
         return True
     try:
@@ -179,13 +178,36 @@ async def permit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _is_owner(ctx, chat.id, user.id):
         await say(ctx, chat.id, T("<blockquote>⚠️ only the <b>group owner</b> or <b>bot owner</b> can use this.</blockquote>"), reply_to=msg.message_id)
         return
-    target = msg.reply_to_message.from_user if msg.reply_to_message else None
-    if not target:
-        await say(ctx, chat.id, T("<blockquote>reply to a user's message with <code>.permit</code>.</blockquote>"), reply_to=msg.message_id)
+    
+    target_id = None
+    target_name = None
+    
+    if msg.reply_to_message and msg.reply_to_message.from_user:
+        target_id = msg.reply_to_message.from_user.id
+        target_name = html.escape(msg.reply_to_message.from_user.first_name or "User")
+    elif ctx.args:
+        arg = ctx.args[0].strip()
+        if arg.isdigit():
+            target_id = int(arg)
+            target_name = f"User {target_id}"
+        elif arg.startswith('@'):
+            target_name = html.escape(arg)
+            target_id = 0  # Placeholder for username-only permits
+        else:
+            await say(ctx, chat.id, T("<blockquote>❌ Invalid format. Reply to a message, or use ID / @username.</blockquote>"), reply_to=msg.message_id)
+            return
+    else:
+        await say(ctx, chat.id, T("<blockquote>usage: reply to a message, or <code>.permit 12345678</code> / <code>.permit @username</code></blockquote>"), reply_to=msg.message_id)
         return
-    safe_name = html.escape(target.first_name or "User")
-    await dbase.guardian_permit_add(chat.id, target.id, safe_name)
-    await say(ctx, chat.id, T(f"<blockquote>✅ {_safe_mention(target)} is now <b>permitted</b> — their edits/media won't be deleted.</blockquote>"), reply_to=msg.message_id)
+
+    await dbase.guardian_permit_add(chat.id, target_id, target_name)
+    
+    if target_id and target_id != 0:
+        mention_txt = f"<a href='tg://user?id={target_id}'>{target_name}</a>"
+    else:
+        mention_txt = target_name
+        
+    await say(ctx, chat.id, T(f"<blockquote>✅ {mention_txt} is now <b>permitted</b> — their edits/media won't be deleted.</blockquote>"), reply_to=msg.message_id)
 
 
 async def unpermit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -195,15 +217,42 @@ async def unpermit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _is_owner(ctx, chat.id, user.id):
         await say(ctx, chat.id, T("<blockquote>⚠️ only the <b>group owner</b> or <b>bot owner</b> can use this.</blockquote>"), reply_to=msg.message_id)
         return
-    target = msg.reply_to_message.from_user if msg.reply_to_message else None
-    if not target:
-        await say(ctx, chat.id, T("<blockquote>reply to a user's message with <code>.unpermit</code>.</blockquote>"), reply_to=msg.message_id)
-        return
-    removed = await dbase.guardian_permit_remove(chat.id, target.id)
-    if removed:
-        await say(ctx, chat.id, T(f"<blockquote>✅ {_safe_mention(target)} is no longer permitted.</blockquote>"), reply_to=msg.message_id)
+    
+    target_id = None
+    target_name = None
+    
+    if msg.reply_to_message and msg.reply_to_message.from_user:
+        target_id = msg.reply_to_message.from_user.id
+    elif ctx.args:
+        arg = ctx.args[0].strip()
+        if arg.isdigit():
+            target_id = int(arg)
+        elif arg.startswith('@'):
+            target_name = html.escape(arg)
+        else:
+            await say(ctx, chat.id, T("<blockquote>❌ Invalid format. Reply to a message, or use ID / @username.</blockquote>"), reply_to=msg.message_id)
+            return
     else:
-        await say(ctx, chat.id, T(f"<blockquote>ℹ️ {_safe_mention(target)} wasn't in the permit list.</blockquote>"), reply_to=msg.message_id)
+        await say(ctx, chat.id, T("<blockquote>usage: reply to a message, or <code>.unpermit 12345678</code> / <code>.unpermit @username</code></blockquote>"), reply_to=msg.message_id)
+        return
+
+    removed = False
+    if target_id:
+        removed = await dbase.guardian_permit_remove(chat.id, target_id)
+    elif target_name:
+        # Manual removal for username case
+        cfg = await dbase.guardian_get(chat.id) or {}
+        users = cfg.get("permitted_users", [])
+        new_users = [u for u in users if u.get("name") != target_name]
+        if len(new_users) != len(users):
+            await dbase.guardian_set(chat.id, permitted_users=new_users)
+            removed = True
+
+    if removed:
+        txt = f"<blockquote>✅ <b>{target_name or target_id}</b> is no longer permitted.</blockquote>"
+    else:
+        txt = f"<blockquote>ℹ️ <b>{target_name or target_id}</b> wasn't in the permit list.</blockquote>"
+    await say(ctx, chat.id, T(txt), reply_to=msg.message_id)
 
 
 async def permitlist_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -221,7 +270,7 @@ async def permitlist_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lines = ["<b>🛡 Permitted users:</b>"]
     for i, u in enumerate(users, 1):
         safe_name = html.escape(str(u.get('name', 'Unknown')))
-        lines.append(f"{i}. {safe_name} — <code>{u['id']}</code>")
+        lines.append(f"{i}. {safe_name} — <code>{u.get('id', 'N/A')}</code>")
     text_body = "\n".join(lines)
     await say(ctx, chat.id, T(f"<blockquote>{text_body}</blockquote>"), reply_to=msg.message_id)
 
@@ -274,10 +323,20 @@ async def _should_guard(ctx, chat, user) -> int:
     if delay < MIN_DELAY:
         log.debug("[guardian] skip: delay too small (%s)", delay)
         return 0
-    permitted = {u.get("id") for u in cfg.get("permitted_users", [])}
-    if user.id in permitted:
-        log.debug("[guardian] skip: user %s permitted", user.id)
-        return 0
+    
+    permitted = cfg.get("permitted_users", [])
+    for u in permitted:
+        # Check by ID
+        if u.get("id") and u.get("id") == user.id:
+            log.debug("[guardian] skip: user %s permitted by ID", user.id)
+            return 0
+        # Check by username
+        u_name = u.get("name", "")
+        if u_name.startswith('@') and user.username:
+            if u_name.lower() == f"@{user.username.lower()}":
+                log.debug("[guardian] skip: user %s permitted by username", user.id)
+                return 0
+
     if not await _bot_can_guard(ctx, chat.id):
         log.debug("[guardian] skip: bot lacks delete permission in %s", chat.id)
         return 0
@@ -335,4 +394,4 @@ def register(app):
     app.add_handler(
         MessageHandler(filters.ChatType.GROUPS & filters.ALL, _guardian_watcher),
         group=2,
-    )
+  )
