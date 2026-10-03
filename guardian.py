@@ -14,27 +14,43 @@ from common import B, T, dual_command, mention, say
 
 log = logging.getLogger("guardian")
 
-# ⚠️ APNI TELEGRAM ID YAHAN DAALEIN
-BOT_OWNER_ID = 123456789  
+# ⚠️ APNI TELEGRAM ID YAHAN DAALEIN (numeric, e.g. 123456789)
+BOT_OWNER_ID = 123456789  # <-- yahan apna ID daalein
 
-# Telegram's official Anonymous Admin Bot ID
+# Telegram's official Anonymous Admin Bot ID — ise change na karein
 ANON_ADMIN_ID = 1087968824
 
 HELP_TXT = (
     "<b>🛡 𝙂𝙪𝙖𝙧𝙙𝙞𝙖𝙣 — Media & Edit Defender</b>\n\n"
+    "<b>Features Overview:</b>\n"
+    "• Advanced Delayed Edited Message Deletion.\n"
+    "• Delayed Media (Photo, Video, Voice, Audio, Doc) Deletion.\n"
+    "• Configurable Deletion Timer per chat.\n"
+    "• Permit System for trusted users.\n\n"
     "<b>Timer Commands:</b>\n"
-    "• <code>.setdelay 5m</code> — set deletion delay.\n"
-    "• <code>.guard on|off</code> — enable/disable.\n\n"
+    "• <code>.setdelay 5m</code> — set deletion delay to 5 minutes.\n"
+    "• <code>.setdelay 6h</code> — set deletion delay to 6 hours.\n"
+    "<i>(setdelay range → 1 minute to 6 hours)</i>\n\n"
     "<b>Permit Commands (owner only):</b>\n"
-    "• <code>.permit</code> (reply | <id> | @username)\n"
-    "• <code>.unpermit</code> (reply | <id> | @username)\n"
-    "• <code>.permitlist</code> — view permitted users."
+    "• <code>.permit</code> (reply, or ID, or @username) — whitelist a user.\n"
+    "• <code>.unpermit</code> (reply, or ID, or @username) — remove a user.\n"
+    "• <code>.permitlist</code> — view permitted users.\n"
+    "• <code>.guard on</code> / <code>.guard off</code> — enable/disable Guardian."
 )
 
-MIN_DELAY = 60
-MAX_DELAY = 6 * 60 * 60
+# ✅ IMPORTANT: bot.py line ~253 pe `mod.COMMANDS` use hota hai. Isliye ye chahiye.
+COMMANDS = [
+    ("setdelay", "Set Guardian deletion delay"),
+    ("guard", "Enable or disable Guardian"),
+    ("permit", "Whitelist a user from Guardian"),
+    ("unpermit", "Remove a user from the permit list"),
+    ("permitlist", "Show permitted users"),
+]
+
+MIN_DELAY = 60           # 1 minute
+MAX_DELAY = 6 * 60 * 60  # 6 hours
 _DELAY_RE = re.compile(r"^(\d+)\s*([smh])$", re.IGNORECASE)
-_NOTE_LIFETIME = 5
+_NOTE_LIFETIME = 5       # seconds
 
 
 def _parse_delay(arg: str):
@@ -117,11 +133,14 @@ async def setdelay_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     delay = _parse_delay(ctx.args[0])
     if delay is None or delay < MIN_DELAY or delay > MAX_DELAY:
-        await say(ctx, chat.id, T("<blockquote>❌ invalid delay — use <code>1m</code> to <code>6h</code></blockquote>"), reply_to=msg.message_id)
+        await say(ctx, chat.id, T("<blockquote>❌ invalid delay — use <code>1m</code> to <code>6h</code> (e.g. <code>.setdelay 10m</code>)</blockquote>"), reply_to=msg.message_id)
         return
     await dbase.guardian_set(chat.id, delay_seconds=delay, enabled=True)
     mins = delay // 60
-    await say(ctx, chat.id, T(f"<blockquote>✅ Guardian active — deletion delay set to <b>{mins} min</b>.</blockquote>"), reply_to=msg.message_id)
+    await say(ctx, chat.id, T(
+        f"<blockquote>✅ Guardian active — deletion delay set to <b>{mins} min</b>.\n"
+        f"<i>everyone's edits & media will be deleted — including admins.</i></blockquote>"
+    ), reply_to=msg.message_id)
 
 
 async def guard_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -136,7 +155,10 @@ async def guard_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if arg not in ("on", "off"):
         state = "🟢 ON" if cfg.get("enabled") else "🔴 OFF"
         delay = cfg.get("delay_seconds", 0)
-        await say(ctx, chat.id, T(f"<blockquote>Guardian is <b>{state}</b> — delay <b>{delay // 60} min</b>.</blockquote>"), reply_to=msg.message_id)
+        await say(ctx, chat.id, T(
+            f"<blockquote>Guardian is <b>{state}</b> — delay <b>{delay // 60} min</b>.\n"
+            f"usage: <code>.guard on</code> / <code>.guard off</code></blockquote>"
+        ), reply_to=msg.message_id)
         return
     enabled = arg == "on"
     await dbase.guardian_set(chat.id, enabled=enabled)
@@ -170,7 +192,7 @@ async def permit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
 
         btn_data = f"anonperm|{chat.id}|{target_id}|{target_name}"
-        # ✅ Yahan B() aur style="success" use kiya (Green button)
+        # ✅ Green button (style="success")
         keyboard = InlineKeyboardMarkup([[B("🟢 I am the Group Owner", btn_data, style="success")]])
         await say(ctx, chat.id, T("<blockquote>⚠️ <b>Anonymous Admin detected.</b>\nOnly the real group owner can approve permits. Please tap the button below to verify.</blockquote>"), reply_to=msg.message_id, reply_markup=keyboard)
         return
@@ -178,7 +200,7 @@ async def permit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _is_owner(ctx, chat.id, user.id):
         await say(ctx, chat.id, T("<blockquote>⚠️ only the <b>group owner</b> or <b>bot owner</b> can use this.</blockquote>"), reply_to=msg.message_id)
         return
-    
+
     target_id, target_name = None, None
     if msg.reply_to_message and msg.reply_to_message.from_user:
         target_id = msg.reply_to_message.from_user.id
@@ -200,7 +222,7 @@ async def permit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await dbase.guardian_permit_add(chat.id, target_id, target_name)
     mention_txt = f"<a href='tg://user?id={target_id}'>{target_name}</a>" if target_id and target_id != 0 else target_name
-    await say(ctx, chat.id, T(f"<blockquote>✅ {mention_txt} is now <b>permitted</b>.</blockquote>"), reply_to=msg.message_id)
+    await say(ctx, chat.id, T(f"<blockquote>✅ {mention_txt} is now <b>permitted</b> — their edits/media won't be deleted.</blockquote>"), reply_to=msg.message_id)
 
 
 async def unpermit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -227,7 +249,6 @@ async def unpermit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
 
         btn_data = f"anonunperm|{chat.id}|{target_id or 0}|{target_name or ''}"
-        # ✅ Yahan bhi B() aur style="success" use kiya
         keyboard = InlineKeyboardMarkup([[B("🟢 I am the Group Owner", btn_data, style="success")]])
         await say(ctx, chat.id, T("<blockquote>⚠️ <b>Anonymous Admin detected.</b>\nOnly the real group owner can approve. Tap to verify.</blockquote>"), reply_to=msg.message_id, reply_markup=keyboard)
         return
@@ -235,7 +256,7 @@ async def unpermit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _is_owner(ctx, chat.id, user.id):
         await say(ctx, chat.id, T("<blockquote>⚠️ only the <b>group owner</b> or <b>bot owner</b> can use this.</blockquote>"), reply_to=msg.message_id)
         return
-    
+
     target_id, target_name = None, None
     if msg.reply_to_message and msg.reply_to_message.from_user:
         target_id = msg.reply_to_message.from_user.id
@@ -263,7 +284,7 @@ async def unpermit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await dbase.guardian_set(chat.id, permitted_users=new_users)
             removed = True
 
-    txt = f"<blockquote>✅ <b>{target_name or target_id}</b> is no longer permitted.</blockquote>" if removed else f"<blockquote>ℹ️ <b>{target_name or target_id}</b> wasn't in the list.</blockquote>"
+    txt = f"<blockquote>✅ <b>{target_name or target_id}</b> is no longer permitted.</blockquote>" if removed else f"<blockquote>ℹ️ <b>{target_name or target_id}</b> wasn't in the permit list.</blockquote>"
     await say(ctx, chat.id, T(txt), reply_to=msg.message_id)
 
 
@@ -275,7 +296,6 @@ async def permitlist_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # 🔹 Anonymous Admin Detection
     if user.id == ANON_ADMIN_ID:
         btn_data = f"anonlist|{chat.id}"
-        # ✅ Yahan bhi B() aur style="success" use kiya
         keyboard = InlineKeyboardMarkup([[B("🟢 I am the Group Owner", btn_data, style="success")]])
         await say(ctx, chat.id, T("<blockquote>⚠️ <b>Anonymous Admin detected.</b>\nOnly the real group owner can view the permit list. Tap to verify.</blockquote>"), reply_to=msg.message_id, reply_markup=keyboard)
         return
@@ -283,11 +303,13 @@ async def permitlist_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _is_owner(ctx, chat.id, user.id):
         await say(ctx, chat.id, T("<blockquote>⚠️ only the <b>group owner</b> or <b>bot owner</b> can use this.</blockquote>"), reply_to=msg.message_id)
         return
+
     cfg = await dbase.guardian_get(chat.id) or {}
     users = cfg.get("permitted_users", [])
     if not users:
         await say(ctx, chat.id, T("<blockquote>no permitted users in this chat.</blockquote>"), reply_to=msg.message_id)
         return
+
     lines = ["<b>🛡 Permitted users:</b>"]
     for i, u in enumerate(users, 1):
         safe_name = html.escape(str(u.get('name', 'Unknown')))
@@ -296,16 +318,18 @@ async def permitlist_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await say(ctx, chat.id, T(f"<blockquote>{text_body}</blockquote>"), reply_to=msg.message_id)
 
 
-# ───────────── callback ─────────────
+# ───────────── anonymous callback handler ─────────────
 
 async def anon_verify_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+
     data = query.data.split("|")
     action = data[0]
     chat_id = int(data[1])
+
     real_owner_id = await _get_real_group_owner_id(ctx, chat_id)
-    
+
     if query.from_user.id != real_owner_id and query.from_user.id != BOT_OWNER_ID:
         await query.answer("❌ Only the real group owner can approve this!", show_alert=True)
         return
@@ -316,7 +340,7 @@ async def anon_verify_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await dbase.guardian_permit_add(chat_id, target_id, target_name)
         mention_txt = f"<a href='tg://user?id={target_id}'>{target_name}</a>" if target_id and target_id != 0 else target_name
         await query.edit_message_text(T(f"<blockquote>✅ Approved by owner. {mention_txt} is now <b>permitted</b>.</blockquote>"), parse_mode=ParseMode.HTML)
-        
+
     elif action == "anonunperm":
         target_id = int(data[2]) if data[2] != "0" else None
         target_name = data[3] if data[3] else None
@@ -332,7 +356,7 @@ async def anon_verify_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 removed = True
         txt = f"<blockquote>✅ Approved by owner. <b>{target_name or target_id}</b> is no longer permitted.</blockquote>" if removed else f"<blockquote>ℹ️ Approved by owner. <b>{target_name or target_id}</b> wasn't in the list.</blockquote>"
         await query.edit_message_text(T(txt), parse_mode=ParseMode.HTML)
-        
+
     elif action == "anonlist":
         cfg = await dbase.guardian_get(chat_id) or {}
         users = cfg.get("permitted_users", [])
@@ -350,15 +374,20 @@ async def anon_verify_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ───────────── watcher ─────────────
 
 def _msg_has_media(msg) -> bool:
-    return bool(msg.photo or msg.video or msg.video_note or msg.voice or msg.audio or msg.document or msg.animation or msg.sticker)
+    return bool(
+        msg.photo or msg.video or msg.video_note
+        or msg.voice or msg.audio or msg.document
+        or msg.animation or msg.sticker
+    )
 
 
 async def _delete_after(ctx, chat_id: int, message_id: int, delay: int, note_text: str):
     await asyncio.sleep(delay)
     try:
         await ctx.bot.delete_message(chat_id, message_id)
+        log.info("[guardian] deleted msg %s in chat %s", message_id, chat_id)
     except TelegramError as e:
-        log.warning("[guardian] delete failed: %s", e)
+        log.warning("[guardian] delete failed for msg %s: %s", message_id, e)
         return
     try:
         note = await ctx.bot.send_message(chat_id, note_text, parse_mode=ParseMode.HTML)
@@ -385,31 +414,48 @@ async def _should_guard(ctx, chat, user) -> int:
     delay = int(cfg.get("delay_seconds") or 0)
     if delay < MIN_DELAY:
         return 0
+
     permitted = cfg.get("permitted_users", [])
     for u in permitted:
         if u.get("id") and u.get("id") == user.id:
             return 0
         u_name = u.get("name", "")
-        if u_name.startswith('@') and user.username and u_name.lower() == f"@{user.username.lower()}":
-            return 0
+        if u_name.startswith('@') and user.username:
+            if u_name.lower() == f"@{user.username.lower()}":
+                return 0
+
     if not await _bot_can_guard(ctx, chat.id):
         return 0
     return delay
 
 
 async def _guardian_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
-    if not msg or not chat or not user or chat.type == ChatType.PRIVATE or user.is_bot:
+    msg = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not msg or not chat or not user:
         return
+    if chat.type == ChatType.PRIVATE:
+        return
+    if user.is_bot:
+        return
+
     is_edit = bool(msg.edit_date)
     is_media = _msg_has_media(msg)
+
     if not is_edit and not is_media:
         return
+
     delay = await _should_guard(ctx, chat, user)
     if not delay:
         return
-    body = f"🗑️ {_safe_mention(user)}'s <b>edited message</b> was deleted." if is_edit else f"🗑️ {_safe_mention(user)}'s <b>media</b> was deleted."
+
+    if is_edit:
+        body = f"🗑️ {_safe_mention(user)}'s <b>edited message</b> was deleted."
+    else:
+        body = f"🗑️ {_safe_mention(user)}'s <b>media</b> was deleted."
     note = f"<blockquote>{body}</blockquote>"
+
     asyncio.create_task(_delete_after(ctx, chat.id, msg.message_id, delay, note))
 
 
@@ -421,5 +467,6 @@ def register(app):
     dual_command(app, "permit", permit_cmd)
     dual_command(app, "unpermit", unpermit_cmd)
     dual_command(app, "permitlist", permitlist_cmd)
-    app.add_handler(CallbackQueryHandler(anon_verify_callback, pattern=r"^anon"))
-    app.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.ALL, _guardian_watcher), group=2)
+
+    # ✅ FIXED pattern — sirf anonperm/anunperm/anonlist match karega,
+    # ban.py ke "anonmod:" se c
