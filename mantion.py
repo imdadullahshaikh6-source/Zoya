@@ -25,7 +25,7 @@ async def get_admin_info(ctx, chat_id: int):
         return None, None, "I need to be an admin to see the admin list!"
 
     admin_list = []
-    admin_mentions = []  # list of (user_id, tag) for invisible tagging
+    admin_mentions = []  # list of user_ids for invisible tagging
     
     for admin in admins:
         if admin.user.id == ANON_ADMIN_ID or admin.user.is_bot:
@@ -75,8 +75,8 @@ async def admins_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await say(ctx, chat.id, T("No admins found."), reply_to=msg.message_id)
         return
         
-    # Bold header with emoji
-    header = f"👑 𝙰𝚍𝚖𝚒𝚗𝚜 𝚒𝚗 {html.escape(chat.title)}:"
+    # ✅ FIX: Yahan font change kar diya gaya hai
+    header = f"👑 𝘼𝙙𝙢𝙞𝙣𝙨 𝙞𝙣 {html.escape(chat.title)}:"
     text = header + "\n" + "\n".join(admin_list)
     
     await say(ctx, chat.id, T(text), reply_to=msg.message_id)
@@ -100,10 +100,9 @@ async def admin_mention_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Telegram limits mentions to 5 per message to avoid spam flags
     chunk = admin_mentions[:5]
     
-    # ✅ FIX: Create invisible mentions
+    # Invisible mentions
     hidden_mentions = " ".join([f"<a href='tg://user?id={uid}'>{INVISIBLE}</a>" for uid in chunk])
     
-    # Sirf yeh text dikhega, mentions chhupe rahenge
     reply_text = "𝙍𝙚𝙥𝙤𝙧𝙩𝙚𝙙 𝙖𝙙𝙢𝙞𝙣𝙨\n" + hidden_mentions
     
     await say(ctx, chat.id, T(reply_text), reply_to=msg.message_id)
