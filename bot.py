@@ -24,7 +24,7 @@ import database as dbase
 import filters as bot_filters
 import fun
 import guardian
-import lock  # ✅ FIX: 'locks' ki jagah 'lock' (kyunki file ka naam lock.py hai)
+import lock
 import pin
 import ping
 import sticker
@@ -240,7 +240,7 @@ async def help_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         text, kb = main_page()
     elif page == "locktypes":
         text = sc("<b>The available locktypes are:</b>")
-        kb = lock.get_locktypes_kb()  # ✅ 'lock' module use kiya
+        kb = lock.get_locktypes_kb()
     elif page in PAGES:
         text, kb = section_page(page)
     else:
@@ -274,7 +274,6 @@ async def post_init(app: Application):
     await dbase.init(MONGO_URI, DB_NAME)
     app.bot_data["me"] = await app.bot.get_me()
     cmds = [("start", "Start the bot"), ("help", "Show commands")]
-    # ✅ 'locks' ki jagah 'lock' add kiya
     for mod in (welcome, admin, afk, ban, sticker, fun, bot_filters, ping,
                 guardian, cleancommand, pin, lock):
         cmds += mod.COMMANDS
@@ -320,7 +319,7 @@ def main():
     cleancommand.register(app)
     pin.register(app)
     mantion.register(app)
-    lock.register(app)  # ✅ 'lock' module register kiya
+    lock.register(app)
 
     app.add_error_handler(on_error)
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
