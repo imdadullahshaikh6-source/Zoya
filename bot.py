@@ -89,6 +89,7 @@ LOCKS_TXT = (
 
 UTILITY_TXT = cleancommand.HELP_TXT + "\n\n" + pin.HELP_TXT
 
+# ✅ FIX: utility aur locks ki position swap kar di
 PAGES = {
     "greet": ("🎉 𝙂𝙧𝙚𝙚𝙩𝙞𝙣𝙜𝙨", welcome.HELP_TXT),
     "admin": ("👮 𝘼𝙙𝙢𝙞𝙣", admin.HELP_TXT),
@@ -97,8 +98,8 @@ PAGES = {
     "extra": ("🎁 𝙀𝙭𝙩𝙧𝙖", sticker.HELP_TXT + "\n\n" + fun.HELP_TXT),
     "filters": ("🔍 𝙁𝙞𝙡𝙩𝙚𝙧𝙨", bot_filters.HELP_TXT),
     "guardian": ("🛡 𝙂𝙪𝙖𝙧𝙙𝙞𝙖𝙣", GUARDIAN_TXT),
-    "locks": ("🔒 𝙇𝙤𝙘𝙠𝙨", LOCKS_TXT),
-    "utility": ("🧰 𝙐𝙩𝙞𝙡𝙞𝙩𝙮", UTILITY_TXT),
+    "utility": ("🧰 𝙐𝙩𝙞𝙡𝙞𝙩𝙮", UTILITY_TXT),  # Ab yahan Utility aayega
+    "locks": ("🔒 𝙇𝙤𝙘𝙠𝙨", LOCKS_TXT),      # Ab yahan Locks aayega (sabse neeche)
 }
 
 ALIASES = {
@@ -145,6 +146,7 @@ def main_page():
     for i in range(0, len(keys), 2):
         row = []
         for j, k in enumerate(keys[i:i + 2]):
+            # Agar 'locks' hai toh red, warna alternate green/blue
             if k == "locks":
                 btn_style = "danger"
             else:
