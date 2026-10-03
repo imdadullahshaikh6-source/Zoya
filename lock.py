@@ -38,7 +38,7 @@ LOCK_DESC = {
     "emojicustom": "Premium custom emojis.",
     "forward": "Forwarded messages.",
     "gif": "GIFs/Animations.",
-    "invitelink": "Private/public invite links to groups/channels.",
+    "invitelink": "Messages containing private and public links (or usernames) to telegram groups or channels. Can be allowlisted.",
     "url": "URLs/Links (except group's own links).",
     "location": "Locations.",
     "phone": "Phone numbers.",
@@ -58,7 +58,6 @@ def get_locktypes_kb():
     for lt in LOCKTYPES:
         # Capitalize display with Sans-Serif Bold font
         display_name = "".join([chr(ord(c) - 97 + 0x1D68A) if 'a' <= c <= 'z' else c for c in lt])
-        # ✅ FIX: B() uses positional args (text, callback_data, style)
         row.append(B(display_name, f"lockinfo:{lt}", style="primary"))
         if len(row) == 3:
             buttons.append(row)
@@ -146,10 +145,14 @@ async def locktypes_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def lock_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     qy = update.callback_query
-    await qy.answer()
     data = qy.data.split(":")[1]
     desc = LOCK_DESC.get(data, "No description available.")
-    await qy.answer(f"{data}:\n\n{desc}", show_alert=True)
+    
+    # ✅ FIX: Title ko Math Bold font mein convert kiya
+    bold_title = "".join([chr(ord(c) - 97 + 0x1D68A) if 'a' <= c <= 'z' else c for c in data])
+    
+    # ✅ FIX: `await qy.answer()` ko hata diya (double answer ki galti thi)
+    await qy.answer(f"{bold_title}:\n\n{desc}", show_alert=True)
 
 async def _locks_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
