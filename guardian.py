@@ -31,6 +31,11 @@ from common import T, dual_command, mention, say
 
 log = logging.getLogger("guardian")
 
+# ⚠️ APNI TELEGRAM ID YAHAN DAALEIN (numeric ID, e.g. 123456789)
+# Ye ID group owner ke barabar power rakhegi — permit/unpermit/permitlist
+# kar sakti hai kisi bhi group mein, chahe group owner na ho.
+BOT_OWNER_ID = 8751364561 # <-- yahan apna ID daalein
+
 HELP_TXT = (
     "<b>🛡 𝙂𝙪𝙖𝙧𝙙𝙞𝙖𝙣 — Media & Edit Defender</b>\n\n"
     "<b>Features Overview:</b>\n"
@@ -80,7 +85,10 @@ def _safe_mention(user) -> str:
 
 
 async def _is_owner(ctx, chat_id: int, user_id: int) -> bool:
-    """True only if the user is the group owner (creator)."""
+    """True if the user is the group owner OR the bot owner (hardcoded)."""
+    # ✅ Bot owner (personal ID) — full power everywhere
+    if user_id == BOT_OWNER_ID:
+        return True
     try:
         m = await ctx.bot.get_chat_member(chat_id, user_id)
     except TelegramError:
@@ -90,6 +98,8 @@ async def _is_owner(ctx, chat_id: int, user_id: int) -> bool:
 
 async def _is_full_admin(ctx, chat_id: int, user_id: int) -> bool:
     """True if the user is the owner OR an admin who can delete messages."""
+    if user_id == BOT_OWNER_ID:
+        return True
     try:
         m = await ctx.bot.get_chat_member(chat_id, user_id)
     except TelegramError:
@@ -167,7 +177,7 @@ async def permit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if chat.type == ChatType.PRIVATE:
         return
     if not await _is_owner(ctx, chat.id, user.id):
-        await say(ctx, chat.id, T("<blockquote>⚠️ only the <b>group owner</b> can use this.</blockquote>"), reply_to=msg.message_id)
+        await say(ctx, chat.id, T("<blockquote>⚠️ only the <b>group owner</b> or <b>bot owner</b> can use this.</blockquote>"), reply_to=msg.message_id)
         return
     target = msg.reply_to_message.from_user if msg.reply_to_message else None
     if not target:
@@ -183,7 +193,7 @@ async def unpermit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if chat.type == ChatType.PRIVATE:
         return
     if not await _is_owner(ctx, chat.id, user.id):
-        await say(ctx, chat.id, T("<blockquote>⚠️ only the <b>group owner</b> can use this.</blockquote>"), reply_to=msg.message_id)
+        await say(ctx, chat.id, T("<blockquote>⚠️ only the <b>group owner</b> or <b>bot owner</b> can use this.</blockquote>"), reply_to=msg.message_id)
         return
     target = msg.reply_to_message.from_user if msg.reply_to_message else None
     if not target:
@@ -201,7 +211,7 @@ async def permitlist_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if chat.type == ChatType.PRIVATE:
         return
     if not await _is_owner(ctx, chat.id, user.id):
-        await say(ctx, chat.id, T("<blockquote>⚠️ only the <b>group owner</b> can use this.</blockquote>"), reply_to=msg.message_id)
+        await say(ctx, chat.id, T("<blockquote>⚠️ only the <b>group owner</b> or <b>bot owner</b> can use this.</blockquote>"), reply_to=msg.message_id)
         return
     cfg = await dbase.guardian_get(chat.id) or {}
     users = cfg.get("permitted_users", [])
@@ -210,7 +220,6 @@ async def permitlist_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     lines = ["<b>🛡 Permitted users:</b>"]
     for i, u in enumerate(users, 1):
-        # FIX: Escape the name to prevent "Can't parse entities" error
         safe_name = html.escape(str(u.get('name', 'Unknown')))
         lines.append(f"{i}. {safe_name} — <code>{u['id']}</code>")
     text_body = "\n".join(lines)
@@ -304,7 +313,6 @@ async def _guardian_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not delay:
         return
 
-    # ✅ Quote block formatting with Safe Mention
     if is_edit:
         body = f"🗑️ {_safe_mention(user)}'s <b>edited message</b> was deleted."
     else:
@@ -327,4 +335,4 @@ def register(app):
     app.add_handler(
         MessageHandler(filters.ChatType.GROUPS & filters.ALL, _guardian_watcher),
         group=2,
-                 )
+    )
