@@ -28,7 +28,7 @@ import pin
 import ping
 import sticker
 import welcome
-import mention  # ✅ FIX: Naya plugin import kiya
+import mantion  # ✅ FIX: Aapke file naam ke hisaab se 'mantion' kar diya
 from common import B, T, log, mention, say, sc
 
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(name)s | %(message)s", level=logging.INFO)
@@ -291,7 +291,7 @@ def main():
     guardian.register(app)
     cleancommand.register(app)
     pin.register(app)
-    mention.register(app)  # ✅ FIX: Mention plugin register kar diya
+    mantion.register(app)  # ✅ FIX: Yahan bhi 'mantion' kar diya
 
     app.add_error_handler(on_error)
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
