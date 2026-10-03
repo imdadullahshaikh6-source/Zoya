@@ -1,4 +1,6 @@
-"""Sticker plugin:
+"""Sticker plugin — quote generator (ported from original developer's quotly.py)
++ kang system with MongoDB.
+
 .q / .qr  — render the replied-to message as a Telegram-style quote sticker
 .kang     — steal a replied sticker/photo into the user's own auto-growing pack
 """
@@ -14,8 +16,6 @@ import re
 import time
 
 import httpx
-from fontTools.ttLib import TTFont
-from PIL import Image, ImageDraw, ImageFont
 from telegram import InputSticker, MessageEntity
 from telegram.error import TelegramError
 
@@ -25,11 +25,10 @@ from common import (
     QUOTE_BG, QUOTE_TIMEOUT, QUOTE_TOTAL_TIMEOUT,
 )
 
-# ✅ FIX: Aapka naya API set hai
-QUOTE_API = "https://tough-lillian-sungjinw04-79e2ecdb.koyeb.app/generate"
-QUOTE_API_FALLBACKS = ""
-
 log = logging.getLogger("sticker")
+
+# ✅ Original developer ka API (quotly.py se)
+QUOTE_API = "https://bot.lyo.su/quote/generate"
 
 HELP_TXT = (
     "<b>✦ stickers</b>\n\n"
@@ -44,19 +43,12 @@ COMMANDS = [("q", "Quote a message as a sticker"), ("kang", "Steal a sticker int
 MAX_SIDE = 512
 EMOJI_RE = re.compile(r"^[\U0001F000-\U0001FAFF\u2600-\u27BF\u2190-\u21FF\u2B00-\u2BFF]+$")
 
-_FALLBACKS = [u.strip() for u in (QUOTE_API_FALLBACKS or "").split(",") if u.strip()]
 TOTAL_TIMEOUT = QUOTE_TOTAL_TIMEOUT
-
 COOLDOWN = 8.0
-_AVATAR_TTL = 600
 
 _last_quote: dict[int, float] = {}
-_avatar_cache: dict[int, tuple[float, str | None]] = {}
 
-_KEEP_ENTITIES = {
-    "bold", "italic", "underline", "strikethrough", "spoiler",
-    "code", "pre", "blockquote", "text_link", "text_mention",
-}
+# ✅ Original developer ke entity types (quotly.py se)
 _ENTITY_TYPE_STR = {
     MessageEntity.BOLD: "bold",
     MessageEntity.ITALIC: "italic",
@@ -69,10 +61,24 @@ _ENTITY_TYPE_STR = {
     MessageEntity.EXPANDABLE_BLOCKQUOTE: "blockquote",
     MessageEntity.TEXT_LINK: "text_link",
     MessageEntity.TEXT_MENTION: "text_mention",
+    MessageEntity.PHONE_NUMBER: "phone_number",
+    MessageEntity.MENTION: "mention",
+    MessageEntity.CASHTAG: "cashtag",
+    MessageEntity.HASHTAG: "hashtag",
+    MessageEntity.EMAIL: "email",
+    MessageEntity.URL: "url",
+    MessageEntity.BOT_COMMAND: "bot_command",
+}
+
+_KEEP_ENTITIES = {
+    "bold", "italic", "underline", "strikethrough", "spoiler",
+    "code", "pre", "blockquote", "text_link", "text_mention",
+    "phone_number", "mention", "cashtag", "hashtag", "email",
+    "url", "bot_command",
 }
 
 
-# ───────── Pillow helpers (fallback + .kang) ─────────
+# ───────── Pillow helpers (fallback + kang) ─────────
 FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 FONT_REGULAR = os.path.join(FONT_DIR, "DejaVuSans.ttf")
 FONT_BOLD = os.path.join(FONT_DIR, "DejaVuSans-Bold.ttf")
@@ -99,43 +105,17 @@ def _load_font(bold: bool, size: int):
         return ImageFont.load_default()
 
 
-def _cmap_of(path):
-    try:
-        return set(TTFont(path, fontNumber=0, lazy=True).getBestCmap())
-    except Exception:
-        return set()
-
-
-_CMAP = {False: _cmap_of(FONT_REGULAR), True: _cmap_of(FONT_BOLD)}
-if not _CMAP[True]:
-    _CMAP[True] = _CMAP[False]
-_DROP_CATEGORIES = {"Cf", "Cc", "Co", "Cs", "Mn", "Me"}
-
-
-def _renderable(bold: bool, text: str, fallback: str = "") -> str:
-    import unicodedata
-    cmap = _CMAP[bold]
-    out = []
-    for ch in unicodedata.normalize("NFKD", text or ""):
-        if unicodedata.category(ch) in _DROP_CATEGORIES:
-            continue
-        if ch in (" ", "\n", "\t") or ord(ch) in cmap:
-            out.append(ch)
-    cleaned = re.sub(r"\s+", " ", "".join(out)).strip()
-    return cleaned or fallback
-
-
 def _peer_color(user_id: int):
     return PEER_COLORS[abs(user_id) % len(PEER_COLORS)]
 
 
-def _fit_512(img: Image.Image) -> Image.Image:
+def _fit_512(img):
     w, h = img.size
     scale = MAX_SIDE / max(w, h)
     return img.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.LANCZOS)
 
 
-def _square_512(img: Image.Image) -> Image.Image:
+def _square_512(img):
     w, h = img.size
     side = min(w, h)
     left = (w - side) // 2
@@ -160,7 +140,7 @@ def _wrap(draw, text, font, max_w):
     return lines[:10] or [""]
 
 
-async def _fetch_avatar_bytes(ctx, user_id: int) -> bytes | None:
+async def _fetch_avatar_bytes(ctx, user_id: int):
     try:
         async def _fetch():
             photos = await ctx.bot.get_user_profile_photos(user_id, limit=1)
@@ -173,30 +153,6 @@ async def _fetch_avatar_bytes(ctx, user_id: int) -> bytes | None:
     except (asyncio.TimeoutError, TelegramError, OSError) as e:
         log.debug("avatar fetch failed for %s: %s", user_id, e)
         return None
-
-
-async def _avatar_url(ctx, user_id: int, force_refresh: bool = False) -> str | None:
-    now = time.time()
-    if not force_refresh:
-        cached = _avatar_cache.get(user_id)
-        if cached is not None and cached[0] > now:
-            return cached[1]
-
-    url = None
-    try:
-        bot_token = os.environ.get("BOT_TOKEN", "").strip()
-        if bot_token:
-            photos = await ctx.bot.get_user_profile_photos(user_id, limit=1)
-            if photos.total_count:
-                file_id = photos.photos[0][-1].file_id
-                tgfile = await ctx.bot.get_file(file_id)
-                if tgfile.file_path:
-                    url = f"https://api.telegram.org/file/bot{bot_token}/{tgfile.file_path}"
-    except (TelegramError, OSError) as e:
-        log.debug("avatar url failed for %s: %s", user_id, e)
-
-    _avatar_cache[user_id] = (now + _AVATAR_TTL, url)
-    return url
 
 
 # ───────── entity extraction ─────────
@@ -225,57 +181,79 @@ def _text_of(msg) -> str:
     return (getattr(msg, "text", None) or getattr(msg, "caption", None) or "").strip()
 
 
+# ✅ Original developer ka exact `from` block (quotly.py se)
 def _from_block(user) -> dict:
     if user is None:
-        return {"id": 0, "first_name": "User", "name": "User"}
-    parts = [user.first_name or "", user.last_name or ""]
-    name = " ".join(p for p in parts if p).strip() or "User"
-    out = {"id": int(user.id or 0), "first_name": user.first_name or name, "name": name}
-    if getattr(user, "username", None):
-        out["username"] = user.username
-    return out
-
-
-# ✅ FIX 1: Avatar ke liye `photo` field hata diya, sirf `avatar: True` rakha
-def _build_message(msg, avatar: str | None = None, parent_msg=None) -> dict:
-    block = {
-        "entities": _extract_entities(msg),
-        "avatar": True,  # API khud ID se avatar fetch karegi
-        "from": _from_block(getattr(msg, "from_user", None)),
-        "text": _text_of(msg),
+        return {
+            "id": 0,
+            "first_name": "Deleted Account",
+            "last_name": None,
+            "username": None,
+            "language_code": "en",
+            "title": "Deleted Account",
+            "name": "Deleted Account",
+            "type": "private",
+        }
+    first_name = user.first_name or "User"
+    last_name = getattr(user, "last_name", None)
+    username = getattr(user, "username", None)
+    name = " ".join(p for p in [first_name, last_name] if p).strip() or "User"
+    return {
+        "id": int(user.id or 0),
+        "first_name": first_name,
+        "last_name": last_name,
+        "username": username,
+        "language_code": "en",
+        "title": name,
+        "name": name,
+        "type": "private",
     }
-    
-    reply_block = _build_reply_block(parent_msg)
-    if reply_block:
-        block["replyMessage"] = reply_block
-        
-    return block
 
 
+# ✅ Original developer ka exact reply block (quotly.py se)
 def _build_reply_block(reply) -> dict | None:
     if reply is None:
         return None
     text = _text_of(reply)
     if not text:
         return None
-    frm = _from_block(getattr(reply, "from_user", None))
+    sender = getattr(reply, "from_user", None)
+    if sender is None:
+        name = "Deleted Account"
+    else:
+        parts = [sender.first_name or "", getattr(sender, "last_name", "") or ""]
+        name = " ".join(p for p in parts if p).strip() or "Deleted Account"
     return {
-        "name": frm.get("name") or "User",
+        "name": name,
         "text": text,
         "chatId": int(getattr(reply, "chat_id", 0) or 0),
     }
 
 
-def _build_payload(msg, avatar: str | None = None, parent_msg=None) -> dict:
+# ✅ Original developer ka exact message block
+def _build_message(msg, parent_msg=None) -> dict:
+    block = {
+        "entities": _extract_entities(msg),
+        "chatId": int(getattr(msg, "from_user", None).id if getattr(msg, "from_user", None) else 0),
+        "avatar": True,
+        "from": _from_block(getattr(msg, "from_user", None)),
+        "text": _text_of(msg),
+        "replyMessage": _build_reply_block(parent_msg) or {},
+    }
+    return block
+
+
+# ✅ Original developer ke exact dimensions (quotly.py se)
+def _build_payload(msg, parent_msg=None) -> dict:
+    bg = QUOTE_BG or "#1b1429"
     return {
         "type": "quote",
         "format": "webp",
-        "backgroundColor": QUOTE_BG,
+        "backgroundColor": bg,
         "width": 512,
-        "height": 512,
-        "scale": 1,
-        "emojiBrand": "apple",
-        "messages": [_build_message(msg, avatar, parent_msg)],
+        "height": 768,
+        "scale": 2,
+        "messages": [_build_message(msg, parent_msg)],
     }
 
 
@@ -320,27 +298,20 @@ async def _try_one_api(client: httpx.AsyncClient, url: str, payload: dict) -> by
         return None
 
 
-async def _build_quote_via_api(ctx, src_msg, sender, parent_msg=None) -> bytes | None:
-    text = _text_of(src_msg)
-    if not text:
+async def _build_quote_via_api(ctx, src_msg, parent_msg=None) -> bytes | None:
+    if not _text_of(src_msg):
         return None
 
-    payload = _build_payload(src_msg, None, parent_msg)  # Avatar url pass nahi kar rahe
+    payload = _build_payload(src_msg, parent_msg)
     msg0 = payload["messages"][0]
-    if "replyMessage" in msg0:
+    if msg0.get("replyMessage"):
         log.info("[sticker] nested reply: %r", msg0["replyMessage"].get("text", "")[:50])
     else:
         log.info("[sticker] no nested reply")
 
-    urls = [QUOTE_API] + _FALLBACKS
     timeout = httpx.Timeout(QUOTE_TIMEOUT)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        tasks = [_try_one_api(client, url, payload) for url in urls]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for r in results:
-            if isinstance(r, bytes) and len(r) > 100:
-                return r
-    return None
+        return await _try_one_api(client, QUOTE_API, payload)
 
 
 # ───────── Pillow fallback ─────────
@@ -350,17 +321,15 @@ async def _build_quote_via_pillow(ctx, src_msg, sender, parent_msg=None) -> byte
     W = 512
     outer_pad = 12
     
-    # Main message settings
     avatar_size = 92
     gap = 14
     inner_pad = 22
     font_name = _load_font(True, 30)
     font_text = _load_font(False, 36)
     raw_text = _text_of(src_msg) or "[media]"
-    text = _renderable(False, raw_text, "[unsupported characters]")
+    text = raw_text
     sender_name = re.sub(r"\s+", " ", (sender.full_name or "Unknown")).strip()
 
-    # Calculate main bubble dimensions
     probe = ImageDraw.Draw(Image.new("RGB", (10, 10)))
     bubble_x = outer_pad + avatar_size + gap
     bubble_w = W - bubble_x - outer_pad
@@ -373,7 +342,6 @@ async def _build_quote_via_pillow(ctx, src_msg, sender, parent_msg=None) -> byte
     body_h = name_line_h * len(name_lines) + gap_name_text + text_line_h * len(text_lines)
     main_bubble_h = body_h + inner_pad * 2
 
-    # Nested message settings (if parent exists)
     nested_bubble_h = 0
     nested_data = None
     if parent_msg:
@@ -409,15 +377,12 @@ async def _build_quote_via_pillow(ctx, src_msg, sender, parent_msg=None) -> byte
             "avatar_size": p_avatar_size, "sender": p_sender
         }
 
-    # Calculate total image height
     total_h = outer_pad * 2 + main_bubble_h + (nested_bubble_h + 10 if nested_bubble_h else 0)
     
     img = Image.new("RGBA", (W, total_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-
     current_y = outer_pad
 
-    # Draw nested bubble first
     if nested_data:
         nd = nested_data
         draw.rounded_rectangle(
@@ -425,18 +390,15 @@ async def _build_quote_via_pillow(ctx, src_msg, sender, parent_msg=None) -> byte
             radius=20, fill=BUBBLE_BG,
         )
         ty = current_y + nd["inner_pad"]
-        # Nested name
         n_color = _peer_color(nd["sender"].id) if nd["sender"] else (255, 255, 255)
         for ln in nd["name_lines"]:
             draw.text((nd["x"] + nd["inner_pad"], ty), ln, font=nd["font_name"], fill=n_color)
             ty += nd["line_h_name"]
         ty += nd["gap_name_text"]
-        # Nested text
         for ln in nd["text_lines"]:
             draw.text((nd["x"] + nd["inner_pad"], ty), ln, font=nd["font_text"], fill=(255, 255, 255))
             ty += nd["line_h_text"]
             
-        # Nested avatar
         p_photo = await _fetch_avatar_bytes(ctx, nd["sender"].id) if nd["sender"] else None
         p_avatar = Image.new("RGBA", (nd["avatar_size"], nd["avatar_size"]), (0, 0, 0, 0))
         if p_photo:
@@ -463,10 +425,8 @@ async def _build_quote_via_pillow(ctx, src_msg, sender, parent_msg=None) -> byte
             d.text(((nd["avatar_size"] - tw) / 2 - bbox[0], (nd["avatar_size"] - th) / 2 - bbox[1]),
                    initials, font=f, fill=(255, 255, 255))
         img.paste(p_avatar, (outer_pad, current_y + (nd["h"] - nd["avatar_size"]) // 2), p_avatar)
-        
         current_y += nested_bubble_h + 10
 
-    # Draw main bubble
     draw.rounded_rectangle(
         (bubble_x, current_y, bubble_x + bubble_w, current_y + main_bubble_h),
         radius=26, fill=BUBBLE_BG,
@@ -481,7 +441,6 @@ async def _build_quote_via_pillow(ctx, src_msg, sender, parent_msg=None) -> byte
         draw.text((bubble_x + inner_pad, ty), ln, font=font_text, fill=(255, 255, 255))
         ty += text_line_h
 
-    # Main avatar
     photo = await _fetch_avatar_bytes(ctx, sender.id)
     avatar = Image.new("RGBA", (avatar_size, avatar_size), (0, 0, 0, 0))
     if photo:
@@ -517,40 +476,40 @@ async def _build_quote_via_pillow(ctx, src_msg, sender, parent_msg=None) -> byte
 
 async def _build_quote_sticker(ctx, src_msg, sender, parent_msg=None) -> bytes:
     try:
-        data = await _build_quote_via_api(ctx, src_msg, sender, parent_msg)
+        data = await _build_quote_via_api(ctx, src_msg, parent_msg)
         if data:
             return data
     except Exception as e:
         log.warning("[sticker] API path raised: %s", e)
-    
-    log.warning("[sticker] all APIs failed — using local Pillow fallback")
+    log.warning("[sticker] API failed — using local Pillow fallback")
     return await _build_quote_via_pillow(ctx, src_msg, sender, parent_msg)
 
 
-# ✅ FIX 2: Parent fetch karne ka logic strong kiya
+# ───────── parent-message helper ─────────
+
 async def _ensure_parent(ctx, chat_id: int, src):
+    parent = getattr(src, "reply_to_message", None)
+    if parent and getattr(parent, "message_id", None):
+        log.info("[sticker] parent found via reply_to_message")
+        return parent
+
     parent_id = getattr(src, "reply_to_message_id", None)
-    
     if not parent_id:
         ext = getattr(src, "external_reply", None)
         if ext:
             parent_id = getattr(ext, "message_id", None)
-            
-    if not parent_id:
-        rt = getattr(src, "reply_to_message", None)
-        if rt:
-            parent_id = getattr(rt, "message_id", None)
+    if not parent_id and parent:
+        parent_id = getattr(parent, "message_id", None)
 
     if not parent_id:
-        log.info("[sticker] no parent_id detected on src")
+        log.info("[sticker] no parent_id detected")
         return None
 
-    log.info("[sticker] parent_id found: %s", parent_id)
+    log.info("[sticker] fetching parent_id: %s", parent_id)
     try:
         fetched = await ctx.bot.get_messages(chat_id=chat_id, message_ids=parent_id)
         if isinstance(fetched, list):
             fetched = fetched[0] if fetched else None
-        log.info("[sticker] parent fetched successfully")
         return fetched
     except Exception as e:
         log.warning("[sticker] couldn't fetch parent %s: %s", parent_id, e)
@@ -574,7 +533,6 @@ async def _quote_and_send(update, ctx, as_reply: bool):
         await say(ctx, chat.id, T("only text messages can be quoted."), reply_to=msg.message_id)
         return
 
-    log.info("[sticker] fetching parent...")
     parent_msg = await _ensure_parent(ctx, chat.id, src)
     if parent_msg:
         log.info("[sticker] parent text: %r", _text_of(parent_msg)[:60])
@@ -676,7 +634,7 @@ async def _photo_to_sticker_file(ctx, photo):
     return buf
 
 
-# ───────── .kang ─────────
+# ───────── .kang (MongoDB system — aapka purana) ─────────
 
 async def kang_cmd(update, ctx):
     msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
@@ -748,4 +706,4 @@ def register(app):
     dual_command(app, "q", q_cmd)
     dual_command(app, "qr", qr_cmd)
     dual_command(app, "kang", kang_cmd)
-            
+    
