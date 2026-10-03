@@ -53,7 +53,7 @@ async def _get_real_group_owner_id(ctx, chat_id: int):
             if admin.status == ChatMemberStatus.OWNER:
                 return admin.user.id
     except TelegramError as e:
-        log.warning("[admin] failed to get owner id: %s", e)
+        print(f"[admin] failed to get owner id: {e}")
     return None
 
 
@@ -273,8 +273,8 @@ async def anon_verify_callback(update, ctx):
         sel = {k: (k in ("delete_messages", "invite_users", "pin_messages")) and br[k] for k, _ in rights_list}
         
     panel_st = dict(
-        mode=st["mode"], chat_id=chat.id, invoker=user.id, target=target.id,
-        tgt_m=mention(target), inv_m=mention(user), title=st["title"],
+        mode=st["mode"], chat_id=chat.id, invoker=user.id, target=target.user.id, # ✅ FIX YAHAN HAI (target.user.id)
+        tgt_m=mention(target.user), inv_m=mention(user), title=st["title"],
         rights_list=rights_list, bot=br, sel=sel, forum=bool(chat.is_forum),
         missing=[l for k, l in rights_list if not br[k]],
     )
