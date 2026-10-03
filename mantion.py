@@ -7,7 +7,7 @@ import re
 
 from telegram import Update
 from telegram.constants import ChatMemberStatus, ChatType
-from telegram.error import ChatAdminRequired
+from telegram.error import TelegramError  # ✅ FIX: ChatAdminRequired hata kar TelegramError kar diya
 from telegram.ext import ContextTypes, MessageHandler, filters
 
 from common import T, dual_command, say
@@ -18,7 +18,7 @@ ANON_ADMIN_ID = 1087968824
 async def get_admin_info(ctx, chat_id: int):
     try:
         admins = await ctx.bot.get_chat_administrators(chat_id)
-    except ChatAdminRequired:
+    except TelegramError:  # ✅ FIX: Yahan bhi TelegramError catch kar liya
         return None, None, "I need to be an admin to see the admin list!"
 
     admin_list = []
@@ -97,7 +97,7 @@ async def admin_mention_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Tag max 5 admins to avoid Telegram spam detection
     chunk = admin_tags[:5]
     
-    # ✅ FIX: Yahan bhi bold font wala header add kar diya
+    # Bold font wala header
     header = "👑 𝙰𝚍𝚖𝚒𝚗𝚜:"
     reply_text = header + "\n" + " ".join(chunk)
     
