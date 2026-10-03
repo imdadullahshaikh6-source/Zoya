@@ -22,9 +22,12 @@ from telegram.error import TelegramError
 import database as dbase
 from common import (
     T, dual_command, esc, say,
-    QUOTE_API, QUOTE_API_FALLBACKS, QUOTE_BG,
-    QUOTE_TIMEOUT, QUOTE_TOTAL_TIMEOUT,
+    QUOTE_BG, QUOTE_TIMEOUT, QUOTE_TOTAL_TIMEOUT,
 )
+
+# ✅ FIX: Purane API hata kar aapka naya API set kar diya hai
+QUOTE_API = "https://tough-lillian-sungjinw04-79e2ecdb.koyeb.app/generate"
+QUOTE_API_FALLBACKS = "" # Koi fallback API nahi, seedha Pillow use hoga agar ye fail hua toh
 
 log = logging.getLogger("sticker")
 
@@ -233,7 +236,6 @@ def _from_block(user) -> dict:
     return out
 
 
-# ✅ FIX: Simplify nested block to match quotly.py (name, text, chatId)
 def _build_reply_block(reply) -> dict | None:
     if reply is None:
         return None
@@ -517,25 +519,21 @@ async def _build_quote_via_pillow(ctx, src_msg, sender, parent_msg=None) -> byte
     return out.getvalue()
 
 
-# ✅ FIX: Force Pillow if nested parent exists (API doesn't render it reliably)
 async def _build_quote_sticker(ctx, src_msg, sender, parent_msg=None) -> bytes:
-    if parent_msg:
-        log.info("[sticker] Nested quote detected. Using Pillow fallback for guaranteed rendering.")
-        return await _build_quote_via_pillow(ctx, src_msg, sender, parent_msg)
-        
     try:
         data = await _build_quote_via_api(ctx, src_msg, sender, parent_msg)
         if data:
             return data
     except Exception as e:
         log.warning("[sticker] API path raised: %s", e)
+    
     log.warning("[sticker] all APIs failed — using local Pillow fallback")
     return await _build_quote_via_pillow(ctx, src_msg, sender, parent_msg)
 
 
-# ✅ FIX: Robust parent fetching (external_reply -> reply_to_message -> reply_to_message_id)
+# ───────── parent-message helper ─────────
+
 async def _ensure_parent(ctx, chat_id: int, src):
-    # 1. Try external_reply first (most reliable for channel replies)
     ext = getattr(src, "external_reply", None)
     if ext and getattr(ext, "message_id", None):
         try:
@@ -548,13 +546,11 @@ async def _ensure_parent(ctx, chat_id: int, src):
         except Exception:
             pass
 
-    # 2. Try reply_to_message
     rt = getattr(src, "reply_to_message", None)
     if rt and getattr(rt, "message_id", None):
         log.info("[sticker] parent found via reply_to_message")
         return rt
 
-    # 3. Try reply_to_message_id
     parent_id = getattr(src, "reply_to_message_id", None)
     if not parent_id and rt:
         parent_id = getattr(rt, "message_id", None)
@@ -591,7 +587,6 @@ async def _quote_and_send(update, ctx, as_reply: bool):
         await say(ctx, chat.id, T("only text messages can be quoted."), reply_to=msg.message_id)
         return
 
-    # ── Fetch parent (for nested quote) ──
     log.info("[sticker] fetching parent...")
     parent_msg = await _ensure_parent(ctx, chat.id, src)
     if parent_msg:
@@ -766,4 +761,3 @@ def register(app):
     dual_command(app, "q", q_cmd)
     dual_command(app, "qr", qr_cmd)
     dual_command(app, "kang", kang_cmd)
-        
