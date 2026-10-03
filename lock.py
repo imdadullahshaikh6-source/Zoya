@@ -9,17 +9,13 @@ from telegram.ext import ContextTypes, MessageHandler, filters, CallbackQueryHan
 
 from common import B, T, dual_command, say
 
-# Math Bold Fonts
-def math_bold(text):
-    res = ""
-    for c in text:
-        if 'a' <= c <= 'z':
-            res += chr(ord(c) - 97 + 0x1D68A)
-        elif 'A' <= c <= 'Z':
-            res += chr(ord(c) - 65 + 0x1D670)
-        else:
-            res += c
-    return res
+# ✅ FIX: COMMANDS variable add kar diya
+COMMANDS = [
+    ("lock", "Lock message types"),
+    ("unlock", "Unlock message types"),
+    ("locks", "List currently locked types"),
+    ("locktypes", "Show all lockable types"),
+]
 
 LOCKTYPES = [
     "all", "album", "anonchannel", "audio", "bot", "botlink", "button",
@@ -57,27 +53,13 @@ LOCK_DESC = {
     "voice": "Voice messages."
 }
 
-LOCK_DISPLAY = {
-    lt: f"𝘼 𝙡 𝙡" if lt == "all" else "".join([chr(ord(c) - 97 + 0x1D68A) for c in lt]) if lt.islower() else lt
-    for lt in LOCKTYPES
-}
-
-# Fix custom display for some
-LOCK_DISPLAY["all"] = "𝘼 𝙡 𝙡"
-LOCK_DISPLAY["anonchannel"] = "𝘼 𝙣 𝙤 𝙣 𝙘 𝙝 𝙖 𝙣 𝙣 𝙚 𝙡"
-LOCK_DISPLAY["botlink"] = "𝘽 𝙤 𝙩 𝙡 𝙞 𝙣 𝙠"
-LOCK_DISPLAY["emojicustom"] = "𝙀 𝙢 𝙤 𝙟 𝙞 𝙘 𝙪 𝙨 𝙩 𝙤 𝙢"
-LOCK_DISPLAY["invitelink"] = "𝙄 𝙣 𝙫 𝙞 𝙩 𝙚 𝙡 𝙞 𝙣 𝙠"
-LOCK_DISPLAY["videonote"] = "𝙑 𝙞 𝙙 𝙚 𝙤 𝙣 𝙤 𝙩 𝙚"
-LOCK_DISPLAY["url"] = "𝙐 𝙍 𝙇"
-
-# Helper to build locktypes keyboard
+# Helper to build locktypes keyboard with Rose style fonts
 def get_locktypes_kb():
     buttons = []
     row = []
     for lt in LOCKTYPES:
-        # Capitalize display
-        display_name = LOCK_DISPLAY[lt]
+        # Capitalize display with Sans-Serif Bold font manually
+        display_name = "".join([chr(ord(c) - 97 + 0x1D68A) if 'a' <= c <= 'z' else c for c in lt])
         row.append(InlineKeyboardButton(display_name, callback_data=f"lockinfo:{lt}", style="primary"))
         if len(row) == 3:
             buttons.append(row)
@@ -110,7 +92,7 @@ async def lock_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await say(ctx, chat.id, T(f"invalid lock types: {', '.join(invalid)}"), reply_to=msg.message_id)
         return
 
-    # Save to db (simple in-memory for now, replace with dbase if available)
+    # Save to db (in-memory for now, replace with dbase for persistence)
     if "locks_db" not in ctx.bot_data:
         ctx.bot_data["locks_db"] = {}
     if chat.id not in ctx.bot_data["locks_db"]:
@@ -173,19 +155,43 @@ async def lock_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await qy.answer(f"{data}:\n\n{desc}", show_alert=True)
 
 async def _locks_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    msg, chat = update.effective_message, update.effective_chat
-    if chat.type == ChatType.PRIVATE:
+    msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
+    if chat.type == ChatType.PRIVATE or not user or user.is_bot:
         return
 
     active = ctx.bot_data.get("locks_db", {}).get(chat.id, set())
     if not active:
         return
 
+    # ✅ Admin Bypass: Admins ko delete nahi karna
+    try:
+        member = await ctx.bot.get_chat_member(chat.id, user.id)
+        if member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
+            return
+    except TelegramError:
+        pass
+
+    # ✅ Bot Permission Check
+    me = ctx.bot_data.get("me")
+    if me:
+        try:
+            bot_member = await ctx.bot.get_chat_member(chat.id, me.id)
+            if not getattr(bot_member, "can_delete_messages", False):
+                # Ek baar warning bhejne ke liye check (spam na ho)
+                if ctx.bot_data.get(f"warned_{chat.id}") != True:
+                    ctx.bot_data[f"warned_{chat.id}"] = True
+                    await say(ctx, chat.id, T("⚠️ I need <b>Delete Messages</b> permission to enforce locks. Please promote me!"))
+                return
+        except TelegramError:
+            return
+
     should_delete = False
 
+    # Check if 'all' is locked
     if "all" in active:
         should_delete = True
     else:
+        # Check basic media types
         if "text" in active and msg.text:
             should_delete = True
         if "photo" in active and msg.photo:
@@ -210,7 +216,7 @@ async def _locks_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             should_delete = True
         if "location" in active and msg.location:
             should_delete = True
-        if "forward" in active and msg.forward_date:
+        if "forward" in active and (msg.forward_date or msg.forward_origin):
             should_delete = True
         if "anonchannel" in active and msg.sender_chat:
             should_delete = True
@@ -221,19 +227,30 @@ async def _locks_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if "button" in active and msg.reply_markup:
             should_delete = True
 
+        # Check entities (url, email, phone, spoiler, emoji)
         if msg.entities:
             for e in msg.entities:
                 if "url" in active and e.type in ("url", "text_link"):
-                    # Allow group's own links
-                    should_delete = True
+                    # Allow group's own links (heuristic: skip t.me links)
+                    url_text = msg.text[e.offset:e.offset+e.length] if msg.text else ""
+                    if "t.me/" not in url_text:
+                        should_delete = True
                 if "email" in active and e.type == "email":
                     should_delete = True
                 if "phone" in active and e.type == "phone_number":
                     should_delete = True
                 if "spoiler" in active and e.type == "spoiler":
                     should_delete = True
-                if "emoji" in active and e.type == "custom_emoji":
+                if ("emoji" in active or "emojicustom" in active) and e.type == "custom_emoji":
                     should_delete = True
+                if "botlink" in active and e.type in ("url", "text_link"):
+                    url_text = msg.text[e.offset:e.offset+e.length] if msg.text else ""
+                    if "t.me/" in url_text and "bot" in url_text:
+                        should_delete = True
+                if "invitelink" in active and e.type in ("url", "text_link"):
+                    url_text = msg.text[e.offset:e.offset+e.length] if msg.text else ""
+                    if "t.me/joinchat" in url_text or "t.me/+" in url_text:
+                        should_delete = True
 
     if should_delete:
         try:
