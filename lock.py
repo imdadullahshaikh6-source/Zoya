@@ -57,7 +57,6 @@ def get_locktypes_kb(back: bool = False):
     buttons = []
     row = []
     for lt in LOCKTYPES:
-        # Capitalize display with Sans-Serif Bold font
         display_name = "".join([chr(ord(c) - 97 + 0x1D68A) if 'a' <= c <= 'z' else c for c in lt])
         row.append(B(display_name, f"lockinfo:{lt}", style="primary"))
         if len(row) == 3:
@@ -66,7 +65,6 @@ def get_locktypes_kb(back: bool = False):
     if row:
         buttons.append(row)
     
-    # ✅ FIX: Agar back=True hai, toh Back button add karo (sirf DM ke liye)
     if back:
         buttons.append([B("⬅ 𝘽𝙖𝙘𝙠", "help:locks", style="danger")])
     
@@ -79,16 +77,17 @@ def _has_media(msg) -> bool:
 
 
 def is_message_locked(bot_data: dict, chat_id: int, msg) -> bool:
-    """Public helper — returns True if the message should be deleted by locks.
-    Used by both lock.py and guardian.py to avoid double handling."""
+    """Public helper — returns True if the message should be deleted by locks."""
     active = bot_data.get("locks_db", {}).get(chat_id, set())
     unlocked = bot_data.get("unlocks_db", {}).get(chat_id, set())
+    
+    # ✅ FIX: Agar koi lock active nahi hai, toh seedha False
     if not active:
         return False
 
     has_media = _has_media(msg)
 
-    # If "all" is locked, only exceptions (unlocked set) are safe
+    # Agar "all" locked hai, toh sirf exceptions (unlocked) safe hain
     if "all" in active:
         if "text" in unlocked and msg.text and not has_media: return False
         if "photo" in unlocked and msg.photo: return False
@@ -173,9 +172,14 @@ async def lock_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.bot_data.setdefault("locks_db", {}).setdefault(chat.id, set())
     ctx.bot_data.setdefault("unlocks_db", {}).setdefault(chat.id, set())
 
-    for item in items:
-        ctx.bot_data["locks_db"][chat.id].add(item)
-        ctx.bot_data["unlocks_db"][chat.id].discard(item)
+    # ✅ FIX: Agar "all" lock kiya, toh saare purane locks hata do
+    if "all" in items:
+        ctx.bot_data["locks_db"][chat.id] = {"all"}
+        ctx.bot_data["unlocks_db"][chat.id].clear()
+    else:
+        for item in items:
+            ctx.bot_data["locks_db"][chat.id].add(item)
+            ctx.bot_data["unlocks_db"][chat.id].discard(item)
 
     await say(ctx, chat.id, T(f"✅ locked: {', '.join(items)}"), reply_to=msg.message_id)
 
@@ -205,10 +209,16 @@ async def unlock_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.bot_data.setdefault("locks_db", {}).setdefault(chat.id, set())
     ctx.bot_data.setdefault("unlocks_db", {}).setdefault(chat.id, set())
 
-    for item in items:
-        ctx.bot_data["locks_db"][chat.id].discard(item)
-        if "all" in ctx.bot_data["locks_db"][chat.id]:
-            ctx.bot_data["unlocks_db"][chat.id].add(item)
+    # ✅ FIX: Agar "all" unlock kiya, toh saare locks clear kar do
+    if "all" in items:
+        ctx.bot_data["locks_db"][chat.id].clear()
+        ctx.bot_data["unlocks_db"][chat.id].clear()
+    else:
+        for item in items:
+            ctx.bot_data["locks_db"][chat.id].discard(item)
+            # Agar "all" locked hai, toh is item ko exception banao
+            if "all" in ctx.bot_data["locks_db"][chat.id]:
+                ctx.bot_data["unlocks_db"][chat.id].add(item)
 
     await say(ctx, chat.id, T(f"✅ unlocked: {', '.join(items)}"), reply_to=msg.message_id)
 
@@ -228,7 +238,6 @@ async def locktypes_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg, chat = update.effective_message, update.effective_chat
     if chat.type == ChatType.PRIVATE:
         return
-    # Group mein Back button nahi chahiye (default False hai)
     await say(ctx, chat.id, "The available locktypes are:", kb=get_locktypes_kb(), reply_to=msg.message_id)
 
 
