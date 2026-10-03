@@ -28,6 +28,7 @@ import pin
 import ping
 import sticker
 import welcome
+import mention  # ✅ FIX: Naya plugin import kiya
 from common import B, T, log, mention, say, sc
 
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(name)s | %(message)s", level=logging.INFO)
@@ -36,7 +37,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 MONGO_URI = os.environ["MONGO_URI"]
 DB_NAME = os.getenv("DB_NAME", "zoya_bot")
 OWNER_USERNAME = "Ownerbackk"
-OWNER_URL = f"https://t.me/{OWNER_USERNAME}"  # ✅ FIX: Seedha tumhari ID par jayega
+OWNER_URL = f"https://t.me/{OWNER_USERNAME}"
 CHANNEL_URL = os.getenv("CHANNEL_URL", "")
 START_IMG = os.getenv("START_IMG", "https://graph.org/file/d3a2c17942e606f4ec811-9c0373fa8bb10f4448.jpg")
 
@@ -112,7 +113,6 @@ def home_page(user, ctx):
     rows = [
         [B("📜 𝘾𝙤𝙢𝙢𝙖𝙣𝙙", "help:main", style="primary")],
     ]
-    # ✅ FIX: Ab yahan OWNER_URL lag gaya hai, jo seedha @Ownerbackk par jayega
     row2 = [B("👑 𝙊𝙬𝙣𝙚𝙧", url=OWNER_URL, style="danger")]
     if CHANNEL_URL:
         row2.append(B("🔔 𝘾𝙝𝙖𝙣𝙣𝙚𝙡", url=CHANNEL_URL, style="danger"))
@@ -128,7 +128,6 @@ def main_page():
     for i in range(0, len(keys), 2):
         row = []
         for j, k in enumerate(keys[i:i + 2]):
-            # Automatic line-up colours: Green (success) and Blue (primary)
             btn_style = colors[(i + j) % len(colors)]
             row.append(B(PAGES[k][0], f"help:{k}", style=btn_style))
         rows.append(row)
@@ -292,6 +291,7 @@ def main():
     guardian.register(app)
     cleancommand.register(app)
     pin.register(app)
+    mention.register(app)  # ✅ FIX: Mention plugin register kar diya
 
     app.add_error_handler(on_error)
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
@@ -299,4 +299,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
