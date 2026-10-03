@@ -1,6 +1,9 @@
 """Moderation plugin: .ban / .mute / .warn (+ unban/unmute/unwarn), with an
 undo button on every action. Fully cross-checked against the bot's real rights,
-and every ban/mute/warn is stored in Mongo so it survives restarts."""
+and every ban/mute/warn is stored in Mongo so it survives restarts.
+
+Also includes .dban / .dmute / .dwarn — same as above but the replied-to
+message is deleted first."""
 import os
 
 from telegram import ChatPermissions, InlineKeyboardMarkup
@@ -23,6 +26,10 @@ HELP_TXT = (
     "/mute (or .mute) — same usage, restricts sending messages\n"
     "/warn (or .warn) — after {n} warns the user is auto-muted\n"
     "/unban • /unmute • /unwarn — reverse any of the above\n\n"
+    "<b>✦ delete + action</b>\n"
+    "/dban (or .dban) — deletes the replied message, then bans its sender\n"
+    "/dmute (or .dmute) — deletes the replied message, then mutes its sender\n"
+    "/dwarn (or .dwarn) — deletes the replied message, then warns its sender\n\n"
     "every action re-checks that you have the <b>Ban Users</b> right and that i "
     "actually have it too — i tag you if I don't."
 ).replace("{n}", str(WARN_LIMIT))
@@ -32,6 +39,8 @@ COMMANDS = [
     ("kick", "Kick a user (they can rejoin)"),
     ("mute", "Mute a user"), ("unmute", "Unmute a user"),
     ("warn", "Warn a user"), ("unwarn", "Clear a user's warns"),
+    ("dban", "Delete replied msg then ban"), ("dmute", "Delete replied msg then mute"),
+    ("dwarn", "Delete replied msg then warn"),
 ]
 
 FULL_PERMS = ChatPermissions(
@@ -216,6 +225,37 @@ async def unwarn_cmd(update, ctx):
     await say(ctx, chat.id, T("✅ warns cleared for {m}.", m=mention(target)), reply_to=msg.message_id)
 
 
+# ───────── DELETE + ACTION (.dban / .dmute / .dwarn) ─────────
+async def _delete_replied(update):
+    """Reply wale message ko delete karo (agar ho). Fail hone pe chup-chaap ignore."""
+    msg = update.effective_message
+    replied = msg.reply_to_message if msg else None
+    if not replied:
+        return
+    try:
+        await replied.delete()
+    except TelegramError:
+        pass
+
+
+async def dban_cmd(update, ctx):
+    """`.dban` — pehle replied msg delete, phir ban."""
+    await _delete_replied(update)
+    await ban_cmd(update, ctx)
+
+
+async def dmute_cmd(update, ctx):
+    """`.dmute` — pehle replied msg delete, phir mute."""
+    await _delete_replied(update)
+    await mute_cmd(update, ctx)
+
+
+async def dwarn_cmd(update, ctx):
+    """`.dwarn` — pehle replied msg delete, phir warn."""
+    await _delete_replied(update)
+    await warn_cmd(update, ctx)
+
+
 # ───────── UNDO BUTTONS ─────────
 async def mod_cb(update, ctx):
     qy = update.callback_query
@@ -261,5 +301,8 @@ def register(app):
     dual_command(app, "unmute", unmute_cmd)
     dual_command(app, "warn", warn_cmd)
     dual_command(app, "unwarn", unwarn_cmd)
+    # delete + action (replied message auto-delete)
+    dual_command(app, "dban", dban_cmd)
+    dual_command(app, "dmute", dmute_cmd)
+    dual_command(app, "dwarn", dwarn_cmd)
     app.add_handler(CallbackQueryHandler(mod_cb, pattern=r"^mod:"))
-    
