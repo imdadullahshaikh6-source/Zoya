@@ -127,8 +127,8 @@ def main_page():
     for i in range(0, len(keys), 2):
         row = []
         for j, k in enumerate(keys[i:i + 2]):
-            # Guardian + Utility → red (danger) buttons
-            btn_style = "danger" if k in ("guardian", "utility") else colors[(i + j) % len(colors)]
+            # Automatic line-up colours: Green (success) and Blue (primary)
+            btn_style = colors[(i + j) % len(colors)]
             row.append(B(PAGES[k][0], f"help:{k}", style=btn_style))
         rows.append(row)
     rows.append([B("⬅ 𝘽𝙖𝙘𝙠", "help:home"), B("✖ 𝘾𝙡𝙤𝙨𝙚", "help:close", style="danger")])
@@ -298,3 +298,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
