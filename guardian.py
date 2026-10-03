@@ -17,6 +17,7 @@ permitted users are exempt.
 All data is stored in MongoDB per chat_id, so it survives bot restarts.
 """
 import asyncio
+import html
 import logging
 import re
 
@@ -70,6 +71,14 @@ def _parse_delay(arg: str):
     return n * mult
 
 
+def _safe_mention(user) -> str:
+    """Safely create an HTML mention, escaping the name to prevent parse errors."""
+    if not user:
+        return "Unknown"
+    name = html.escape(user.first_name or "User")
+    return f"<a href='tg://user?id={user.id}'>{name}</a>"
+
+
 async def _is_owner(ctx, chat_id: int, user_id: int) -> bool:
     """True only if the user is the group owner (creator)."""
     try:
@@ -111,23 +120,23 @@ async def setdelay_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if chat.type == ChatType.PRIVATE:
         return
     if not await _is_full_admin(ctx, chat.id, user.id):
-        await say(ctx, chat.id, T("⚠️ only full-power admins can use this."), reply_to=msg.message_id)
+        await say(ctx, chat.id, T("<blockquote>⚠️ only full-power admins can use this.</blockquote>"), reply_to=msg.message_id)
         return
     if not await _bot_can_guard(ctx, chat.id):
-        await say(ctx, chat.id, T("⚠️ make me an admin with <b>Delete Messages</b> permission first."), reply_to=msg.message_id)
+        await say(ctx, chat.id, T("<blockquote>⚠️ make me an admin with <b>Delete Messages</b> permission first.</blockquote>"), reply_to=msg.message_id)
         return
     if not ctx.args:
-        await say(ctx, chat.id, T("usage: <code>.setdelay 5m</code> — range 1m to 6h"), reply_to=msg.message_id)
+        await say(ctx, chat.id, T("<blockquote>usage: <code>.setdelay 5m</code> — range 1m to 6h</blockquote>"), reply_to=msg.message_id)
         return
     delay = _parse_delay(ctx.args[0])
     if delay is None or delay < MIN_DELAY or delay > MAX_DELAY:
-        await say(ctx, chat.id, T("❌ invalid delay — use <code>1m</code> to <code>6h</code> (e.g. <code>.setdelay 10m</code>)"), reply_to=msg.message_id)
+        await say(ctx, chat.id, T("<blockquote>❌ invalid delay — use <code>1m</code> to <code>6h</code> (e.g. <code>.setdelay 10m</code>)</blockquote>"), reply_to=msg.message_id)
         return
     await dbase.guardian_set(chat.id, delay_seconds=delay, enabled=True)
     mins = delay // 60
     await say(ctx, chat.id, T(
-        f"✅ Guardian active — deletion delay set to <b>{mins} min</b>.\n"
-        f"<i>everyone's edits & media will be deleted — including admins.</i>"
+        f"<blockquote>✅ Guardian active — deletion delay set to <b>{mins} min</b>.\n"
+        f"<i>everyone's edits & media will be deleted — including admins.</i></blockquote>"
     ), reply_to=msg.message_id)
 
 
@@ -136,7 +145,7 @@ async def guard_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if chat.type == ChatType.PRIVATE:
         return
     if not await _is_full_admin(ctx, chat.id, user.id):
-        await say(ctx, chat.id, T("⚠️ only full-power admins can use this."), reply_to=msg.message_id)
+        await say(ctx, chat.id, T("<blockquote>⚠️ only full-power admins can use this.</blockquote>"), reply_to=msg.message_id)
         return
     arg = (ctx.args[0].lower() if ctx.args else "")
     cfg = await dbase.guardian_get(chat.id) or {}
@@ -144,13 +153,13 @@ async def guard_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         state = "🟢 ON" if cfg.get("enabled") else "🔴 OFF"
         delay = cfg.get("delay_seconds", 0)
         await say(ctx, chat.id, T(
-            f"Guardian is <b>{state}</b> — delay <b>{delay // 60} min</b>.\n"
-            f"usage: <code>.guard on</code> / <code>.guard off</code>"
+            f"<blockquote>Guardian is <b>{state}</b> — delay <b>{delay // 60} min</b>.\n"
+            f"usage: <code>.guard on</code> / <code>.guard off</code></blockquote>"
         ), reply_to=msg.message_id)
         return
     enabled = arg == "on"
     await dbase.guardian_set(chat.id, enabled=enabled)
-    await say(ctx, chat.id, T(f"✅ Guardian turned <b>{'ON' if enabled else 'OFF'}</b>."), reply_to=msg.message_id)
+    await say(ctx, chat.id, T(f"<blockquote>✅ Guardian turned <b>{'ON' if enabled else 'OFF'}</b>.</blockquote>"), reply_to=msg.message_id)
 
 
 async def permit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -158,14 +167,15 @@ async def permit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if chat.type == ChatType.PRIVATE:
         return
     if not await _is_owner(ctx, chat.id, user.id):
-        await say(ctx, chat.id, T("⚠️ only the <b>group owner</b> can use this."), reply_to=msg.message_id)
+        await say(ctx, chat.id, T("<blockquote>⚠️ only the <b>group owner</b> can use this.</blockquote>"), reply_to=msg.message_id)
         return
     target = msg.reply_to_message.from_user if msg.reply_to_message else None
     if not target:
-        await say(ctx, chat.id, T("reply to a user's message with <code>.permit</code>."), reply_to=msg.message_id)
+        await say(ctx, chat.id, T("<blockquote>reply to a user's message with <code>.permit</code>.</blockquote>"), reply_to=msg.message_id)
         return
-    await dbase.guardian_permit_add(chat.id, target.id, target.first_name or "User")
-    await say(ctx, chat.id, T(f"✅ {mention(target)} is now <b>permitted</b> — their edits/media won't be deleted."), reply_to=msg.message_id)
+    safe_name = html.escape(target.first_name or "User")
+    await dbase.guardian_permit_add(chat.id, target.id, safe_name)
+    await say(ctx, chat.id, T(f"<blockquote>✅ {_safe_mention(target)} is now <b>permitted</b> — their edits/media won't be deleted.</blockquote>"), reply_to=msg.message_id)
 
 
 async def unpermit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -173,17 +183,17 @@ async def unpermit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if chat.type == ChatType.PRIVATE:
         return
     if not await _is_owner(ctx, chat.id, user.id):
-        await say(ctx, chat.id, T("⚠️ only the <b>group owner</b> can use this."), reply_to=msg.message_id)
+        await say(ctx, chat.id, T("<blockquote>⚠️ only the <b>group owner</b> can use this.</blockquote>"), reply_to=msg.message_id)
         return
     target = msg.reply_to_message.from_user if msg.reply_to_message else None
     if not target:
-        await say(ctx, chat.id, T("reply to a user's message with <code>.unpermit</code>."), reply_to=msg.message_id)
+        await say(ctx, chat.id, T("<blockquote>reply to a user's message with <code>.unpermit</code>.</blockquote>"), reply_to=msg.message_id)
         return
     removed = await dbase.guardian_permit_remove(chat.id, target.id)
     if removed:
-        await say(ctx, chat.id, T(f"✅ {mention(target)} is no longer permitted."), reply_to=msg.message_id)
+        await say(ctx, chat.id, T(f"<blockquote>✅ {_safe_mention(target)} is no longer permitted.</blockquote>"), reply_to=msg.message_id)
     else:
-        await say(ctx, chat.id, T(f"ℹ️ {mention(target)} wasn't in the permit list."), reply_to=msg.message_id)
+        await say(ctx, chat.id, T(f"<blockquote>ℹ️ {_safe_mention(target)} wasn't in the permit list.</blockquote>"), reply_to=msg.message_id)
 
 
 async def permitlist_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -191,17 +201,20 @@ async def permitlist_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if chat.type == ChatType.PRIVATE:
         return
     if not await _is_owner(ctx, chat.id, user.id):
-        await say(ctx, chat.id, T("⚠️ only the <b>group owner</b> can use this."), reply_to=msg.message_id)
+        await say(ctx, chat.id, T("<blockquote>⚠️ only the <b>group owner</b> can use this.</blockquote>"), reply_to=msg.message_id)
         return
     cfg = await dbase.guardian_get(chat.id) or {}
     users = cfg.get("permitted_users", [])
     if not users:
-        await say(ctx, chat.id, T("no permitted users in this chat."), reply_to=msg.message_id)
+        await say(ctx, chat.id, T("<blockquote>no permitted users in this chat.</blockquote>"), reply_to=msg.message_id)
         return
     lines = ["<b>🛡 Permitted users:</b>"]
     for i, u in enumerate(users, 1):
-        lines.append(f"{i}. {u.get('name', 'Unknown')} — <code>{u['id']}</code>")
-    await say(ctx, chat.id, T("\n".join(lines)), reply_to=msg.message_id)
+        # FIX: Escape the name to prevent "Can't parse entities" error
+        safe_name = html.escape(str(u.get('name', 'Unknown')))
+        lines.append(f"{i}. {safe_name} — <code>{u['id']}</code>")
+    text_body = "\n".join(lines)
+    await say(ctx, chat.id, T(f"<blockquote>{text_body}</blockquote>"), reply_to=msg.message_id)
 
 
 # ───────────── watcher ─────────────
@@ -236,11 +249,7 @@ async def _delete_after(ctx, chat_id: int, message_id: int, delay: int, note_tex
 
 
 async def _should_guard(ctx, chat, user) -> int:
-    """Return the delay in seconds if guardian should act, else 0.
-
-    Everyone's messages get deleted (admins and owner included) — the ONLY
-    exemptions are the bot's own messages and explicitly permitted users.
-    """
+    """Return the delay in seconds if guardian should act, else 0."""
     if not chat or chat.type == ChatType.PRIVATE:
         return 0
     me = ctx.application.bot_data.get("me")
@@ -295,11 +304,11 @@ async def _guardian_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not delay:
         return
 
-    # ✅ Quote block formatting
+    # ✅ Quote block formatting with Safe Mention
     if is_edit:
-        body = f"🗑️ {mention(user)}'s <b>edited message</b> was deleted."
+        body = f"🗑️ {_safe_mention(user)}'s <b>edited message</b> was deleted."
     else:
-        body = f"🗑️ {mention(user)}'s <b>media</b> was deleted."
+        body = f"🗑️ {_safe_mention(user)}'s <b>media</b> was deleted."
     note = f"<blockquote>{body}</blockquote>"
 
     log.info("[guardian] scheduling deletion of msg %s in %ss", msg.message_id, delay)
