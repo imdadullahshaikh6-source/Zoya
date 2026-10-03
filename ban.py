@@ -3,7 +3,12 @@ undo button on every action. Fully cross-checked against the bot's real rights,
 and every ban/mute/warn is stored in Mongo so it survives restarts.
 
 Also includes .dban / .dmute / .dwarn — same as above but the replied-to
-message is deleted first."""
+message is deleted first.
+
+Anonymous admin support: if an anonymous admin triggers a mod command, the bot
+shows a green verification button. Only the real group owner, the bot owner, or
+an admin with Ban Users (can_restrict_members) permission can approve.
+"""
 import os
 
 from telegram import ChatPermissions, InlineKeyboardMarkup
@@ -18,6 +23,16 @@ from common import (
 )
 
 WARN_LIMIT = int(os.getenv("WARN_LIMIT", "3"))
+
+# ⚠️ APNI TELEGRAM ID YAHAN DAALEIN (numeric, e.g. 123456789)
+BOT_OWNER_ID = 123456789  # <-- yahan apna ID daalein
+
+# Telegram's official Anonymous Admin Bot ID
+ANON_ADMIN_ID = 1087968824
+
+# Pending anonymous-admin actions (in-memory, key -> dict).
+_PENDING_ANON = {}
+_ANON_SEQ = 0
 
 HELP_TXT = (
     "<b>✦ moderation — ban / mute / warn</b>\n\n"
@@ -52,6 +67,82 @@ FULL_PERMS = ChatPermissions(
 )
 MUTE_PERMS = ChatPermissions(can_send_messages=False)
 
+
+# ───────── anonymous helpers ─────────
+
+async def _get_real_group_owner_id(ctx, chat_id: int):
+    """Return the actual Telegram user ID of the group owner (creator)."""
+    try:
+        admins = await ctx.bot.get_chat_administrators(chat_id)
+        for a in admins:
+            if a.status == ChatMemberStatus.OWNER:
+                return a.user.id
+    except TelegramError:
+        pass
+    return None
+
+
+def _next_anon_key() -> str:
+    global _ANON_SEQ
+    _ANON_SEQ += 1
+    return f"a{_ANON_SEQ}"
+
+
+async def _handle_anon_admin(update, ctx, action_type: str) -> bool:
+    """If caller is the Telegram Anonymous Admin bot, store pending action and
+    show a green verification button. Returns True if handled (caller must return)."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not user or user.id != ANON_ADMIN_ID:
+        return False
+
+    # Bot must have restrict rights for the button to be meaningful
+    bm = await get_member(ctx, chat.id, ctx.bot.id)
+    if not rights_of(bm)["restrict_members"]:
+        await say(ctx, chat.id,
+                  T("i don't have the <b>Ban Users</b> power in this chat, "
+                    "so i can't perform moderation actions."),
+                  reply_to=msg.message_id)
+        return True
+
+    target, reason = await resolve_target(update, ctx)
+    if not target:
+        await say(ctx, chat.id,
+                  T("reply to a user, or use /{c} @username | user id [reason]", c=action_type),
+                  reply_to=msg.message_id)
+        return True
+    if target.id == ctx.bot.id:
+        await say(ctx, chat.id, T("i can't do that to myself 🙂"), reply_to=msg.message_id)
+        return True
+
+    key = _next_anon_key()
+    _PENDING_ANON[key] = {
+        "type": action_type,
+        "chat_id": chat.id,
+        "target_id": target.id,
+        "target_name": target.first_name or "User",
+        "reason": reason or "",
+    }
+    # lightweight cleanup so dict never explodes
+    if len(_PENDING_ANON) > 200:
+        for k in list(_PENDING_ANON.keys())[:50]:
+            _PENDING_ANON.pop(k, None)
+
+    btn = B("🟢 I am the Group Owner / Admin", f"anonmod:{key}", style="success")
+    kb = InlineKeyboardMarkup([[btn]])
+    await ctx.bot.send_message(
+        chat.id,
+        q(T("<b>⚠️ Anonymous Admin detected.</b>\n"
+            "Only the <b>group owner</b> or an <b>admin with Ban Users permission</b> "
+            "can approve this action. Tap the green button below to verify.")),
+        reply_to_message_id=msg.message_id,
+        reply_markup=kb,
+    )
+    return True
+
+
+# ───────── existing helpers ─────────
 
 async def _target_or_complain(update, ctx, cmd):
     msg, chat = update.effective_message, update.effective_chat
@@ -92,6 +183,8 @@ def _undo_kb(label, data):
 
 # ───────── BAN ─────────
 async def ban_cmd(update, ctx):
+    if await _handle_anon_admin(update, ctx, "ban"):
+        return
     msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
     if not await _need_restrict(update, ctx):
         return
@@ -112,6 +205,8 @@ async def ban_cmd(update, ctx):
 
 
 async def unban_cmd(update, ctx):
+    if await _handle_anon_admin(update, ctx, "unban"):
+        return
     msg, chat = update.effective_message, update.effective_chat
     if not await _need_restrict(update, ctx):
         return
@@ -127,8 +222,10 @@ async def unban_cmd(update, ctx):
     await say(ctx, chat.id, T("✅ {m} has been unbanned.", m=mention(target)), reply_to=msg.message_id)
 
 
-# ───────── KICK (ban immediately followed by unban — no permanent ban, no button) ─────────
+# ───────── KICK ─────────
 async def kick_cmd(update, ctx):
+    if await _handle_anon_admin(update, ctx, "kick"):
+        return
     msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
     if not await _need_restrict(update, ctx):
         return
@@ -150,6 +247,8 @@ async def kick_cmd(update, ctx):
 
 # ───────── MUTE ─────────
 async def mute_cmd(update, ctx):
+    if await _handle_anon_admin(update, ctx, "mute"):
+        return
     msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
     if not await _need_restrict(update, ctx):
         return
@@ -170,6 +269,8 @@ async def mute_cmd(update, ctx):
 
 
 async def unmute_cmd(update, ctx):
+    if await _handle_anon_admin(update, ctx, "unmute"):
+        return
     msg, chat = update.effective_message, update.effective_chat
     if not await _need_restrict(update, ctx):
         return
@@ -187,6 +288,8 @@ async def unmute_cmd(update, ctx):
 
 # ───────── WARN ─────────
 async def warn_cmd(update, ctx):
+    if await _handle_anon_admin(update, ctx, "warn"):
+        return
     msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
     if not await require_admin(update, ctx, "restrict_members"):
         return
@@ -215,6 +318,8 @@ async def warn_cmd(update, ctx):
 
 
 async def unwarn_cmd(update, ctx):
+    if await _handle_anon_admin(update, ctx, "unwarn"):
+        return
     msg, chat = update.effective_message, update.effective_chat
     if not await require_admin(update, ctx, "restrict_members"):
         return
@@ -225,9 +330,8 @@ async def unwarn_cmd(update, ctx):
     await say(ctx, chat.id, T("✅ warns cleared for {m}.", m=mention(target)), reply_to=msg.message_id)
 
 
-# ───────── DELETE + ACTION (.dban / .dmute / .dwarn) ─────────
+# ───────── DELETE + ACTION ─────────
 async def _delete_replied(update):
-    """Reply wale message ko delete karo (agar ho). Fail hone pe chup-chaap ignore."""
     msg = update.effective_message
     replied = msg.reply_to_message if msg else None
     if not replied:
@@ -239,24 +343,21 @@ async def _delete_replied(update):
 
 
 async def dban_cmd(update, ctx):
-    """`.dban` — pehle replied msg delete, phir ban."""
     await _delete_replied(update)
     await ban_cmd(update, ctx)
 
 
 async def dmute_cmd(update, ctx):
-    """`.dmute` — pehle replied msg delete, phir mute."""
     await _delete_replied(update)
     await mute_cmd(update, ctx)
 
 
 async def dwarn_cmd(update, ctx):
-    """`.dwarn` — pehle replied msg delete, phir warn."""
     await _delete_replied(update)
     await warn_cmd(update, ctx)
 
 
-# ───────── UNDO BUTTONS ─────────
+# ───────── UNDO BUTTONS (existing) ─────────
 async def mod_cb(update, ctx):
     qy = update.callback_query
     chat = update.effective_chat
@@ -293,6 +394,127 @@ async def mod_cb(update, ctx):
     await qy.answer("Done ✅")
 
 
+# ───────── ANONYMOUS VERIFY CALLBACK ─────────
+
+async def anon_mod_callback(update, ctx):
+    """Handles the green 'I am the Group Owner / Admin' verification button."""
+    qy = update.callback_query
+
+    parts = qy.data.split(":", 1)
+    if len(parts) < 2:
+        await qy.answer()
+        return
+    key = parts[1]
+
+    pending = _PENDING_ANON.pop(key, None)
+    if not pending:
+        await qy.answer("This action has expired or was already used.", show_alert=True)
+        return
+
+    chat_id = pending["chat_id"]
+    action_type = pending["type"]
+    target_id = pending["target_id"]
+    target_name = pending["target_name"]
+    reason = pending["reason"]
+    approver = qy.from_user
+
+    # ── Cross-verify approver's rights ──
+    real_owner_id = await _get_real_group_owner_id(ctx, chat_id)
+    is_owner = (approver.id == real_owner_id) or (approver.id == BOT_OWNER_ID)
+
+    approver_is_admin = False
+    if not is_owner:
+        try:
+            am = await ctx.bot.get_chat_member(chat_id, approver.id)
+            if (am.status == ChatMemberStatus.ADMINISTRATOR
+                    and getattr(am, "can_restrict_members", False)):
+                approver_is_admin = True
+        except TelegramError:
+            pass
+
+    if not is_owner and not approver_is_admin:
+        await qy.answer(
+            "❌ Only the group owner or an admin with Ban Users permission can approve this!",
+            show_alert=True,
+        )
+        return
+
+    # ── Verify bot's rights ──
+    bm = await get_member(ctx, chat_id, ctx.bot.id)
+    if not rights_of(bm)["restrict_members"]:
+        await qy.answer("I don't have the Ban Users power.", show_alert=True)
+        return
+
+    await qy.answer("✅ Approved!")
+
+    target_mention = f'<a href="tg://user?id={target_id}">{esc(target_name)}</a>'
+    approver_mention = mention(approver)
+
+    try:
+        if action_type == "ban":
+            await ctx.bot.ban_chat_member(chat_id, target_id)
+            await dbase.mod_set(chat_id, target_id, "ban", approver.id, reason)
+            new_text = T("<b>🚫 BAN (anon approved)</b>\n\nuser: {u}\nby: {a}\nreason: {r}",
+                         u=target_mention, a=approver_mention,
+                         r=esc(reason) if reason else "no reason given")
+
+        elif action_type == "unban":
+            await ctx.bot.unban_chat_member(chat_id, target_id, only_if_banned=True)
+            await dbase.mod_clear(chat_id, target_id)
+            new_text = T("<b>✅ UNBANNED</b>\n\n{m} was unbanned by {a}.",
+                         m=target_mention, a=approver_mention)
+
+        elif action_type == "kick":
+            await ctx.bot.ban_chat_member(chat_id, target_id)
+            await ctx.bot.unban_chat_member(chat_id, target_id, only_if_banned=True)
+            new_text = T("<b>👢 KICKED (anon approved)</b>\n\nuser: {u}\nby: {a}\nreason: {r}",
+                         u=target_mention, a=approver_mention,
+                         r=esc(reason) if reason else "no reason given")
+
+        elif action_type == "mute":
+            await ctx.bot.restrict_chat_member(chat_id, target_id, permissions=MUTE_PERMS)
+            await dbase.mod_set(chat_id, target_id, "mute", approver.id, reason)
+            new_text = T("<b>🔇 MUTE (anon approved)</b>\n\nuser: {u}\nby: {a}\nreason: {r}",
+                         u=target_mention, a=approver_mention,
+                         r=esc(reason) if reason else "no reason given")
+
+        elif action_type == "unmute":
+            await ctx.bot.restrict_chat_member(chat_id, target_id, permissions=FULL_PERMS)
+            await dbase.mod_clear(chat_id, target_id)
+            new_text = T("<b>✅ UNMUTED</b>\n\n{m} was unmuted by {a}.",
+                         m=target_mention, a=approver_mention)
+
+        elif action_type == "warn":
+            count = await dbase.warn_add(chat_id, target_id, approver.id, reason)
+            new_text = T("<b>⚠ WARN (anon approved)</b>\n\nuser: {u}\nby: {a}\nreason: {r}\nwarns: {c}/{n}",
+                         u=target_mention, a=approver_mention,
+                         r=esc(reason) if reason else "no reason given",
+                         c=count, n=WARN_LIMIT)
+            if count >= WARN_LIMIT:
+                try:
+                    await ctx.bot.restrict_chat_member(chat_id, target_id, permissions=MUTE_PERMS)
+                    await dbase.mod_set(chat_id, target_id, "mute", approver.id, "reached warn limit")
+                    new_text += "\n\n" + T("🔇 warn limit reached — user has been muted.")
+                except TelegramError as e:
+                    new_text += "\n\n" + T("⚠ warn limit reached but mute failed:") + f" {esc(e)}"
+
+        elif action_type == "unwarn":
+            await dbase.warn_clear(chat_id, target_id)
+            new_text = T("<b>✅ WARNS CLEARED</b>\n\n{m}'s warns were cleared by {a}.",
+                         m=target_mention, a=approver_mention)
+
+        else:
+            await qy.edit_message_text("Unknown action.")
+            return
+
+        await qy.edit_message_text(q(new_text))
+
+    except TelegramError as e:
+        await qy.edit_message_text(q(T("action failed:") + f" {esc(e)}"))
+
+
+# ───────── REGISTER ─────────
+
 def register(app):
     dual_command(app, "ban", ban_cmd)
     dual_command(app, "unban", unban_cmd)
@@ -301,8 +523,15 @@ def register(app):
     dual_command(app, "unmute", unmute_cmd)
     dual_command(app, "warn", warn_cmd)
     dual_command(app, "unwarn", unwarn_cmd)
-    # delete + action (replied message auto-delete)
     dual_command(app, "dban", dban_cmd)
     dual_command(app, "dmute", dmute_cmd)
     dual_command(app, "dwarn", dwarn_cmd)
+
+    # existing undo buttons
     app.add_handler(CallbackQueryHandler(mod_cb, pattern=r"^mod:"))
+    # new anonymous verify buttons
+    app.add_handler(CallbackQueryHandler(anon_mod_callback, pattern=r"^anonmod:"))
+    
+
+
+  
