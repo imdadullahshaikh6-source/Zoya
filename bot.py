@@ -24,11 +24,12 @@ import database as dbase
 import filters as bot_filters
 import fun
 import guardian
+import locks
 import pin
 import ping
 import sticker
 import welcome
-import mantion  # ✅ FIX: Aapke file naam ke hisaab se 'mantion' kar diya
+import mantion  # ✅ File name ke hisaab se
 from common import B, T, log, mention, say, sc
 
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(name)s | %(message)s", level=logging.INFO)
@@ -49,6 +50,7 @@ START_TXT = (
     "➤ ban, mute, warn — each with an undo button\n"
     "➤ afk tracking\n"
     "➤ guardian — anti-edit & anti-media defender\n"
+    "➤ locks — auto-delete spam type messages\n"
     "➤ clean command & pin tools\n"
     "➤ every command works with / or . in groups\n\n"
     "tap <b>command</b> below to see everything i can do."
@@ -72,6 +74,19 @@ GUARDIAN_TXT = (
     "• <code>.guard on</code> / <code>.guard off</code> — enable/disable Guardian."
 )
 
+LOCKS_TXT = (
+    "<b>✦ 𝙇𝙤𝙘𝙠𝙨</b>\n\n"
+    "Do stickers annoy you? Or want to avoid people sharing links? Or pictures? "
+    "You're in the right place!\n\n"
+    "The locks module allows you to lock away some common items in the Telegram world; "
+    "the bot will automatically delete them!\n\n"
+    "<b>Admin commands:</b>\n"
+    "• <code>/lock &lt;item(s)&gt;</code>: Lock one or more items. Now, only admins can use this type!\n"
+    "• <code>/unlock &lt;item(s)&gt;</code>: Unlock one or more items. Everyone can use this type again!\n"
+    "• <code>/locks</code>: List currently locked items.\n"
+    "• <code>/locktypes</code>: Show the list of all lockable items."
+)
+
 UTILITY_TXT = cleancommand.HELP_TXT + "\n\n" + pin.HELP_TXT
 
 PAGES = {
@@ -82,6 +97,7 @@ PAGES = {
     "extra": ("🎁 𝙀𝙭𝙩𝙧𝙖", sticker.HELP_TXT + "\n\n" + fun.HELP_TXT),
     "filters": ("🔍 𝙁𝙞𝙡𝙩𝙚𝙧𝙨", bot_filters.HELP_TXT),
     "guardian": ("🛡 𝙂𝙪𝙖𝙧𝙙𝙞𝙖𝙣", GUARDIAN_TXT),
+    "locks": ("🔒 𝙇𝙤𝙘𝙠𝙨", LOCKS_TXT),
     "utility": ("🧰 𝙐𝙩𝙞𝙡𝙞𝙩𝙮", UTILITY_TXT),
 }
 
@@ -94,6 +110,7 @@ ALIASES = {
     "kang": "extra", "waifu": "extra", "couple": "extra", "fun": "extra",
     "filter": "filters", "filters": "filters", "f": "filters",
     "guardian": "guardian", "defender": "guardian", "setdelay": "guardian", "permit": "guardian",
+    "lock": "locks", "locks": "locks", "locktypes": "locks",
     "utility": "utility", "clean": "utility", "cleancommand": "utility",
     "pin": "utility", "unpin": "utility",
 }
@@ -124,11 +141,15 @@ def home_page(user, ctx):
 def main_page():
     text = sc("<b>✦ command</b>\n\nchoose a category to see all details.")
     keys = list(PAGES)
-    rows, colors = [], ["success", "primary", "success", "primary"]
+    rows = []
     for i in range(0, len(keys), 2):
         row = []
         for j, k in enumerate(keys[i:i + 2]):
-            btn_style = colors[(i + j) % len(colors)]
+            # ✅ Locks ko RED (danger) color, baaki ko green/blue alternating
+            if k == "locks":
+                btn_style = "danger"
+            else:
+                btn_style = "success" if (i + j) % 2 == 0 else "primary"
             row.append(B(PAGES[k][0], f"help:{k}", style=btn_style))
         rows.append(row)
     rows.append([B("⬅ 𝘽𝙖𝙘𝙠", "help:home"), B("✖ 𝘾𝙡𝙤𝙨𝙚", "help:close", style="danger")])
@@ -137,7 +158,12 @@ def main_page():
 
 def section_page(key):
     label, body = PAGES[key]
-    return sc(body), InlineKeyboardMarkup([[B("⬅ 𝘽𝙖𝙘𝙠", "help:main"), B("✖ 𝘾𝙡𝙤𝙨𝙚", "help:close", style="danger")]])
+    rows = []
+    # ✅ Agar locks page hai toh Locktypes button add karo (blue colour)
+    if key == "locks":
+        rows.append([B("𝙇𝙤𝙘𝙠𝙩𝙮𝙥𝙚𝙨", "help:locktypes", style="primary")])
+    rows.append([B("⬅ 𝘽𝙖𝙘𝙠", "help:main"), B("✖ 𝘾𝙡𝙤𝙨𝙚", "help:close", style="danger")])
+    return sc(body), InlineKeyboardMarkup(rows)
 
 
 async def edit_page(qy, text, kb):
@@ -214,6 +240,10 @@ async def help_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         text, kb = home_page(qy.from_user, ctx)
     elif page == "main":
         text, kb = main_page()
+    elif page == "locktypes":
+        # ✅ Locks ke saare locktypes ke buttons (blue colour)
+        text = sc("<b>The available locktypes are:</b>")
+        kb = locks.get_locktypes_kb()
     elif page in PAGES:
         text, kb = section_page(page)
     else:
@@ -248,7 +278,7 @@ async def post_init(app: Application):
     app.bot_data["me"] = await app.bot.get_me()
     cmds = [("start", "Start the bot"), ("help", "Show commands")]
     for mod in (welcome, admin, afk, ban, sticker, fun, bot_filters, ping,
-                guardian, cleancommand, pin):
+                guardian, cleancommand, pin, locks):
         cmds += mod.COMMANDS
     await app.bot.set_my_commands(cmds)
     log.info("Started as @%s", app.bot_data["me"].username)
@@ -291,7 +321,8 @@ def main():
     guardian.register(app)
     cleancommand.register(app)
     pin.register(app)
-    mantion.register(app)  # ✅ FIX: Yahan bhi 'mantion' kar diya
+    mantion.register(app)
+    locks.register(app)  # ✅ Locks register
 
     app.add_error_handler(on_error)
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
