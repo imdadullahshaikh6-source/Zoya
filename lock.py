@@ -53,10 +53,11 @@ LOCK_DESC = {
 }
 
 
-def get_locktypes_kb():
+def get_locktypes_kb(back: bool = False):
     buttons = []
     row = []
     for lt in LOCKTYPES:
+        # Capitalize display with Sans-Serif Bold font
         display_name = "".join([chr(ord(c) - 97 + 0x1D68A) if 'a' <= c <= 'z' else c for c in lt])
         row.append(B(display_name, f"lockinfo:{lt}", style="primary"))
         if len(row) == 3:
@@ -64,6 +65,11 @@ def get_locktypes_kb():
             row = []
     if row:
         buttons.append(row)
+    
+    # ✅ FIX: Agar back=True hai, toh Back button add karo (sirf DM ke liye)
+    if back:
+        buttons.append([B("⬅ 𝘽𝙖𝙘𝙠", "help:locks", style="danger")])
+    
     return InlineKeyboardMarkup(buttons)
 
 
@@ -191,7 +197,6 @@ async def unlock_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     items = [i.lower() for i in ctx.args]
-    # ✅ FIX: invalid/unlock types ko filter karo
     invalid = [i for i in items if i not in LOCKTYPES and i != "all"]
     if invalid:
         await say(ctx, chat.id, T(f"invalid lock types: {', '.join(invalid)}"), reply_to=msg.message_id)
@@ -223,6 +228,7 @@ async def locktypes_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg, chat = update.effective_message, update.effective_chat
     if chat.type == ChatType.PRIVATE:
         return
+    # Group mein Back button nahi chahiye (default False hai)
     await say(ctx, chat.id, "The available locktypes are:", kb=get_locktypes_kb(), reply_to=msg.message_id)
 
 
