@@ -129,7 +129,7 @@ async def _handle_anon_admin(update, ctx, action_type: str) -> bool:
         for k in list(_PENDING_ANON.keys())[:50]:
             _PENDING_ANON.pop(k, None)
 
-    btn = B("🟢 I am the Group Owner / Admin", f"anonmod:{key}", style="success")
+    btn = B("🟢 𝙥𝙧𝙤𝙫𝙚 𝙊𝙬𝙣𝙚𝙧/𝙖𝙙𝙢𝙞𝙣", f"anonmod:{key}", style="success")
     kb = InlineKeyboardMarkup([[btn]])
     await ctx.bot.send_message(
         chat.id,
