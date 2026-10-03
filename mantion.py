@@ -96,7 +96,10 @@ async def admin_mention_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         
     # Tag max 5 admins to avoid Telegram spam detection
     chunk = admin_tags[:5]
-    reply_text = " ".join(chunk)
+    
+    # ✅ FIX: Yahan bhi bold font wala header add kar diya
+    header = "👑 𝙰𝚍𝚖𝚒𝚗𝚜:"
+    reply_text = header + "\n" + " ".join(chunk)
     
     await say(ctx, chat.id, T(reply_text), reply_to=msg.message_id)
 
@@ -111,4 +114,4 @@ def register(app):
             admin_mention_handler
         ),
         group=5,
-)
+    )
