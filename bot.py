@@ -36,7 +36,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 MONGO_URI = os.environ["MONGO_URI"]
 DB_NAME = os.getenv("DB_NAME", "zoya_bot")
 OWNER_USERNAME = "Ownerbackk"
-SUPPORT_URL = os.getenv("SUPPORT_URL", "https://t.me/Ownerbackk")
+OWNER_URL = f"https://t.me/{OWNER_USERNAME}"  # ✅ FIX: Seedha tumhari ID par jayega
 CHANNEL_URL = os.getenv("CHANNEL_URL", "")
 START_IMG = os.getenv("START_IMG", "https://graph.org/file/d3a2c17942e606f4ec811-9c0373fa8bb10f4448.jpg")
 
@@ -112,7 +112,8 @@ def home_page(user, ctx):
     rows = [
         [B("📜 𝘾𝙤𝙢𝙢𝙖𝙣𝙙", "help:main", style="primary")],
     ]
-    row2 = [B("👑 𝙊𝙬𝙣𝙚𝙧", url=SUPPORT_URL, style="danger")]
+    # ✅ FIX: Ab yahan OWNER_URL lag gaya hai, jo seedha @Ownerbackk par jayega
+    row2 = [B("👑 𝙊𝙬𝙣𝙚𝙧", url=OWNER_URL, style="danger")]
     if CHANNEL_URL:
         row2.append(B("🔔 𝘾𝙝𝙖𝙣𝙣𝙚𝙡", url=CHANNEL_URL, style="danger"))
     rows.append(row2)
