@@ -2,14 +2,13 @@
 import html
 import re
 
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import Update, InlineKeyboardMarkup
 from telegram.constants import ChatMemberStatus, ChatType
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes, MessageHandler, filters, CallbackQueryHandler
 
 from common import B, T, dual_command, say
 
-# ✅ FIX: COMMANDS variable add kar diya
 COMMANDS = [
     ("lock", "Lock message types"),
     ("unlock", "Unlock message types"),
@@ -53,14 +52,14 @@ LOCK_DESC = {
     "voice": "Voice messages."
 }
 
-# Helper to build locktypes keyboard with Rose style fonts
 def get_locktypes_kb():
     buttons = []
     row = []
     for lt in LOCKTYPES:
-        # Capitalize display with Sans-Serif Bold font manually
+        # Capitalize display with Sans-Serif Bold font
         display_name = "".join([chr(ord(c) - 97 + 0x1D68A) if 'a' <= c <= 'z' else c for c in lt])
-        row.append(InlineKeyboardButton(display_name, callback_data=f"lockinfo:{lt}", style="primary"))
+        # ✅ FIX: InlineKeyboardButton ki jagah B() use kiya (jo style support karta hai)
+        row.append(B(display_name, callback_data=f"lockinfo:{lt}", style="primary"))
         if len(row) == 3:
             buttons.append(row)
             row = []
@@ -73,7 +72,6 @@ async def lock_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if chat.type == ChatType.PRIVATE:
         return
     
-    # Admin check
     try:
         m = await ctx.bot.get_chat_member(chat.id, user.id)
         if m.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
@@ -92,7 +90,6 @@ async def lock_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await say(ctx, chat.id, T(f"invalid lock types: {', '.join(invalid)}"), reply_to=msg.message_id)
         return
 
-    # Save to db (in-memory for now, replace with dbase for persistence)
     if "locks_db" not in ctx.bot_data:
         ctx.bot_data["locks_db"] = {}
     if chat.id not in ctx.bot_data["locks_db"]:
@@ -163,7 +160,7 @@ async def _locks_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not active:
         return
 
-    # ✅ Admin Bypass: Admins ko delete nahi karna
+    # Admin Bypass
     try:
         member = await ctx.bot.get_chat_member(chat.id, user.id)
         if member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
@@ -171,13 +168,12 @@ async def _locks_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except TelegramError:
         pass
 
-    # ✅ Bot Permission Check
+    # Bot Permission Check
     me = ctx.bot_data.get("me")
     if me:
         try:
             bot_member = await ctx.bot.get_chat_member(chat.id, me.id)
             if not getattr(bot_member, "can_delete_messages", False):
-                # Ek baar warning bhejne ke liye check (spam na ho)
                 if ctx.bot_data.get(f"warned_{chat.id}") != True:
                     ctx.bot_data[f"warned_{chat.id}"] = True
                     await say(ctx, chat.id, T("⚠️ I need <b>Delete Messages</b> permission to enforce locks. Please promote me!"))
@@ -187,11 +183,9 @@ async def _locks_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     should_delete = False
 
-    # Check if 'all' is locked
     if "all" in active:
         should_delete = True
     else:
-        # Check basic media types
         if "text" in active and msg.text:
             should_delete = True
         if "photo" in active and msg.photo:
@@ -227,11 +221,9 @@ async def _locks_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if "button" in active and msg.reply_markup:
             should_delete = True
 
-        # Check entities (url, email, phone, spoiler, emoji)
         if msg.entities:
             for e in msg.entities:
                 if "url" in active and e.type in ("url", "text_link"):
-                    # Allow group's own links (heuristic: skip t.me links)
                     url_text = msg.text[e.offset:e.offset+e.length] if msg.text else ""
                     if "t.me/" not in url_text:
                         should_delete = True
