@@ -5,7 +5,7 @@ import logging
 import os
 
 from dotenv import load_dotenv
-load_dotenv()  # ← .env file load karta hai (QUOTE_*, BOT_TOKEN, MONGO_URI, etc.)
+load_dotenv()
 
 import aiofastnet
 from telegram import InlineKeyboardMarkup, LinkPreviewOptions, Update
@@ -24,12 +24,12 @@ import database as dbase
 import filters as bot_filters
 import fun
 import guardian
-import locks
+import lock  # ✅ FIX: 'locks' ki jagah 'lock' (kyunki file ka naam lock.py hai)
 import pin
 import ping
 import sticker
 import welcome
-import mantion  # ✅ File name ke hisaab se
+import mantion
 from common import B, T, log, mention, say, sc
 
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(name)s | %(message)s", level=logging.INFO)
@@ -145,7 +145,6 @@ def main_page():
     for i in range(0, len(keys), 2):
         row = []
         for j, k in enumerate(keys[i:i + 2]):
-            # ✅ Locks ko RED (danger) color, baaki ko green/blue alternating
             if k == "locks":
                 btn_style = "danger"
             else:
@@ -159,7 +158,6 @@ def main_page():
 def section_page(key):
     label, body = PAGES[key]
     rows = []
-    # ✅ Agar locks page hai toh Locktypes button add karo (blue colour)
     if key == "locks":
         rows.append([B("𝙇𝙤𝙘𝙠𝙩𝙮𝙥𝙚𝙨", "help:locktypes", style="primary")])
     rows.append([B("⬅ 𝘽𝙖𝙘𝙠", "help:main"), B("✖ 𝘾𝙡𝙤𝙨𝙚", "help:close", style="danger")])
@@ -241,9 +239,8 @@ async def help_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif page == "main":
         text, kb = main_page()
     elif page == "locktypes":
-        # ✅ Locks ke saare locktypes ke buttons (blue colour)
         text = sc("<b>The available locktypes are:</b>")
-        kb = locks.get_locktypes_kb()
+        kb = lock.get_locktypes_kb()  # ✅ 'lock' module use kiya
     elif page in PAGES:
         text, kb = section_page(page)
     else:
@@ -277,8 +274,9 @@ async def post_init(app: Application):
     await dbase.init(MONGO_URI, DB_NAME)
     app.bot_data["me"] = await app.bot.get_me()
     cmds = [("start", "Start the bot"), ("help", "Show commands")]
+    # ✅ 'locks' ki jagah 'lock' add kiya
     for mod in (welcome, admin, afk, ban, sticker, fun, bot_filters, ping,
-                guardian, cleancommand, pin, locks):
+                guardian, cleancommand, pin, lock):
         cmds += mod.COMMANDS
     await app.bot.set_my_commands(cmds)
     log.info("Started as @%s", app.bot_data["me"].username)
@@ -322,7 +320,7 @@ def main():
     cleancommand.register(app)
     pin.register(app)
     mantion.register(app)
-    locks.register(app)  # ✅ Locks register
+    lock.register(app)  # ✅ 'lock' module register kiya
 
     app.add_error_handler(on_error)
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
