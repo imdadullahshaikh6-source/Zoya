@@ -3,7 +3,6 @@ DM /start experience (reaction + photo + buttons)."""
 import asyncio
 import logging
 import os
-import re
 
 from dotenv import load_dotenv
 load_dotenv()  # ← .env file load karta hai (QUOTE_*, BOT_TOKEN, MONGO_URI, etc.)
@@ -222,51 +221,6 @@ async def help_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await edit_page(qy, text, kb)
 
 
-# ─── .dban / .dmute / .dwarn — reply wale msg ko delete karke action chalao ───
-_DMOD_RE = re.compile(r"^[/.](dban|dmute|dwarn)(?:@\w+)?(?:\s|$)", re.IGNORECASE)
-
-_MOD_FN_NAMES = {
-    "ban":  ("ban_cmd", "ban_command", "ban_handler", "ban_user", "ban"),
-    "mute": ("mute_cmd", "mute_command", "mute_handler", "mute_user", "mute"),
-    "warn": ("warn_cmd", "warn_command", "warn_handler", "warn_user", "warn"),
-}
-
-
-async def dmod_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """`.dban` / `.dmute` / `.dwarn` → reply wale message ko delete karke
-    uske sender pe ban/mute/warn chala deta hai (same purana method)."""
-    msg = update.effective_message
-    if not msg or not msg.text:
-        return
-    m = _DMOD_RE.match(msg.text.strip())
-    if not m:
-        return
-
-    action = m.group(1).lower()[1:]   # "ban" | "mute" | "warn"
-    replied = msg.reply_to_message
-    if not replied:
-        await say(ctx, msg.chat_id, T("❗ reply to a message to use this command."),
-                  reply_to=msg.message_id)
-        return
-
-    # 1) pehle replied message delete
-    try:
-        await replied.delete()
-    except TelegramError:
-        pass
-
-    # 2) phir wahi purana ban/mute/warn handler chala do
-    fn = None
-    for name in _MOD_FN_NAMES[action]:
-        fn = getattr(ban, name, None)
-        if callable(fn):
-            break
-    if not callable(fn):
-        log.warning("dmod: ban module me %s handler nahi mila", action)
-        return
-    await fn(update, ctx)
-
-
 async def on_error(update, ctx: ContextTypes.DEFAULT_TYPE):
     log.error("Unhandled error", exc_info=ctx.error)
 
@@ -326,12 +280,6 @@ def main():
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CallbackQueryHandler(help_cb, pattern=r"^help:"))
 
-    # ─── .dban / .dmute / .dwarn (replied msg delete + action) ───
-    app.add_handler(MessageHandler(
-        filters.TEXT & filters.Regex(r"^[/.](dban|dmute|dwarn)"),
-        dmod_cmd,
-    ))
-
     welcome.register(app)
     admin.register(app)
     afk.register(app)
@@ -350,3 +298,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
