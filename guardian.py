@@ -11,13 +11,11 @@ from telegram.ext import ContextTypes, MessageHandler, filters, CallbackQueryHan
 
 import database as dbase
 from common import B, T, dual_command, mention, q, say, resolve_target
+from lock import is_message_locked  # ✅ Locks compatibility
 
 log = logging.getLogger("guardian")
 
-# ⚠️ APNI TELEGRAM ID YAHAN DAALEIN (numeric, e.g. 123456789)
-BOT_OWNER_ID = 8373739674  # <-- Aapki ID yahan set kar di gayi hai
-
-# Telegram's official Anonymous Admin Bot ID
+BOT_OWNER_ID = 8373739674
 ANON_ADMIN_ID = 1087968824
 
 HELP_TXT = (
@@ -61,7 +59,6 @@ def _parse_delay(arg: str):
     return n * mult
 
 
-# ✅ FIX: Mention hatane ke liye plain text function
 def _safe_name(user) -> str:
     if not user:
         return "Unknown"
@@ -115,8 +112,6 @@ async def _bot_can_guard(ctx, chat_id: int) -> bool:
             and bool(getattr(m, "can_delete_messages", False)))
 
 
-# ───────────── commands ─────────────
-
 async def setdelay_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
     if chat.type == ChatType.PRIVATE:
@@ -169,24 +164,18 @@ async def permit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if chat.type == ChatType.PRIVATE:
         return
 
-    # 🔹 Anonymous Admin Detection
     if user.id == ANON_ADMIN_ID:
         target, _ = await resolve_target(update, ctx)
         if not target:
             await say(ctx, chat.id, T("<blockquote>❌ Invalid format or no target. Reply, ID, or @username.</blockquote>"), reply_to=msg.message_id)
             return
-
         target_id = target.id
         target_name = html.escape(target.first_name or "User")
-
         btn_data = f"anonperm|{chat.id}|{target_id}|{target_name}"
         keyboard = InlineKeyboardMarkup([[B("🟢 𝙥𝙧𝙤𝙫𝙚 𝙤𝙬𝙣𝙚𝙧", btn_data, style="success")]])
-        # ✅ FIX: say() ki jagah ctx.bot.send_message() use kiya (reply_markup support nahi karta say)
         await ctx.bot.send_message(
             chat.id,
-            q(T("<b>⚠️ Anonymous Admin detected.</b>\n"
-                "Only the real group owner can approve permits. "
-                "Please tap the button below to verify.")),
+            q(T("<b>⚠️ Anonymous Admin detected.</b>\nOnly the real group owner can approve permits. Please tap the button below to verify.")),
             parse_mode=ParseMode.HTML,
             reply_to_message_id=msg.message_id,
             reply_markup=keyboard,
@@ -204,7 +193,6 @@ async def permit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     target_id = target.id
     target_name = html.escape(target.first_name or "User")
-
     await dbase.guardian_permit_add(chat.id, target_id, target_name)
     mention_txt = f"<a href='tg://user?id={target_id}'>{target_name}</a>"
     await say(ctx, chat.id, T(f"<blockquote>✅ {mention_txt} is now <b>permitted</b> — their edits/media won't be deleted.</blockquote>"), reply_to=msg.message_id)
@@ -215,23 +203,18 @@ async def unpermit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if chat.type == ChatType.PRIVATE:
         return
 
-    # 🔹 Anonymous Admin Detection
     if user.id == ANON_ADMIN_ID:
         target, _ = await resolve_target(update, ctx)
         if not target:
             await say(ctx, chat.id, T("<blockquote>❌ Invalid format or no target. Reply, ID, or @username.</blockquote>"), reply_to=msg.message_id)
             return
-
         target_id = target.id
         target_name = html.escape(target.first_name or "User")
-
         btn_data = f"anonunperm|{chat.id}|{target_id}|{target_name}"
         keyboard = InlineKeyboardMarkup([[B("🟢 𝙥𝙧𝙤𝙫𝙚 𝙤𝙬𝙣𝙚𝙧", btn_data, style="success")]])
-        # ✅ FIX: ctx.bot.send_message() for reply_markup support
         await ctx.bot.send_message(
             chat.id,
-            q(T("<b>⚠️ Anonymous Admin detected.</b>\n"
-                "Only the real group owner can approve. Tap the button below to verify.")),
+            q(T("<b>⚠️ Anonymous Admin detected.</b>\nOnly the real group owner can approve. Tap the button below to verify.")),
             parse_mode=ParseMode.HTML,
             reply_to_message_id=msg.message_id,
             reply_markup=keyboard,
@@ -249,9 +232,7 @@ async def unpermit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     target_id = target.id
     target_name = html.escape(target.first_name or "User")
-
     removed = await dbase.guardian_permit_remove(chat.id, target_id)
-
     txt = f"<blockquote>✅ <b>{target_name}</b> is no longer permitted.</blockquote>" if removed else f"<blockquote>ℹ️ <b>{target_name}</b> wasn't in the permit list.</blockquote>"
     await say(ctx, chat.id, T(txt), reply_to=msg.message_id)
 
@@ -261,15 +242,12 @@ async def permitlist_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if chat.type == ChatType.PRIVATE:
         return
 
-    # 🔹 Anonymous Admin Detection
     if user.id == ANON_ADMIN_ID:
         btn_data = f"anonlist|{chat.id}"
         keyboard = InlineKeyboardMarkup([[B("🟢 𝙥𝙧𝙤𝙫𝙚 𝙤𝙬𝙣𝙚𝙧", btn_data, style="success")]])
-        # ✅ FIX: ctx.bot.send_message() for reply_markup support
         await ctx.bot.send_message(
             chat.id,
-            q(T("<b>⚠️ Anonymous Admin detected.</b>\n"
-                "Only the real group owner can view the permit list. Tap to verify.")),
+            q(T("<b>⚠️ Anonymous Admin detected.</b>\nOnly the real group owner can view the permit list. Tap to verify.")),
             parse_mode=ParseMode.HTML,
             reply_to_message_id=msg.message_id,
             reply_markup=keyboard,
@@ -292,18 +270,13 @@ async def permitlist_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await say(ctx, chat.id, T(f"<blockquote>{text_body}</blockquote>"), reply_to=msg.message_id)
 
 
-# ───────────── anonymous callback handler ─────────────
-
 async def anon_verify_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     data = query.data.split("|")
     action = data[0]
     chat_id = int(data[1])
-
     real_owner_id = await _get_real_group_owner_id(ctx, chat_id)
-
     if query.from_user.id != real_owner_id and query.from_user.id != BOT_OWNER_ID:
         await query.answer("❌ Only the real group owner can approve this!", show_alert=True)
         return
@@ -314,14 +287,12 @@ async def anon_verify_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await dbase.guardian_permit_add(chat_id, target_id, target_name)
         mention_txt = f"<a href='tg://user?id={target_id}'>{target_name}</a>"
         await query.edit_message_text(T(f"<blockquote>✅ Approved by owner. {mention_txt} is now <b>permitted</b>.</blockquote>"), parse_mode=ParseMode.HTML)
-
     elif action == "anonunperm":
         target_id = int(data[2]) if data[2] != "0" else None
         target_name = data[3] if data[3] else None
         removed = await dbase.guardian_permit_remove(chat_id, target_id) if target_id else False
         txt = f"<blockquote>✅ Approved by owner. <b>{target_name or target_id}</b> is no longer permitted.</blockquote>" if removed else f"<blockquote>ℹ️ Approved by owner. <b>{target_name or target_id}</b> wasn't in the list.</blockquote>"
         await query.edit_message_text(T(txt), parse_mode=ParseMode.HTML)
-
     elif action == "anonlist":
         cfg = await dbase.guardian_get(chat_id) or {}
         users = cfg.get("permitted_users", [])
@@ -335,8 +306,6 @@ async def anon_verify_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         text_body = "\n".join(lines)
         await query.edit_message_text(T(f"<blockquote>{text_body}</blockquote>"), parse_mode=ParseMode.HTML)
 
-
-# ───────────── watcher ─────────────
 
 def _msg_has_media(msg) -> bool:
     return bool(
@@ -354,6 +323,11 @@ async def _delete_after(ctx, chat_id: int, message_id: int, delay: int, note_tex
     except TelegramError as e:
         log.warning("[guardian] delete failed for msg %s: %s", message_id, e)
         return
+    
+    # ✅ FIX: Agar note_text empty hai, toh note skip kar do (media ke case mein)
+    if not note_text:
+        return
+        
     try:
         note = await ctx.bot.send_message(chat_id, note_text, parse_mode=ParseMode.HTML)
         await asyncio.sleep(_NOTE_LIFETIME)
@@ -365,7 +339,7 @@ async def _delete_after(ctx, chat_id: int, message_id: int, delay: int, note_tex
         log.warning("[guardian] note failed: %s", e)
 
 
-async def _should_guard(ctx, chat, user) -> int:
+async def _should_guard(ctx, chat, user, msg) -> int:
     if not chat or chat.type == ChatType.PRIVATE:
         return 0
     me = ctx.application.bot_data.get("me")
@@ -391,6 +365,11 @@ async def _should_guard(ctx, chat, user) -> int:
 
     if not await _bot_can_guard(ctx, chat.id):
         return 0
+
+    # Locks compatibility
+    if msg is not None and is_message_locked(ctx.bot_data, chat.id, msg):
+        return 0
+
     return delay
 
 
@@ -407,25 +386,21 @@ async def _guardian_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     is_edit = bool(msg.edit_date)
     is_media = _msg_has_media(msg)
-
     if not is_edit and not is_media:
         return
 
-    delay = await _should_guard(ctx, chat, user)
+    delay = await _should_guard(ctx, chat, user, msg)
     if not delay:
         return
 
-    # ✅ FIX: Yahan mention hata kar simple name (_safe_name) use kar diya gaya hai
+    # ✅ FIX: Sirf edited message ka note aayega, media ka nahi
     if is_edit:
-        body = f"🗑️ {_safe_name(user)}'s <b>edited message</b> was deleted."
+        note = f"<blockquote>🗑️ {_safe_name(user)}'s <b>edited message</b> was deleted.</blockquote>"
     else:
-        body = f"🗑️ {_safe_name(user)}'s <b>media</b> was deleted."
-    note = f"<blockquote>{body}</blockquote>"
+        note = ""  # Media ka note nahi
 
     asyncio.create_task(_delete_after(ctx, chat.id, msg.message_id, delay, note))
 
-
-# ───────────── registration ─────────────
 
 def register(app):
     dual_command(app, "setdelay", setdelay_cmd)
@@ -433,13 +408,5 @@ def register(app):
     dual_command(app, "permit", permit_cmd)
     dual_command(app, "unpermit", unpermit_cmd)
     dual_command(app, "permitlist", permitlist_cmd)
-
-    app.add_handler(CallbackQueryHandler(
-        anon_verify_callback,
-        pattern=r"^anon(perm|unperm|list)\|"
-    ))
-
-    app.add_handler(
-        MessageHandler(filters.ChatType.GROUPS & filters.ALL, _guardian_watcher),
-        group=2,
-    )
+    app.add_handler(CallbackQueryHandler(anon_verify_callback, pattern=r"^anon(perm|unperm|list)\|"))
+    app.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.ALL, _guardian_watcher), group=2)
