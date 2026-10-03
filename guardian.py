@@ -15,7 +15,7 @@ from common import B, T, dual_command, mention, q, say, resolve_target
 log = logging.getLogger("guardian")
 
 # ⚠️ APNI TELEGRAM ID YAHAN DAALEIN (numeric, e.g. 123456789)
-BOT_OWNER_ID = 123456789  # <-- yahan apna ID daalein
+BOT_OWNER_ID = 8373739674  # <-- Aapki ID yahan set kar di gayi hai
 
 # Telegram's official Anonymous Admin Bot ID
 ANON_ADMIN_ID = 1087968824
@@ -61,11 +61,11 @@ def _parse_delay(arg: str):
     return n * mult
 
 
-def _safe_mention(user) -> str:
+# ✅ FIX: Mention hatane ke liye plain text function
+def _safe_name(user) -> str:
     if not user:
         return "Unknown"
-    name = html.escape(user.first_name or "User")
-    return f"<a href='tg://user?id={user.id}'>{name}</a>"
+    return html.escape(user.first_name or "User")
 
 
 async def _get_real_group_owner_id(ctx, chat_id: int):
@@ -415,10 +415,11 @@ async def _guardian_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not delay:
         return
 
+    # ✅ FIX: Yahan mention hata kar simple name (_safe_name) use kar diya gaya hai
     if is_edit:
-        body = f"🗑️ {_safe_mention(user)}'s <b>edited message</b> was deleted."
+        body = f"🗑️ {_safe_name(user)}'s <b>edited message</b> was deleted."
     else:
-        body = f"🗑️ {_safe_mention(user)}'s <b>media</b> was deleted."
+        body = f"🗑️ {_safe_name(user)}'s <b>media</b> was deleted."
     note = f"<blockquote>{body}</blockquote>"
 
     asyncio.create_task(_delete_after(ctx, chat.id, msg.message_id, delay, note))
