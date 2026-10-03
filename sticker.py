@@ -25,9 +25,9 @@ from common import (
     QUOTE_BG, QUOTE_TIMEOUT, QUOTE_TOTAL_TIMEOUT,
 )
 
-# ✅ FIX: Purane API hata kar aapka naya API set kar diya hai
+# ✅ FIX: Aapka naya API set hai
 QUOTE_API = "https://tough-lillian-sungjinw04-79e2ecdb.koyeb.app/generate"
-QUOTE_API_FALLBACKS = "" # Koi fallback API nahi, seedha Pillow use hoga agar ye fail hua toh
+QUOTE_API_FALLBACKS = ""
 
 log = logging.getLogger("sticker")
 
@@ -236,6 +236,22 @@ def _from_block(user) -> dict:
     return out
 
 
+# ✅ FIX 1: Avatar ke liye `photo` field hata diya, sirf `avatar: True` rakha
+def _build_message(msg, avatar: str | None = None, parent_msg=None) -> dict:
+    block = {
+        "entities": _extract_entities(msg),
+        "avatar": True,  # API khud ID se avatar fetch karegi
+        "from": _from_block(getattr(msg, "from_user", None)),
+        "text": _text_of(msg),
+    }
+    
+    reply_block = _build_reply_block(parent_msg)
+    if reply_block:
+        block["replyMessage"] = reply_block
+        
+    return block
+
+
 def _build_reply_block(reply) -> dict | None:
     if reply is None:
         return None
@@ -248,23 +264,6 @@ def _build_reply_block(reply) -> dict | None:
         "text": text,
         "chatId": int(getattr(reply, "chat_id", 0) or 0),
     }
-
-
-def _build_message(msg, avatar: str | None = None, parent_msg=None) -> dict:
-    block = {
-        "entities": _extract_entities(msg),
-        "avatar": True,
-        "from": _from_block(getattr(msg, "from_user", None)),
-        "text": _text_of(msg),
-    }
-    if avatar:
-        block["from"]["photo"] = {"url": avatar}
-    
-    reply_block = _build_reply_block(parent_msg)
-    if reply_block:
-        block["replyMessage"] = reply_block
-        
-    return block
 
 
 def _build_payload(msg, avatar: str | None = None, parent_msg=None) -> dict:
@@ -326,10 +325,7 @@ async def _build_quote_via_api(ctx, src_msg, sender, parent_msg=None) -> bytes |
     if not text:
         return None
 
-    avatar_url = await _avatar_url(ctx, sender.id)
-    log.info("[sticker] avatar url: %s", "yes" if avatar_url else "none")
-
-    payload = _build_payload(src_msg, avatar_url, parent_msg)
+    payload = _build_payload(src_msg, None, parent_msg)  # Avatar url pass nahi kar rahe
     msg0 = payload["messages"][0]
     if "replyMessage" in msg0:
         log.info("[sticker] nested reply: %r", msg0["replyMessage"].get("text", "")[:50])
@@ -531,39 +527,30 @@ async def _build_quote_sticker(ctx, src_msg, sender, parent_msg=None) -> bytes:
     return await _build_quote_via_pillow(ctx, src_msg, sender, parent_msg)
 
 
-# ───────── parent-message helper ─────────
-
+# ✅ FIX 2: Parent fetch karne ka logic strong kiya
 async def _ensure_parent(ctx, chat_id: int, src):
-    ext = getattr(src, "external_reply", None)
-    if ext and getattr(ext, "message_id", None):
-        try:
-            fetched = await ctx.bot.get_messages(chat_id=chat_id, message_ids=ext.message_id)
-            if isinstance(fetched, list):
-                fetched = fetched[0] if fetched else None
-            if fetched:
-                log.info("[sticker] parent found via external_reply")
-                return fetched
-        except Exception:
-            pass
-
-    rt = getattr(src, "reply_to_message", None)
-    if rt and getattr(rt, "message_id", None):
-        log.info("[sticker] parent found via reply_to_message")
-        return rt
-
     parent_id = getattr(src, "reply_to_message_id", None)
-    if not parent_id and rt:
-        parent_id = getattr(rt, "message_id", None)
+    
+    if not parent_id:
+        ext = getattr(src, "external_reply", None)
+        if ext:
+            parent_id = getattr(ext, "message_id", None)
+            
+    if not parent_id:
+        rt = getattr(src, "reply_to_message", None)
+        if rt:
+            parent_id = getattr(rt, "message_id", None)
 
     if not parent_id:
-        log.info("[sticker] no parent_id detected")
+        log.info("[sticker] no parent_id detected on src")
         return None
 
+    log.info("[sticker] parent_id found: %s", parent_id)
     try:
         fetched = await ctx.bot.get_messages(chat_id=chat_id, message_ids=parent_id)
         if isinstance(fetched, list):
             fetched = fetched[0] if fetched else None
-        log.info("[sticker] parent found via reply_to_message_id: %s", parent_id)
+        log.info("[sticker] parent fetched successfully")
         return fetched
     except Exception as e:
         log.warning("[sticker] couldn't fetch parent %s: %s", parent_id, e)
@@ -761,3 +748,4 @@ def register(app):
     dual_command(app, "q", q_cmd)
     dual_command(app, "qr", qr_cmd)
     dual_command(app, "kang", kang_cmd)
+            
