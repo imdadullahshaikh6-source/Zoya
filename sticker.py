@@ -1,8 +1,5 @@
 """Sticker plugin — quote generator (ported from original developer's quotly.py)
 + kang system with MongoDB.
-
-.q / .qr  — render the replied-to message as a Telegram-style quote sticker
-.kang     — steal a replied sticker/photo into the user's own auto-growing pack
 """
 from __future__ import annotations
 
@@ -16,6 +13,7 @@ import re
 import time
 
 import httpx
+from PIL import Image, ImageDraw, ImageFont  # ✅ FIX 1: ImageFont import kar diya
 from telegram import InputSticker, MessageEntity
 from telegram.error import TelegramError
 
@@ -48,7 +46,6 @@ COOLDOWN = 8.0
 
 _last_quote: dict[int, float] = {}
 
-# ✅ Original developer ke entity types (quotly.py se)
 _ENTITY_TYPE_STR = {
     MessageEntity.BOLD: "bold",
     MessageEntity.ITALIC: "italic",
@@ -181,7 +178,6 @@ def _text_of(msg) -> str:
     return (getattr(msg, "text", None) or getattr(msg, "caption", None) or "").strip()
 
 
-# ✅ Original developer ka exact `from` block (quotly.py se)
 def _from_block(user) -> dict:
     if user is None:
         return {
@@ -210,7 +206,6 @@ def _from_block(user) -> dict:
     }
 
 
-# ✅ Original developer ka exact reply block (quotly.py se)
 def _build_reply_block(reply) -> dict | None:
     if reply is None:
         return None
@@ -230,7 +225,6 @@ def _build_reply_block(reply) -> dict | None:
     }
 
 
-# ✅ Original developer ka exact message block
 def _build_message(msg, parent_msg=None) -> dict:
     block = {
         "entities": _extract_entities(msg),
@@ -243,7 +237,6 @@ def _build_message(msg, parent_msg=None) -> dict:
     return block
 
 
-# ✅ Original developer ke exact dimensions (quotly.py se)
 def _build_payload(msg, parent_msg=None) -> dict:
     bg = QUOTE_BG or "#1b1429"
     return {
@@ -488,21 +481,25 @@ async def _build_quote_sticker(ctx, src_msg, sender, parent_msg=None) -> bytes:
 # ───────── parent-message helper ─────────
 
 async def _ensure_parent(ctx, chat_id: int, src):
+    # 1. Direct check
     parent = getattr(src, "reply_to_message", None)
     if parent and getattr(parent, "message_id", None):
         log.info("[sticker] parent found via reply_to_message")
         return parent
 
+    # 2. Fallback to IDs
     parent_id = getattr(src, "reply_to_message_id", None)
+    
     if not parent_id:
         ext = getattr(src, "external_reply", None)
         if ext:
             parent_id = getattr(ext, "message_id", None)
+            
     if not parent_id and parent:
         parent_id = getattr(parent, "message_id", None)
 
     if not parent_id:
-        log.info("[sticker] no parent_id detected")
+        log.info("[sticker] no parent_id detected on src (message is not a reply or info is missing)")
         return None
 
     log.info("[sticker] fetching parent_id: %s", parent_id)
@@ -634,7 +631,7 @@ async def _photo_to_sticker_file(ctx, photo):
     return buf
 
 
-# ───────── .kang (MongoDB system — aapka purana) ─────────
+# ───────── .kang (MongoDB system) ─────────
 
 async def kang_cmd(update, ctx):
     msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
