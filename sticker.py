@@ -233,7 +233,7 @@ def _from_block(user) -> dict:
     return out
 
 
-# ✅ FIX 1: Accept parent_msg directly instead of relying on src.reply_to_message
+# ✅ FIX: Simplify nested block to match quotly.py (name, text, chatId)
 def _build_reply_block(reply) -> dict | None:
     if reply is None:
         return None
@@ -244,13 +244,10 @@ def _build_reply_block(reply) -> dict | None:
     return {
         "name": frm.get("name") or "User",
         "text": text,
-        "entities": _extract_entities(reply),
         "chatId": int(getattr(reply, "chat_id", 0) or 0),
-        "from": frm,
     }
 
 
-# ✅ FIX 2: Pass parent_msg to _build_message so it gets included in the payload
 def _build_message(msg, avatar: str | None = None, parent_msg=None) -> dict:
     block = {
         "entities": _extract_entities(msg),
@@ -261,7 +258,6 @@ def _build_message(msg, avatar: str | None = None, parent_msg=None) -> dict:
     if avatar:
         block["from"]["photo"] = {"url": avatar}
     
-    # Nested quote logic
     reply_block = _build_reply_block(parent_msg)
     if reply_block:
         block["replyMessage"] = reply_block
@@ -521,7 +517,12 @@ async def _build_quote_via_pillow(ctx, src_msg, sender, parent_msg=None) -> byte
     return out.getvalue()
 
 
+# ✅ FIX: Force Pillow if nested parent exists (API doesn't render it reliably)
 async def _build_quote_sticker(ctx, src_msg, sender, parent_msg=None) -> bytes:
+    if parent_msg:
+        log.info("[sticker] Nested quote detected. Using Pillow fallback for guaranteed rendering.")
+        return await _build_quote_via_pillow(ctx, src_msg, sender, parent_msg)
+        
     try:
         data = await _build_quote_via_api(ctx, src_msg, sender, parent_msg)
         if data:
@@ -532,33 +533,41 @@ async def _build_quote_sticker(ctx, src_msg, sender, parent_msg=None) -> bytes:
     return await _build_quote_via_pillow(ctx, src_msg, sender, parent_msg)
 
 
-# ───────── parent-message helper ─────────
-
+# ✅ FIX: Robust parent fetching (external_reply -> reply_to_message -> reply_to_message_id)
 async def _ensure_parent(ctx, chat_id: int, src):
-    """Make sure we fetch the parent message if src itself is a reply."""
-    # ✅ FIX 3: Check if the object actually has a message_id (avoids empty dummy objects)
+    # 1. Try external_reply first (most reliable for channel replies)
+    ext = getattr(src, "external_reply", None)
+    if ext and getattr(ext, "message_id", None):
+        try:
+            fetched = await ctx.bot.get_messages(chat_id=chat_id, message_ids=ext.message_id)
+            if isinstance(fetched, list):
+                fetched = fetched[0] if fetched else None
+            if fetched:
+                log.info("[sticker] parent found via external_reply")
+                return fetched
+        except Exception:
+            pass
+
+    # 2. Try reply_to_message
     rt = getattr(src, "reply_to_message", None)
     if rt and getattr(rt, "message_id", None):
+        log.info("[sticker] parent found via reply_to_message")
         return rt
 
-    parent_id = None
-    ext = getattr(src, "external_reply", None)
-    if ext is not None:
-        parent_id = getattr(ext, "message_id", None)
-    if not parent_id:
-        parent_id = getattr(src, "reply_to_message_id", None)
-    if not parent_id:
-        if rt is not None:
-            parent_id = getattr(rt, "message_id", None)
+    # 3. Try reply_to_message_id
+    parent_id = getattr(src, "reply_to_message_id", None)
+    if not parent_id and rt:
+        parent_id = getattr(rt, "message_id", None)
 
-    log.info("[sticker] parent_id detected: %r", parent_id)
     if not parent_id:
+        log.info("[sticker] no parent_id detected")
         return None
 
     try:
         fetched = await ctx.bot.get_messages(chat_id=chat_id, message_ids=parent_id)
         if isinstance(fetched, list):
             fetched = fetched[0] if fetched else None
+        log.info("[sticker] parent found via reply_to_message_id: %s", parent_id)
         return fetched
     except Exception as e:
         log.warning("[sticker] couldn't fetch parent %s: %s", parent_id, e)
@@ -609,7 +618,6 @@ async def _quote_and_send(update, ctx, as_reply: bool):
     auto_task = asyncio.create_task(_auto_delete_status())
 
     try:
-        # ✅ FIX 4: Pass parent_msg directly instead of mutating the PTB object
         sticker_bytes = await asyncio.wait_for(
             _build_quote_sticker(ctx, src, sender, parent_msg), timeout=TOTAL_TIMEOUT
         )
@@ -758,4 +766,4 @@ def register(app):
     dual_command(app, "q", q_cmd)
     dual_command(app, "qr", qr_cmd)
     dual_command(app, "kang", kang_cmd)
-                                                   
+        
