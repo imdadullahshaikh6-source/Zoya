@@ -1,6 +1,6 @@
 """MongoDB layer. Everything persists across restarts/redeploys:
 welcome messages, rules, AFK status, bans, mutes, warns, filters,
-guardian, and clean-command settings."""
+guardian, locks, and clean-command settings."""
 import logging
 import time
 
@@ -24,8 +24,8 @@ async def init(uri: str, name: str):
     await _db.members.create_index("chat_id")
     await _db.filters.create_index([("chat_id", 1), ("keyword", 1)], unique=True)
     await _db.guardian.create_index("chat_id", unique=True)
-    # ← NEW: unique index on clean-command per chat
     await _db.clean.create_index("chat_id", unique=True)
+    await _db.locks.create_index("chat_id", unique=True)  # ✅ NEW
     log.info("MongoDB connected (db: %s)", name)
 
 
@@ -252,3 +252,53 @@ async def clean_set(chat_id: int, enabled: bool, mode: str = "all"):
         {"$set": {"enabled": bool(enabled), "mode": mode}},
         upsert=True,
     )
+
+
+# ───────── locks + approved users (per chat) ─────────
+
+async def locks_get(chat_id: int) -> dict:
+    """Return {'locks': set, 'unlocks': set, 'approved': {user_id: name}}"""
+    doc = await _db.locks.find_one({"chat_id": chat_id}) or {}
+    approved_raw = doc.get("approved", [])
+    approved = {u["id"]: u.get("name", "User") for u in approved_raw}
+    return {
+        "locks": set(doc.get("locks", [])),
+        "unlocks": set(doc.get("unlocks", [])),
+        "approved": approved,
+    }
+
+
+async def locks_set_locks(chat_id: int, locks: set):
+    await _db.locks.update_one(
+        {"chat_id": chat_id}, {"$set": {"locks": list(locks)}}, upsert=True,
+    )
+
+
+async def locks_set_unlocks(chat_id: int, unlocks: set):
+    await _db.locks.update_one(
+        {"chat_id": chat_id}, {"$set": {"unlocks": list(unlocks)}}, upsert=True,
+    )
+
+
+async def approved_add(chat_id: int, user_id: int, name: str):
+    await _db.locks.update_one(
+        {"chat_id": chat_id}, {"$pull": {"approved": {"id": user_id}}},
+    )
+    await _db.locks.update_one(
+        {"chat_id": chat_id},
+        {"$push": {"approved": {"id": user_id, "name": name}}},
+        upsert=True,
+    )
+
+
+async def approved_remove(chat_id: int, user_id: int) -> bool:
+    res = await _db.locks.update_one(
+        {"chat_id": chat_id}, {"$pull": {"approved": {"id": user_id}}},
+    )
+    return res.modified_count > 0
+
+
+async def approved_list(chat_id: int) -> dict:
+    """Return {user_id: name}"""
+    doc = await _db.locks.find_one({"chat_id": chat_id}) or {}
+    return {u["id"]: u.get("name", "User") for u in doc.get("approved", [])}
