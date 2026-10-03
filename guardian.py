@@ -10,14 +10,14 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes, MessageHandler, filters, CallbackQueryHandler
 
 import database as dbase
-from common import B, T, dual_command, mention, say
+from common import B, T, dual_command, mention, q, say, resolve_target
 
 log = logging.getLogger("guardian")
 
 # ⚠️ APNI TELEGRAM ID YAHAN DAALEIN (numeric, e.g. 123456789)
 BOT_OWNER_ID = 123456789  # <-- yahan apna ID daalein
 
-# Telegram's official Anonymous Admin Bot ID — ise change na karein
+# Telegram's official Anonymous Admin Bot ID
 ANON_ADMIN_ID = 1087968824
 
 HELP_TXT = (
@@ -38,7 +38,6 @@ HELP_TXT = (
     "• <code>.guard on</code> / <code>.guard off</code> — enable/disable Guardian."
 )
 
-# ✅ IMPORTANT: bot.py line ~253 pe `mod.COMMANDS` use hota hai. Isliye ye chahiye.
 COMMANDS = [
     ("setdelay", "Set Guardian deletion delay"),
     ("guard", "Enable or disable Guardian"),
@@ -47,10 +46,10 @@ COMMANDS = [
     ("permitlist", "Show permitted users"),
 ]
 
-MIN_DELAY = 60           # 1 minute
-MAX_DELAY = 6 * 60 * 60  # 6 hours
+MIN_DELAY = 60
+MAX_DELAY = 6 * 60 * 60
 _DELAY_RE = re.compile(r"^(\d+)\s*([smh])$", re.IGNORECASE)
-_NOTE_LIFETIME = 5       # seconds
+_NOTE_LIFETIME = 5
 
 
 def _parse_delay(arg: str):
@@ -172,56 +171,42 @@ async def permit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # 🔹 Anonymous Admin Detection
     if user.id == ANON_ADMIN_ID:
-        target_id, target_name = None, None
-        if msg.reply_to_message and msg.reply_to_message.from_user:
-            target_id = msg.reply_to_message.from_user.id
-            target_name = html.escape(msg.reply_to_message.from_user.first_name or "User")
-        elif ctx.args:
-            arg = ctx.args[0].strip()
-            if arg.isdigit():
-                target_id = int(arg)
-                target_name = f"User {target_id}"
-            elif arg.startswith('@'):
-                target_name = html.escape(arg)
-                target_id = 0
-            else:
-                await say(ctx, chat.id, T("<blockquote>❌ Invalid format. Reply, ID, or @username.</blockquote>"), reply_to=msg.message_id)
-                return
-        else:
-            await say(ctx, chat.id, T("<blockquote>usage: reply, or <code>.permit 12345678</code> / <code>.permit @username</code></blockquote>"), reply_to=msg.message_id)
+        target, _ = await resolve_target(update, ctx)
+        if not target:
+            await say(ctx, chat.id, T("<blockquote>❌ Invalid format or no target. Reply, ID, or @username.</blockquote>"), reply_to=msg.message_id)
             return
 
+        target_id = target.id
+        target_name = html.escape(target.first_name or "User")
+
         btn_data = f"anonperm|{chat.id}|{target_id}|{target_name}"
-        # ✅ Green button (style="success")
-        keyboard = InlineKeyboardMarkup([[B("🟢 I am the Group Owner", btn_data, style="success")]])
-        await say(ctx, chat.id, T("<blockquote>⚠️ <b>Anonymous Admin detected.</b>\nOnly the real group owner can approve permits. Please tap the button below to verify.</blockquote>"), reply_to=msg.message_id, reply_markup=keyboard)
+        keyboard = InlineKeyboardMarkup([[B("🟢 𝙥𝙧𝙤𝙫𝙚 𝙤𝙬𝙣𝙚𝙧", btn_data, style="success")]])
+        # ✅ FIX: say() ki jagah ctx.bot.send_message() use kiya (reply_markup support nahi karta say)
+        await ctx.bot.send_message(
+            chat.id,
+            q(T("<b>⚠️ Anonymous Admin detected.</b>\n"
+                "Only the real group owner can approve permits. "
+                "Please tap the button below to verify.")),
+            parse_mode=ParseMode.HTML,
+            reply_to_message_id=msg.message_id,
+            reply_markup=keyboard,
+        )
         return
 
     if not await _is_owner(ctx, chat.id, user.id):
         await say(ctx, chat.id, T("<blockquote>⚠️ only the <b>group owner</b> or <b>bot owner</b> can use this.</blockquote>"), reply_to=msg.message_id)
         return
 
-    target_id, target_name = None, None
-    if msg.reply_to_message and msg.reply_to_message.from_user:
-        target_id = msg.reply_to_message.from_user.id
-        target_name = html.escape(msg.reply_to_message.from_user.first_name or "User")
-    elif ctx.args:
-        arg = ctx.args[0].strip()
-        if arg.isdigit():
-            target_id = int(arg)
-            target_name = f"User {target_id}"
-        elif arg.startswith('@'):
-            target_name = html.escape(arg)
-            target_id = 0
-        else:
-            await say(ctx, chat.id, T("<blockquote>❌ Invalid format. Reply, ID, or @username.</blockquote>"), reply_to=msg.message_id)
-            return
-    else:
-        await say(ctx, chat.id, T("<blockquote>usage: reply, or <code>.permit 12345678</code> / <code>.permit @username</code></blockquote>"), reply_to=msg.message_id)
+    target, _ = await resolve_target(update, ctx)
+    if not target:
+        await say(ctx, chat.id, T("<blockquote>❌ Invalid format or no target. Reply, ID, or @username.</blockquote>"), reply_to=msg.message_id)
         return
 
+    target_id = target.id
+    target_name = html.escape(target.first_name or "User")
+
     await dbase.guardian_permit_add(chat.id, target_id, target_name)
-    mention_txt = f"<a href='tg://user?id={target_id}'>{target_name}</a>" if target_id and target_id != 0 else target_name
+    mention_txt = f"<a href='tg://user?id={target_id}'>{target_name}</a>"
     await say(ctx, chat.id, T(f"<blockquote>✅ {mention_txt} is now <b>permitted</b> — their edits/media won't be deleted.</blockquote>"), reply_to=msg.message_id)
 
 
@@ -232,59 +217,42 @@ async def unpermit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # 🔹 Anonymous Admin Detection
     if user.id == ANON_ADMIN_ID:
-        target_id, target_name = None, None
-        if msg.reply_to_message and msg.reply_to_message.from_user:
-            target_id = msg.reply_to_message.from_user.id
-        elif ctx.args:
-            arg = ctx.args[0].strip()
-            if arg.isdigit():
-                target_id = int(arg)
-            elif arg.startswith('@'):
-                target_name = html.escape(arg)
-            else:
-                await say(ctx, chat.id, T("<blockquote>❌ Invalid format. Reply, ID, or @username.</blockquote>"), reply_to=msg.message_id)
-                return
-        else:
-            await say(ctx, chat.id, T("<blockquote>usage: reply, or <code>.unpermit 12345678</code> / <code>.unpermit @username</code></blockquote>"), reply_to=msg.message_id)
+        target, _ = await resolve_target(update, ctx)
+        if not target:
+            await say(ctx, chat.id, T("<blockquote>❌ Invalid format or no target. Reply, ID, or @username.</blockquote>"), reply_to=msg.message_id)
             return
 
-        btn_data = f"anonunperm|{chat.id}|{target_id or 0}|{target_name or ''}"
-        keyboard = InlineKeyboardMarkup([[B("🟢 I am the Group Owner", btn_data, style="success")]])
-        await say(ctx, chat.id, T("<blockquote>⚠️ <b>Anonymous Admin detected.</b>\nOnly the real group owner can approve. Tap to verify.</blockquote>"), reply_to=msg.message_id, reply_markup=keyboard)
+        target_id = target.id
+        target_name = html.escape(target.first_name or "User")
+
+        btn_data = f"anonunperm|{chat.id}|{target_id}|{target_name}"
+        keyboard = InlineKeyboardMarkup([[B("🟢 𝙥𝙧𝙤𝙫𝙚 𝙤𝙬𝙣𝙚𝙧", btn_data, style="success")]])
+        # ✅ FIX: ctx.bot.send_message() for reply_markup support
+        await ctx.bot.send_message(
+            chat.id,
+            q(T("<b>⚠️ Anonymous Admin detected.</b>\n"
+                "Only the real group owner can approve. Tap the button below to verify.")),
+            parse_mode=ParseMode.HTML,
+            reply_to_message_id=msg.message_id,
+            reply_markup=keyboard,
+        )
         return
 
     if not await _is_owner(ctx, chat.id, user.id):
         await say(ctx, chat.id, T("<blockquote>⚠️ only the <b>group owner</b> or <b>bot owner</b> can use this.</blockquote>"), reply_to=msg.message_id)
         return
 
-    target_id, target_name = None, None
-    if msg.reply_to_message and msg.reply_to_message.from_user:
-        target_id = msg.reply_to_message.from_user.id
-    elif ctx.args:
-        arg = ctx.args[0].strip()
-        if arg.isdigit():
-            target_id = int(arg)
-        elif arg.startswith('@'):
-            target_name = html.escape(arg)
-        else:
-            await say(ctx, chat.id, T("<blockquote>❌ Invalid format. Reply, ID, or @username.</blockquote>"), reply_to=msg.message_id)
-            return
-    else:
-        await say(ctx, chat.id, T("<blockquote>usage: reply, or <code>.unpermit 12345678</code> / <code>.unpermit @username</code></blockquote>"), reply_to=msg.message_id)
+    target, _ = await resolve_target(update, ctx)
+    if not target:
+        await say(ctx, chat.id, T("<blockquote>❌ Invalid format or no target. Reply, ID, or @username.</blockquote>"), reply_to=msg.message_id)
         return
 
-    removed = False
-    if target_id:
-        removed = await dbase.guardian_permit_remove(chat.id, target_id)
-    elif target_name:
-        cfg = await dbase.guardian_get(chat.id) or {}
-        users = cfg.get("permitted_users", [])
-        new_users = [u for u in users if u.get("name") != target_name]
-        if len(new_users) != len(users):
-            await dbase.guardian_set(chat.id, permitted_users=new_users)
-            removed = True
+    target_id = target.id
+    target_name = html.escape(target.first_name or "User")
 
-    txt = f"<blockquote>✅ <b>{target_name or target_id}</b> is no longer permitted.</blockquote>" if removed else f"<blockquote>ℹ️ <b>{target_name or target_id}</b> wasn't in the permit list.</blockquote>"
+    removed = await dbase.guardian_permit_remove(chat.id, target_id)
+
+    txt = f"<blockquote>✅ <b>{target_name}</b> is no longer permitted.</blockquote>" if removed else f"<blockquote>ℹ️ <b>{target_name}</b> wasn't in the permit list.</blockquote>"
     await say(ctx, chat.id, T(txt), reply_to=msg.message_id)
 
 
@@ -296,20 +264,26 @@ async def permitlist_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # 🔹 Anonymous Admin Detection
     if user.id == ANON_ADMIN_ID:
         btn_data = f"anonlist|{chat.id}"
-        keyboard = InlineKeyboardMarkup([[B("🟢 I am the Group Owner", btn_data, style="success")]])
-        await say(ctx, chat.id, T("<blockquote>⚠️ <b>Anonymous Admin detected.</b>\nOnly the real group owner can view the permit list. Tap to verify.</blockquote>"), reply_to=msg.message_id, reply_markup=keyboard)
+        keyboard = InlineKeyboardMarkup([[B("🟢 𝙥𝙧𝙤𝙫𝙚 𝙤𝙬𝙣𝙚𝙧", btn_data, style="success")]])
+        # ✅ FIX: ctx.bot.send_message() for reply_markup support
+        await ctx.bot.send_message(
+            chat.id,
+            q(T("<b>⚠️ Anonymous Admin detected.</b>\n"
+                "Only the real group owner can view the permit list. Tap to verify.")),
+            parse_mode=ParseMode.HTML,
+            reply_to_message_id=msg.message_id,
+            reply_markup=keyboard,
+        )
         return
 
     if not await _is_owner(ctx, chat.id, user.id):
         await say(ctx, chat.id, T("<blockquote>⚠️ only the <b>group owner</b> or <b>bot owner</b> can use this.</blockquote>"), reply_to=msg.message_id)
         return
-
     cfg = await dbase.guardian_get(chat.id) or {}
     users = cfg.get("permitted_users", [])
     if not users:
         await say(ctx, chat.id, T("<blockquote>no permitted users in this chat.</blockquote>"), reply_to=msg.message_id)
         return
-
     lines = ["<b>🛡 Permitted users:</b>"]
     for i, u in enumerate(users, 1):
         safe_name = html.escape(str(u.get('name', 'Unknown')))
@@ -338,22 +312,13 @@ async def anon_verify_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         target_id = int(data[2])
         target_name = data[3]
         await dbase.guardian_permit_add(chat_id, target_id, target_name)
-        mention_txt = f"<a href='tg://user?id={target_id}'>{target_name}</a>" if target_id and target_id != 0 else target_name
+        mention_txt = f"<a href='tg://user?id={target_id}'>{target_name}</a>"
         await query.edit_message_text(T(f"<blockquote>✅ Approved by owner. {mention_txt} is now <b>permitted</b>.</blockquote>"), parse_mode=ParseMode.HTML)
 
     elif action == "anonunperm":
         target_id = int(data[2]) if data[2] != "0" else None
         target_name = data[3] if data[3] else None
-        removed = False
-        if target_id:
-            removed = await dbase.guardian_permit_remove(chat_id, target_id)
-        elif target_name:
-            cfg = await dbase.guardian_get(chat_id) or {}
-            users = cfg.get("permitted_users", [])
-            new_users = [u for u in users if u.get("name") != target_name]
-            if len(new_users) != len(users):
-                await dbase.guardian_set(chat_id, permitted_users=new_users)
-                removed = True
+        removed = await dbase.guardian_permit_remove(chat_id, target_id) if target_id else False
         txt = f"<blockquote>✅ Approved by owner. <b>{target_name or target_id}</b> is no longer permitted.</blockquote>" if removed else f"<blockquote>ℹ️ Approved by owner. <b>{target_name or target_id}</b> wasn't in the list.</blockquote>"
         await query.edit_message_text(T(txt), parse_mode=ParseMode.HTML)
 
@@ -468,5 +433,12 @@ def register(app):
     dual_command(app, "unpermit", unpermit_cmd)
     dual_command(app, "permitlist", permitlist_cmd)
 
-    # ✅ FIXED pattern — sirf anonperm/anunperm/anonlist match karega,
-    # ban.py ke "anonmod:" se c
+    app.add_handler(CallbackQueryHandler(
+        anon_verify_callback,
+        pattern=r"^anon(perm|unperm|list)\|"
+    ))
+
+    app.add_handler(
+        MessageHandler(filters.ChatType.GROUPS & filters.ALL, _guardian_watcher),
+        group=2,
+    )
