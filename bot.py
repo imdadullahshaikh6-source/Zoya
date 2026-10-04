@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 
+import httpx
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -41,6 +42,21 @@ OWNER_USERNAME = "Ownerbackk"
 OWNER_URL = f"https://t.me/{OWNER_USERNAME}"
 CHANNEL_URL = os.getenv("CHANNEL_URL", "")
 START_IMG = os.getenv("START_IMG", "https://graph.org/file/d3a2c17942e606f4ec811-9c0373fa8bb10f4448.jpg")
+
+# ✅ Plain text version (HTML tags hata diye, Pullquote ke liye)
+START_TXT_PLAIN = (
+    "✦ hey {m} !\n\n"
+    "i am Zoya — a powerful group management bot.\n"
+    "➤ stylish welcome messages with buttons\n"
+    "➤ promote / demote with a live power panel\n"
+    "➤ ban, mute, warn — each with an undo button\n"
+    "➤ afk tracking\n"
+    "➤ guardian — anti-edit & anti-media defender\n"
+    "➤ locks — auto-delete spam type messages\n"
+    "➤ clean command & pin tools\n"
+    "➤ every command works with / or . in groups\n\n"
+    "tap command below to see everything i can do."
+)
 
 START_TXT = (
     "<b>✦ hey {m} !</b>\n\n"
@@ -98,7 +114,7 @@ PAGES = {
     "filters": ("🔍 𝙁𝙞𝙡𝙩𝙚𝙧𝙨", bot_filters.HELP_TXT),
     "guardian": ("🛡 𝙂𝙪𝙖𝙧𝙙𝙞𝙖𝙣", GUARDIAN_TXT),
     "utility": ("🧰 𝙐𝙩𝙞𝙡𝙞𝙩𝙮", UTILITY_TXT),
-    "locks": ("🔒 𝙇𝙤𝙘𝙠𝙨", LOCKS_TXT), # Utility ke neeche Locks
+    "locks": ("🔒 𝙇𝙤𝙘𝙠𝙨", LOCKS_TXT),
 }
 
 ALIASES = {
@@ -122,6 +138,37 @@ def add_me_url(username: str) -> str:
         "+manage_video_chats+manage_topics+promote_members+manage_chat"
     )
     return f"https://t.me/{username}?startgroup=true&admin={rights}"
+
+
+# ✅ NEW: Telegram sendRichMessage helper (Pullquote)
+async def send_rich_pullquote(chat_id: int, text: str, reply_markup=None) -> dict | None:
+    """Send a pullquote (centered quote) via Telegram's sendRichMessage API.
+    Returns the API JSON response, or None on failure."""
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendRichMessage"
+    payload = {
+        "chat_id": chat_id,
+        "rich_message": {
+            "blocks": [
+                {
+                    "type": "pullquote",
+                    "text": {"type": "text", "text": text},
+                }
+            ]
+        },
+    }
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup.to_dict()
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(url, json=payload)
+            data = r.json()
+            if r.status_code != 200 or not data.get("ok"):
+                log.warning("sendRichMessage failed: %s", data)
+                return None
+            return data
+    except Exception as e:
+        log.warning("sendRichMessage exception: %s", e)
+        return None
 
 
 def home_page(user, ctx):
@@ -199,7 +246,17 @@ async def start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(chat.id, f"<blockquote>{text}</blockquote>", parse_mode=ParseMode.HTML, reply_markup=kb)
         return
 
+    # ✅ START PAGE: Pullquote try karo, fail hone par old method
     text, kb = home_page(user, ctx)
+    plain = T(START_TXT_PLAIN, m=mention(user).replace("<a ", "").split(">")[-1].replace("</a>", "") if "<a " in mention(user) else user.first_name)
+
+    rich_result = await send_rich_pullquote(chat.id, plain, reply_markup=kb)
+    if rich_result is not None:
+        log.info("Start page sent via sendRichMessage (pullquote) ✓")
+        return
+
+    # Fallback: purana method (photo + blockquote)
+    log.warning("Pullquote failed, falling back to photo + blockquote")
     try:
         await ctx.bot.send_photo(chat.id, START_IMG, caption=f"<blockquote>{text}</blockquote>", parse_mode=ParseMode.HTML, reply_markup=kb)
     except TelegramError as e:
@@ -240,7 +297,6 @@ async def help_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         text, kb = main_page()
     elif page == "locktypes":
         text = sc("<b>The available locktypes are:</b>")
-        # ✅ FIX: DM mein Back button ke saath (back=True)
         kb = lock.get_locktypes_kb(back=True)
     elif page in PAGES:
         text, kb = section_page(page)
