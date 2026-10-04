@@ -25,6 +25,7 @@ import filters as bot_filters
 import fun
 import guardian
 import lock
+import logs              # ✅ NEW
 import pin
 import ping
 import sticker
@@ -98,7 +99,7 @@ PAGES = {
     "filters": ("🔍 𝙁𝙞𝙡𝙩𝙚𝙧𝙨", bot_filters.HELP_TXT),
     "guardian": ("🛡 𝙂𝙪𝙖𝙧𝙙𝙞𝙖𝙣", GUARDIAN_TXT),
     "utility": ("🧰 𝙐𝙩𝙞𝙡𝙞𝙩𝙮", UTILITY_TXT),
-    "locks": ("🔒 𝙇𝙤𝙘𝙠𝙨", LOCKS_TXT), # Utility ke neeche Locks
+    "locks": ("🔒 𝙇𝙤𝙘𝙠𝙨", LOCKS_TXT),
 }
 
 ALIASES = {
@@ -191,6 +192,7 @@ async def start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         pass
 
     await dbase.save_user(user.id, user.first_name, user.username)
+    await logs.log_user_start(ctx, user)  # ✅ NEW: log user start to owner's group
 
     arg = (ctx.args[0].lower() if ctx.args else "")
     key = ALIASES.get(arg)
@@ -240,7 +242,6 @@ async def help_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         text, kb = main_page()
     elif page == "locktypes":
         text = sc("<b>The available locktypes are:</b>")
-        # ✅ FIX: DM mein Back button ke saath (back=True)
         kb = lock.get_locktypes_kb(back=True)
     elif page in PAGES:
         text, kb = section_page(page)
@@ -321,6 +322,7 @@ def main():
     pin.register(app)
     mantion.register(app)
     lock.register(app)
+    logs.register(app)  # ✅ NEW
 
     app.add_error_handler(on_error)
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
