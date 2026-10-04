@@ -42,10 +42,8 @@ OWNER_URL = f"https://t.me/{OWNER_USERNAME}"
 CHANNEL_URL = os.getenv("CHANNEL_URL", "")
 START_IMG = os.getenv("START_IMG", "https://graph.org/file/d3a2c17942e606f4ec811-9c0373fa8bb10f4448.jpg")
 
-# ✅ FIX: Yahan ab <blockquote expandable> laga diya gaya hai. 
-# Ab text chhota (collapse) dikhega aur tap karne par khulega!
 START_TXT = (
-    "<blockquote expandable><b>✦ hey {m} !</b>\n\n"
+    "<b>✦ hey {m} !</b>\n\n"
     "i am <b>𝙕𝙤𝙮𝙖</b> — a powerful group management bot.\n"
     "➤ stylish welcome messages with buttons\n"
     "➤ promote / demote with a live power panel\n"
@@ -55,7 +53,7 @@ START_TXT = (
     "➤ locks — auto-delete spam type messages\n"
     "➤ clean command & pin tools\n"
     "➤ every command works with / or . in groups\n\n"
-    "tap <b>command</b> below to see everything i can do.</blockquote>"
+    "tap <b>command</b> below to see everything i can do."
 )
 
 GUARDIAN_TXT = (
@@ -100,7 +98,7 @@ PAGES = {
     "filters": ("🔍 𝙁𝙞𝙡𝙩𝙚𝙧𝙨", bot_filters.HELP_TXT),
     "guardian": ("🛡 𝙂𝙪𝙖𝙧𝙙𝙞𝙖𝙣", GUARDIAN_TXT),
     "utility": ("🧰 𝙐𝙩𝙞𝙡𝙞𝙩𝙮", UTILITY_TXT),
-    "locks": ("🔒 𝙇𝙤𝙘𝙠𝙨", LOCKS_TXT),
+    "locks": ("🔒 𝙇𝙤𝙘𝙠𝙨", LOCKS_TXT), # Utility ke neeche Locks
 }
 
 ALIASES = {
@@ -170,9 +168,9 @@ async def edit_page(qy, text, kb):
     m = qy.message
     try:
         if m.photo or m.video or m.animation:
-            await qy.edit_message_caption(caption=text, reply_markup=kb)
+            await qy.edit_message_caption(caption=f"<blockquote>{text}</blockquote>", reply_markup=kb)
         else:
-            await qy.edit_message_text(text, reply_markup=kb)
+            await qy.edit_message_text(f"<blockquote>{text}</blockquote>", reply_markup=kb)
     except TelegramError as e:
         if "not modified" not in str(e).lower():
             raise
@@ -198,15 +196,15 @@ async def start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     key = ALIASES.get(arg)
     if key:
         text, kb = section_page(key)
-        await ctx.bot.send_message(chat.id, text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await ctx.bot.send_message(chat.id, f"<blockquote>{text}</blockquote>", parse_mode=ParseMode.HTML, reply_markup=kb)
         return
 
     text, kb = home_page(user, ctx)
     try:
-        await ctx.bot.send_photo(chat.id, START_IMG, caption=text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await ctx.bot.send_photo(chat.id, START_IMG, caption=f"<blockquote>{text}</blockquote>", parse_mode=ParseMode.HTML, reply_markup=kb)
     except TelegramError as e:
         log.warning("start image failed: %s", e)
-        await ctx.bot.send_message(chat.id, text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await ctx.bot.send_message(chat.id, f"<blockquote>{text}</blockquote>", parse_mode=ParseMode.HTML, reply_markup=kb)
 
 
 async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -223,7 +221,7 @@ async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         text, kb = section_page(key)
     else:
         text, kb = main_page()
-    await ctx.bot.send_message(chat.id, text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    await ctx.bot.send_message(chat.id, f"<blockquote>{text}</blockquote>", parse_mode=ParseMode.HTML, reply_markup=kb)
 
 
 async def help_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -242,6 +240,7 @@ async def help_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         text, kb = main_page()
     elif page == "locktypes":
         text = sc("<b>The available locktypes are:</b>")
+        # ✅ FIX: DM mein Back button ke saath (back=True)
         kb = lock.get_locktypes_kb(back=True)
     elif page in PAGES:
         text, kb = section_page(page)
@@ -329,4 +328,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
