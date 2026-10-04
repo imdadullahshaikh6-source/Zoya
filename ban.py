@@ -5,6 +5,9 @@ and every ban/mute/warn is stored in Mongo so it survives restarts.
 Also includes .dban / .dmute / .dwarn — same as above but the replied-to
 message is deleted first.
 
+Silent variants: .sban / .smute — delete the replied message and ban/mute
+the user silently (no event message posted).
+
 Anonymous admin support: if an anonymous admin triggers a mod command, the bot
 shows a green verification button. Only the real group owner, the bot owner, or
 an admin with Ban Users (can_restrict_members) permission can approve.
@@ -25,7 +28,7 @@ from common import (
 WARN_LIMIT = int(os.getenv("WARN_LIMIT", "3"))
 
 # ⚠️ APNI TELEGRAM ID YAHAN DAALEIN (numeric, e.g. 123456789)
-BOT_OWNER_ID = 123456789  # <-- yahan apna ID daalein
+BOT_OWNER_ID = 8373739674
 
 # Telegram's official Anonymous Admin Bot ID
 ANON_ADMIN_ID = 1087968824
@@ -45,6 +48,9 @@ HELP_TXT = (
     "/dban (or .dban) — deletes the replied message, then bans its sender\n"
     "/dmute (or .dmute) — deletes the replied message, then mutes its sender\n"
     "/dwarn (or .dwarn) — deletes the replied message, then warns its sender\n\n"
+    "<b>✦ silent action</b>\n"
+    "/sban (or .sban) — deletes the replied message, silently bans its sender (no event post)\n"
+    "/smute (or .smute) — deletes the replied message, silently mutes its sender (no event post)\n\n"
     "every action re-checks that you have the <b>Ban Users</b> right and that i "
     "actually have it too — i tag you if I don't."
 ).replace("{n}", str(WARN_LIMIT))
@@ -56,6 +62,8 @@ COMMANDS = [
     ("warn", "Warn a user"), ("unwarn", "Clear a user's warns"),
     ("dban", "Delete replied msg then ban"), ("dmute", "Delete replied msg then mute"),
     ("dwarn", "Delete replied msg then warn"),
+    ("sban", "Silently ban (delete replied msg, no event)"),
+    ("smute", "Silently mute (delete replied msg, no event)"),
 ]
 
 FULL_PERMS = ChatPermissions(
@@ -123,6 +131,7 @@ async def _handle_anon_admin(update, ctx, action_type: str) -> bool:
         "target_id": target.id,
         "target_name": target.first_name or "User",
         "reason": reason or "",
+        "reply_msg_id": msg.reply_to_message.message_id if msg.reply_to_message else None,
     }
     # lightweight cleanup so dict never explodes
     if len(_PENDING_ANON) > 200:
@@ -179,6 +188,17 @@ async def _need_restrict(update, ctx):
 
 def _undo_kb(label, data):
     return InlineKeyboardMarkup([[B(label, data, style="primary")]])
+
+
+async def _delete_replied(update):
+    msg = update.effective_message
+    replied = msg.reply_to_message if msg else None
+    if not replied:
+        return
+    try:
+        await replied.delete()
+    except TelegramError:
+        pass
 
 
 # ───────── BAN ─────────
@@ -331,17 +351,6 @@ async def unwarn_cmd(update, ctx):
 
 
 # ───────── DELETE + ACTION ─────────
-async def _delete_replied(update):
-    msg = update.effective_message
-    replied = msg.reply_to_message if msg else None
-    if not replied:
-        return
-    try:
-        await replied.delete()
-    except TelegramError:
-        pass
-
-
 async def dban_cmd(update, ctx):
     await _delete_replied(update)
     await ban_cmd(update, ctx)
@@ -357,7 +366,57 @@ async def dwarn_cmd(update, ctx):
     await warn_cmd(update, ctx)
 
 
-# ───────── UNDO BUTTONS (existing) ─────────
+# ───────── SILENT ACTION (.sban / .smute) ─────────
+async def sban_cmd(update, ctx):
+    if await _handle_anon_admin(update, ctx, "sban"):
+        return
+    msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
+    if not await _need_restrict(update, ctx):
+        return
+    target, reason = await _target_or_complain(update, ctx, "sban")
+    if not target:
+        return
+    # Delete replied message first
+    await _delete_replied(update)
+    try:
+        await ctx.bot.ban_chat_member(chat.id, target.id)
+    except TelegramError as e:
+        await say(ctx, chat.id, T("ban failed:") + f" {esc(e)}", reply_to=msg.message_id)
+        return
+    await dbase.mod_set(chat.id, target.id, "ban", user.id, reason or "silent ban")
+    # Silent — no event message.
+    # Also delete the command message to keep it clean.
+    try:
+        await msg.delete()
+    except TelegramError:
+        pass
+
+
+async def smute_cmd(update, ctx):
+    if await _handle_anon_admin(update, ctx, "smute"):
+        return
+    msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
+    if not await _need_restrict(update, ctx):
+        return
+    target, reason = await _target_or_complain(update, ctx, "smute")
+    if not target:
+        return
+    # Delete replied message first
+    await _delete_replied(update)
+    try:
+        await ctx.bot.restrict_chat_member(chat.id, target.id, permissions=MUTE_PERMS)
+    except TelegramError as e:
+        await say(ctx, chat.id, T("mute failed:") + f" {esc(e)}", reply_to=msg.message_id)
+        return
+    await dbase.mod_set(chat.id, target.id, "mute", user.id, reason or "silent mute")
+    # Silent — no event message.
+    try:
+        await msg.delete()
+    except TelegramError:
+        pass
+
+
+# ───────── UNDO BUTTONS ─────────
 async def mod_cb(update, ctx):
     qy = update.callback_query
     chat = update.effective_chat
@@ -416,6 +475,7 @@ async def anon_mod_callback(update, ctx):
     target_id = pending["target_id"]
     target_name = pending["target_name"]
     reason = pending["reason"]
+    reply_msg_id = pending.get("reply_msg_id")
     approver = qy.from_user
 
     # ── Cross-verify approver's rights ──
@@ -451,6 +511,27 @@ async def anon_mod_callback(update, ctx):
     approver_mention = mention(approver)
 
     try:
+        # ── Silent actions first (delete replied, act, no event) ──
+        if action_type in ("sban", "smute"):
+            if reply_msg_id:
+                try:
+                    await ctx.bot.delete_message(chat_id, reply_msg_id)
+                except TelegramError:
+                    pass
+            if action_type == "sban":
+                await ctx.bot.ban_chat_member(chat_id, target_id)
+                await dbase.mod_set(chat_id, target_id, "ban", approver.id, reason or "silent ban")
+            else:
+                await ctx.bot.restrict_chat_member(chat_id, target_id, permissions=MUTE_PERMS)
+                await dbase.mod_set(chat_id, target_id, "mute", approver.id, reason or "silent mute")
+            # Delete the verification message entirely (no trace)
+            try:
+                await qy.message.delete()
+            except TelegramError:
+                pass
+            return
+
+        # ── Normal actions ──
         if action_type == "ban":
             await ctx.bot.ban_chat_member(chat_id, target_id)
             await dbase.mod_set(chat_id, target_id, "ban", approver.id, reason)
@@ -526,12 +607,11 @@ def register(app):
     dual_command(app, "dban", dban_cmd)
     dual_command(app, "dmute", dmute_cmd)
     dual_command(app, "dwarn", dwarn_cmd)
+    dual_command(app, "sban", sban_cmd)    # ✅ NEW
+    dual_command(app, "smute", smute_cmd)  # ✅ NEW
 
     # existing undo buttons
     app.add_handler(CallbackQueryHandler(mod_cb, pattern=r"^mod:"))
     # new anonymous verify buttons
     app.add_handler(CallbackQueryHandler(anon_mod_callback, pattern=r"^anonmod:"))
     
-
-
-  
