@@ -176,24 +176,42 @@ async def _apply_unlock(chat_id: int, items: list):
 
 
 def _get_msg_types(msg) -> set:
+    """Return set of all lock-types this message matches."""
     types = set()
     has_media = _has_media(msg)
 
+    # Pure text only (not caption)
     if msg.text and not has_media:
         types.add("text")
 
-    if msg.photo: types.add("photo")
-    if msg.video: types.add("video")
-    if msg.audio: types.add("audio")
-    if msg.voice: types.add("voice")
-    if msg.document: types.add("document")
-    if msg.video_note: types.add("videonote")
-    if msg.animation: types.add("gif")
-    if msg.poll: types.add("poll")
-    if msg.contact: types.add("contact")
-    if msg.location: types.add("location")
-    if msg.media_group_id: types.add("album")
-    if msg.reply_markup: types.add("button")
+    # Basic media
+    if msg.photo:
+        types.add("photo")
+    if msg.video:
+        types.add("video")
+    if msg.audio:
+        types.add("audio")
+    if msg.voice:
+        types.add("voice")
+    if msg.video_note:
+        types.add("videonote")
+    if msg.poll:
+        types.add("poll")
+    if msg.contact:
+        types.add("contact")
+    if msg.location:
+        types.add("location")
+    if msg.media_group_id:
+        types.add("album")
+    if msg.reply_markup:
+        types.add("button")
+
+    # ✅ FIX: PTB animation ke saath document bhi set karta hai.
+    # Isliye GIFs ke liye sirf "gif" add karo, "document" nahi.
+    if msg.animation:
+        types.add("gif")
+    elif msg.document:
+        types.add("document")
 
     if msg.sticker:
         types.add("sticker")
@@ -204,7 +222,6 @@ def _get_msg_types(msg) -> set:
     if msg.from_user and msg.from_user.is_bot:
         types.add("bot")
 
-    # ✅ FIX: getattr use kiya (naye PTB version mein forward_date nahi hai)
     if getattr(msg, "forward_date", None) or getattr(msg, "forward_origin", None):
         types.add("forward")
 
