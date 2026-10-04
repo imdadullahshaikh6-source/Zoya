@@ -1,6 +1,10 @@
-"""Logs plugin: log bot /start events to a designated group (owner only)."""
+"""Logs plugin: log bot /start events to a designated group (owner only).
+Uses a local JSON file for state — MongoDB stays clean.
+"""
 import html
+import json
 import logging
+import os
 from datetime import datetime
 
 from telegram import Update, InlineKeyboardMarkup
@@ -8,15 +12,35 @@ from telegram.constants import ChatMemberStatus, ChatType
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes, CallbackQueryHandler
 
-import database as dbase
 from common import B, T, dual_command, say
 
 log = logging.getLogger("logs")
 
 BOT_OWNER_ID = 8373739674
 
+# Local state file (persists on VPS)
+STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs_state.json")
+
 # Don't expose to public menu
 COMMANDS = []
+
+
+def _load_state() -> dict:
+    try:
+        if os.path.exists(STATE_FILE):
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception as e:
+        log.warning("logs_state load failed: %s", e)
+    return {"enabled": False, "group_id": None, "total_users": 0, "logged_users": []}
+
+
+def _save_state(state: dict):
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        log.warning("logs_state save failed: %s", e)
 
 
 async def startlogs_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -43,10 +67,10 @@ async def startlogs_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ],
     ])
 
-    cfg = await dbase.logs_get() or {}
-    status = "🟢 ON" if cfg.get("enabled") else "🔴 OFF"
-    current_group = cfg.get("group_id")
-    total_users = cfg.get("total_users", 0)
+    state = _load_state()
+    status = "🟢 ON" if state.get("enabled") else "🔴 OFF"
+    current_group = state.get("group_id")
+    total_users = state.get("total_users", 0)
 
     text = (
         f"<b>📋 𝙇𝙤𝙜𝙨 𝙎𝙚𝙩𝙪𝙥</b>\n\n"
@@ -67,9 +91,12 @@ async def logs_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     action = qy.data.split(":")[1]
     chat_id = qy.message.chat_id
+    state = _load_state()
 
     if action == "on":
-        await dbase.logs_set(enabled=True, group_id=chat_id)
+        state["enabled"] = True
+        state["group_id"] = chat_id
+        _save_state(state)
         await qy.answer("✅ Logs enabled")
         try:
             await qy.edit_message_text(
@@ -81,7 +108,8 @@ async def logs_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except TelegramError:
             pass
     else:
-        await dbase.logs_set(enabled=False)
+        state["enabled"] = False
+        _save_state(state)
         await qy.answer("🛑 Logs disabled")
         try:
             await qy.edit_message_text(
@@ -92,15 +120,25 @@ async def logs_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def log_user_start(ctx, user):
-    """Called from start_cmd. Logs the user start event to the designated group."""
+    """Called from start_cmd. Logs only if this is user's FIRST /start."""
     try:
-        cfg = await dbase.logs_get()
-        if not cfg or not cfg.get("enabled") or not cfg.get("group_id"):
+        state = _load_state()
+        if not state.get("enabled") or not state.get("group_id"):
             return
-        group_id = int(cfg["group_id"])
+        group_id = int(state["group_id"])
 
-        total = await dbase.logs_incr_users(user.id)
+        # ✅ Check if new user (only first time)
+        logged = set(state.get("logged_users", []))
+        if user.id in logged:
+            return  # already logged before, skip
 
+        # Add user and increment count
+        logged.add(user.id)
+        state["logged_users"] = list(logged)
+        state["total_users"] = int(state.get("total_users", 0)) + 1
+        _save_state(state)
+
+        total = state["total_users"]
         uname = f"@{user.username}" if user.username else "no username"
         now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
 
