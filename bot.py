@@ -1,6 +1,7 @@
 """Entry point: creates the bot, wires up every plugin, and handles the
 DM /start experience (reaction + photo + buttons)."""
 import asyncio
+import html as html_lib
 import logging
 import os
 
@@ -42,21 +43,6 @@ OWNER_USERNAME = "Ownerbackk"
 OWNER_URL = f"https://t.me/{OWNER_USERNAME}"
 CHANNEL_URL = os.getenv("CHANNEL_URL", "")
 START_IMG = os.getenv("START_IMG", "https://graph.org/file/d3a2c17942e606f4ec811-9c0373fa8bb10f4448.jpg")
-
-# ✅ Plain text version (HTML tags hata diye, Pullquote ke liye)
-START_TXT_PLAIN = (
-    "✦ hey {m} !\n\n"
-    "i am Zoya — a powerful group management bot.\n"
-    "➤ stylish welcome messages with buttons\n"
-    "➤ promote / demote with a live power panel\n"
-    "➤ ban, mute, warn — each with an undo button\n"
-    "➤ afk tracking\n"
-    "➤ guardian — anti-edit & anti-media defender\n"
-    "➤ locks — auto-delete spam type messages\n"
-    "➤ clean command & pin tools\n"
-    "➤ every command works with / or . in groups\n\n"
-    "tap command below to see everything i can do."
-)
 
 START_TXT = (
     "<b>✦ hey {m} !</b>\n\n"
@@ -140,20 +126,17 @@ def add_me_url(username: str) -> str:
     return f"https://t.me/{username}?startgroup=true&admin={rights}"
 
 
-# ✅ NEW: Telegram sendRichMessage helper (Pullquote)
-async def send_rich_pullquote(chat_id: int, text: str, reply_markup=None) -> dict | None:
-    """Send a pullquote (centered quote) via Telegram's sendRichMessage API.
+# ✅ FIX: HTML-based rich message (blockquote) — Telegram ka sahi format
+async def send_rich_blockquote(chat_id: int, text_html: str, reply_markup=None) -> dict | None:
+    """Send a blockquote via Telegram's sendRichMessage API (HTML mode).
     Returns the API JSON response, or None on failure."""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendRichMessage"
+    # HTML field mein directly <blockquote> tag use karo
+    rich_html = f"<blockquote>{text_html}</blockquote>"
     payload = {
         "chat_id": chat_id,
         "rich_message": {
-            "blocks": [
-                {
-                    "type": "pullquote",
-                    "text": {"type": "text", "text": text},
-                }
-            ]
+            "html": rich_html,
         },
     }
     if reply_markup is not None:
@@ -165,6 +148,7 @@ async def send_rich_pullquote(chat_id: int, text: str, reply_markup=None) -> dic
             if r.status_code != 200 or not data.get("ok"):
                 log.warning("sendRichMessage failed: %s", data)
                 return None
+            log.info("sendRichMessage success: %s", data.get("result", {}).get("message_id"))
             return data
     except Exception as e:
         log.warning("sendRichMessage exception: %s", e)
@@ -246,17 +230,31 @@ async def start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(chat.id, f"<blockquote>{text}</blockquote>", parse_mode=ParseMode.HTML, reply_markup=kb)
         return
 
-    # ✅ START PAGE: Pullquote try karo, fail hone par old method
+    # ✅ START PAGE: Rich HTML blockquote try karo, fail hone par old method
     text, kb = home_page(user, ctx)
-    plain = T(START_TXT_PLAIN, m=mention(user).replace("<a ", "").split(">")[-1].replace("</a>", "") if "<a " in mention(user) else user.first_name)
+    # HTML mein mention link ke saath text banao (plain text, HTML tags hata ke)
+    user_link = f'<a href="tg://user?id={user.id}">{html_lib.escape(user.first_name)}</a>'
+    plain_body = (
+        f"✦ hey {user_link} !\n\n"
+        "i am <b>Zoya</b> — a powerful group management bot.\n"
+        "➤ stylish welcome messages with buttons\n"
+        "➤ promote / demote with a live power panel\n"
+        "➤ ban, mute, warn — each with an undo button\n"
+        "➤ afk tracking\n"
+        "➤ guardian — anti-edit & anti-media defender\n"
+        "➤ locks — auto-delete spam type messages\n"
+        "➤ clean command & pin tools\n"
+        "➤ every command works with / or . in groups\n\n"
+        "tap <b>command</b> below to see everything i can do."
+    )
 
-    rich_result = await send_rich_pullquote(chat.id, plain, reply_markup=kb)
+    rich_result = await send_rich_blockquote(chat.id, plain_body, reply_markup=kb)
     if rich_result is not None:
-        log.info("Start page sent via sendRichMessage (pullquote) ✓")
+        log.info("Start page sent via sendRichMessage (blockquote) ✓")
         return
 
     # Fallback: purana method (photo + blockquote)
-    log.warning("Pullquote failed, falling back to photo + blockquote")
+    log.warning("Rich message failed, falling back to photo + blockquote")
     try:
         await ctx.bot.send_photo(chat.id, START_IMG, caption=f"<blockquote>{text}</blockquote>", parse_mode=ParseMode.HTML, reply_markup=kb)
     except TelegramError as e:
