@@ -24,7 +24,6 @@ COMMANDS = [
     ("approved", "List approved users"),
 ]
 
-# ✅ Sirf aapke original lock types
 LOCKTYPES = [
     "all", "album", "anonchannel", "audio", "bot", "botlink", "button",
     "contact", "document", "email", "emoji", "emojicustom", "forward",
@@ -63,11 +62,9 @@ LOCK_DESC = {
 
 ANON_PENDING = {}
 
-# ✅ Rate limit cache
 _ADMIN_CACHE = {}
 _CACHE_TTL = 600
 
-# ✅ Emoji detection for plain text
 _EMOJI_RE = re.compile(
     "["
     "\U0001F600-\U0001F64F"
@@ -144,8 +141,6 @@ async def _is_full_admin_for_locks(ctx, chat_id: int, user_id: int) -> bool:
     return bool(getattr(m, "can_change_info", False))
 
 
-# ───────── DB helpers ─────────
-
 async def _apply_lock(chat_id: int, items: list):
     data = await dbase.locks_get(chat_id)
     locks = data["locks"]
@@ -181,15 +176,12 @@ async def _apply_unlock(chat_id: int, items: list):
 
 
 def _get_msg_types(msg) -> set:
-    """Return set of all lock-types this message matches."""
     types = set()
     has_media = _has_media(msg)
 
-    # ✅ Pure text only (not caption)
     if msg.text and not has_media:
         types.add("text")
 
-    # Media
     if msg.photo: types.add("photo")
     if msg.video: types.add("video")
     if msg.audio: types.add("audio")
@@ -203,26 +195,22 @@ def _get_msg_types(msg) -> set:
     if msg.media_group_id: types.add("album")
     if msg.reply_markup: types.add("button")
 
-    # Stickers
     if msg.sticker:
         types.add("sticker")
 
-    # Sender-based
     sc = getattr(msg, "sender_chat", None)
     if sc and not getattr(sc, "is_forum", False):
         types.add("anonchannel")
     if msg.from_user and msg.from_user.is_bot:
         types.add("bot")
 
-    # Forward
-    if msg.forward_date or getattr(msg, "forward_origin", None):
+    # ✅ FIX: getattr use kiya (naye PTB version mein forward_date nahi hai)
+    if getattr(msg, "forward_date", None) or getattr(msg, "forward_origin", None):
         types.add("forward")
 
-    # Plain emoji
     if msg.text and _EMOJI_RE.search(msg.text):
         types.add("emoji")
 
-    # Entities (text + caption)
     all_entities = list(msg.entities or []) + list(msg.caption_entities or [])
     for e in all_entities:
         if e.type in ("url", "text_link"):
@@ -251,7 +239,6 @@ def _get_msg_types(msg) -> set:
 
 
 async def is_message_locked(ctx, chat_id: int, msg) -> bool:
-    """Return True if message should be deleted by locks."""
     data = await dbase.locks_get(chat_id)
     active = data.get("locks", set())
     unlocked = data.get("unlocks", set())
@@ -260,7 +247,6 @@ async def is_message_locked(ctx, chat_id: int, msg) -> bool:
 
     msg_types = _get_msg_types(msg)
 
-    # "all" locked → delete unless every matching type is unlocked
     if "all" in active:
         if not msg_types:
             return True
@@ -270,14 +256,11 @@ async def is_message_locked(ctx, chat_id: int, msg) -> bool:
             return True
         return False
 
-    # Specific locks
     for t in msg_types:
         if t in active and t not in unlocked:
             return True
     return False
 
-
-# ───────── Commands ─────────
 
 async def lock_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
@@ -542,12 +525,10 @@ async def _locks_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if user.is_bot:
         return
 
-    # 1. Quick check
     data = await dbase.locks_get(chat.id)
     if not data.get("locks"):
         return
 
-    # 2. Admin bypass (cached)
     is_admin = _is_admin_cached(chat.id, user.id)
     if is_admin is None:
         try:
@@ -560,11 +541,9 @@ async def _locks_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if is_admin:
         return
 
-    # 3. Approved bypass
     if user.id in data.get("approved", {}):
         return
 
-    # 4. Bot permission (cached)
     me = ctx.bot_data.get("me")
     if me:
         cache_key = f"bot_perm_{chat.id}"
@@ -582,7 +561,6 @@ async def _locks_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await say(ctx, chat.id, T("⚠️ I need <b>Delete Messages</b> permission to enforce locks. Please promote me!"))
             return
 
-    # 5. Delete if locked
     try:
         if await is_message_locked(ctx, chat.id, msg):
             await msg.delete()
