@@ -529,7 +529,7 @@ async def _locks_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except TelegramError:
             return
 
-  if await is_message_locked(ctx, chat.id, msg):
+    if await is_message_locked(ctx, chat.id, msg):
         try:
             await msg.delete()
         except TelegramError:
