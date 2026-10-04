@@ -1,6 +1,5 @@
 """Locks plugin: lock types to auto-delete specific message types (MongoDB)."""
 import html
-import re
 
 from telegram import Update, InlineKeyboardMarkup
 from telegram.constants import ChatMemberStatus, ChatType
@@ -135,76 +134,102 @@ async def _apply_unlock(chat_id: int, items: list):
     else:
         for item in items:
             locks.discard(item)
+            unlocks.discard(item)
             if "all" in locks:
                 unlocks.add(item)
+    # Agar "all" locked nahi hai, toh unlocks meaningless — clear karo
+    if "all" not in locks:
+        unlocks = set()
     await dbase.locks_set_locks(chat_id, locks)
     await dbase.locks_set_unlocks(chat_id, unlocks)
 
 
+def _get_msg_types(msg) -> set:
+    """Return a set of all lock-types this message matches."""
+    types = set()
+    has_media = _has_media(msg)
+
+    # Pure text
+    if msg.text and not has_media:
+        types.add("text")
+
+    # Media types
+    if msg.photo: types.add("photo")
+    if msg.video: types.add("video")
+    if msg.audio: types.add("audio")
+    if msg.voice: types.add("voice")
+    if msg.document: types.add("document")
+    if msg.sticker: types.add("sticker")
+    if msg.animation: types.add("gif")
+    if msg.video_note: types.add("videonote")
+    if msg.poll: types.add("poll")
+    if msg.contact: types.add("contact")
+    if msg.location: types.add("location")
+    if msg.media_group_id: types.add("album")
+    if msg.reply_markup: types.add("button")
+
+    # Sender-based
+    if getattr(msg, "sender_chat", None): types.add("anonchannel")
+    if msg.from_user and msg.from_user.is_bot: types.add("bot")
+    if msg.forward_date or getattr(msg, "forward_origin", None): types.add("forward")
+
+    # Entities (text + caption)
+    all_entities = list(msg.entities or []) + list(msg.caption_entities or [])
+    if all_entities:
+        for e in all_entities:
+            if e.type in ("url", "text_link"):
+                url_text = msg.text[e.offset:e.offset+e.length] if msg.text else (
+                    msg.caption[e.offset:e.offset+e.length] if msg.caption else ""
+                )
+                if "t.me/joinchat" in url_text or "t.me/+" in url_text:
+                    types.add("invitelink")
+                elif "t.me/" in url_text and "bot" in url_text:
+                    types.add("botlink")
+                elif "t.me/" not in url_text:
+                    types.add("url")
+            elif e.type == "email":
+                types.add("email")
+            elif e.type == "phone_number":
+                types.add("phone")
+            elif e.type == "spoiler":
+                types.add("spoiler")
+            elif e.type == "custom_emoji":
+                types.add("emoji")
+                types.add("emojicustom")
+
+    return types
+
+
 async def is_message_locked(ctx, chat_id: int, msg) -> bool:
-    """Public async helper — returns True if the message should be deleted by locks."""
+    """Return True if message should be deleted by locks."""
     data = await dbase.locks_get(chat_id)
     active = data["locks"]
     unlocked = data["unlocks"]
     if not active:
         return False
 
-    has_media = _has_media(msg)
+    msg_types = _get_msg_types(msg)
 
+    # "all" locked → delete everything except explicitly unlocked types
     if "all" in active:
-        if "text" in unlocked and msg.text and not has_media: return False
-        if "photo" in unlocked and msg.photo: return False
-        if "video" in unlocked and msg.video: return False
-        if "audio" in unlocked and msg.audio: return False
-        if "voice" in unlocked and msg.voice: return False
-        if "document" in unlocked and msg.document: return False
-        if "sticker" in unlocked and msg.sticker: return False
-        if "gif" in unlocked and msg.animation: return False
-        if "videonote" in unlocked and msg.video_note: return False
-        if "poll" in unlocked and msg.poll: return False
-        if "contact" in unlocked and msg.contact: return False
-        if "location" in unlocked and msg.location: return False
-        if "forward" in unlocked and (msg.forward_date or msg.forward_origin): return False
-        if "anonchannel" in unlocked and msg.sender_chat: return False
-        if "bot" in unlocked and msg.from_user and msg.from_user.is_bot: return False
-        if "album" in unlocked and msg.media_group_id: return False
-        if "button" in unlocked and msg.reply_markup: return False
-        return True
+        if not msg_types:
+            # Unknown/unsupported → "all" catches it
+            return True
+        # If every matching type is unlocked, skip
+        if msg_types.issubset(unlocked):
+            return False
+        # If a specific type is unlocked, but other types aren't → delete
+        # Example: unlocked={text}, msg_types={text, phone} → phone not unlocked → delete
+        for t in msg_types:
+            if t in unlocked:
+                continue
+            return True
+        return False
 
-    if "text" in active and msg.text and not has_media: return True
-    if "photo" in active and msg.photo: return True
-    if "video" in active and msg.video: return True
-    if "audio" in active and msg.audio: return True
-    if "voice" in active and msg.voice: return True
-    if "document" in active and msg.document: return True
-    if "sticker" in active and msg.sticker: return True
-    if "gif" in active and msg.animation: return True
-    if "videonote" in active and msg.video_note: return True
-    if "poll" in active and msg.poll: return True
-    if "contact" in active and msg.contact: return True
-    if "location" in active and msg.location: return True
-    if "forward" in active and (msg.forward_date or msg.forward_origin): return True
-    if "anonchannel" in active and msg.sender_chat: return True
-    if "bot" in active and msg.from_user and msg.from_user.is_bot: return True
-    if "album" in active and msg.media_group_id: return True
-    if "button" in active and msg.reply_markup: return True
-
-    if msg.entities:
-        for e in msg.entities:
-            if "url" in active and e.type in ("url", "text_link"):
-                url_text = msg.text[e.offset:e.offset+e.length] if msg.text else ""
-                if "t.me/" not in url_text: return True
-            if "email" in active and e.type == "email": return True
-            if "phone" in active and e.type == "phone_number": return True
-            if "spoiler" in active and e.type == "spoiler": return True
-            if ("emoji" in active or "emojicustom" in active) and e.type == "custom_emoji": return True
-            if "botlink" in active and e.type in ("url", "text_link"):
-                url_text = msg.text[e.offset:e.offset+e.length] if msg.text else ""
-                if "t.me/" in url_text and "bot" in url_text: return True
-            if "invitelink" in active and e.type in ("url", "text_link"):
-                url_text = msg.text[e.offset:e.offset+e.length] if msg.text else ""
-                if "t.me/joinchat" in url_text or "t.me/+" in url_text: return True
-
+    # No "all" → check specific types
+    for t in msg_types:
+        if t in active and t not in unlocked:
+            return True
     return False
 
 
@@ -388,10 +413,24 @@ async def locks_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if chat.type == ChatType.PRIVATE:
         return
     data = await dbase.locks_get(chat.id)
-    if not data["locks"]:
+    locks = data["locks"]
+    unlocks = data["unlocks"]
+    if not locks:
         await say(ctx, chat.id, T("No locks active in this chat."), reply_to=msg.message_id)
         return
-    await say(ctx, chat.id, T(f"🔒 Active locks: {', '.join(sorted(data['locks']))}"), reply_to=msg.message_id)
+
+    lines = ["<b>🔒 Active locks:</b>"]
+    for lt in sorted(locks):
+        lines.append(f"• <code>{lt}</code>")
+
+    # Agar "all" locked hai aur kuch unlocks hain, toh dikhao
+    if "all" in locks and unlocks:
+        lines.append("")
+        lines.append("<b>🔓 Unlocked exceptions:</b>")
+        for lt in sorted(unlocks):
+            lines.append(f"• <code>{lt}</code>")
+
+    await say(ctx, chat.id, T("\n".join(lines)), reply_to=msg.message_id)
 
 
 async def locktypes_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -490,7 +529,7 @@ async def _locks_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except TelegramError:
             return
 
-    if await is_message_locked(ctx, chat.id, msg):
+  if await is_message_locked(ctx, chat.id, msg):
         try:
             await msg.delete()
         except TelegramError:
@@ -509,4 +548,3 @@ def register(app):
     app.add_handler(CallbackQueryHandler(anon_lock_callback, pattern=r"^anonlock:"))
     app.add_handler(MessageHandler(filters.ALL & filters.ChatType.GROUPS, _locks_watcher), group=10)
     
-       
