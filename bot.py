@@ -42,9 +42,10 @@ OWNER_URL = f"https://t.me/{OWNER_USERNAME}"
 CHANNEL_URL = os.getenv("CHANNEL_URL", "")
 START_IMG = os.getenv("START_IMG", "https://graph.org/file/d3a2c17942e606f4ec811-9c0373fa8bb10f4448.jpg")
 
-# ✅ FIX: Yahan sirf START_TXT (First Page) mein blockquote lagaya hai
+# ✅ FIX: Yahan ab <blockquote expandable> laga diya gaya hai. 
+# Ab text chhota (collapse) dikhega aur tap karne par khulega!
 START_TXT = (
-    "<blockquote><b>✦ hey {m} !</b>\n\n"
+    "<blockquote expandable><b>✦ hey {m} !</b>\n\n"
     "i am <b>𝙕𝙤𝙮𝙖</b> — a powerful group management bot.\n"
     "➤ stylish welcome messages with buttons\n"
     "➤ promote / demote with a live power panel\n"
@@ -168,7 +169,6 @@ def section_page(key):
 async def edit_page(qy, text, kb):
     m = qy.message
     try:
-        # ✅ FIX: Yahan se hardcoded blockquote hata diya
         if m.photo or m.video or m.animation:
             await qy.edit_message_caption(caption=text, reply_markup=kb)
         else:
@@ -198,13 +198,11 @@ async def start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     key = ALIASES.get(arg)
     if key:
         text, kb = section_page(key)
-        # ✅ FIX: Yahan se bhi hata diya
         await ctx.bot.send_message(chat.id, text, parse_mode=ParseMode.HTML, reply_markup=kb)
         return
 
     text, kb = home_page(user, ctx)
     try:
-        # ✅ FIX: Yahan se bhi hata diya (text mein already First Page wala laga hua aayega)
         await ctx.bot.send_photo(chat.id, START_IMG, caption=text, parse_mode=ParseMode.HTML, reply_markup=kb)
     except TelegramError as e:
         log.warning("start image failed: %s", e)
@@ -225,7 +223,6 @@ async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         text, kb = section_page(key)
     else:
         text, kb = main_page()
-    # ✅ FIX: Yahan se bhi hardcoded blockquote hata diya
     await ctx.bot.send_message(chat.id, text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 
