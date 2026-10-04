@@ -24,7 +24,6 @@ async def init(uri: str, name: str):
     await _db.guardian.create_index("chat_id", unique=True)
     await _db.clean.create_index("chat_id", unique=True)
     await _db.locks.create_index("chat_id", unique=True)
-    # logs: _id is already unique by default, no index needed
     log.info("MongoDB connected (db: %s)", name)
 
 
@@ -184,21 +183,3 @@ async def approved_remove(chat_id: int, user_id: int) -> bool:
 async def approved_list(chat_id: int) -> dict:
     doc = await _db.locks.find_one({"chat_id": chat_id}) or {}
     return {u["id"]: u.get("name", "User") for u in doc.get("approved", [])}
-
-
-# ───────── logs (owner-only bot start logger) ─────────
-async def logs_get() -> dict:
-    return await _db.logs.find_one({"_id": "config"}) or {}
-
-async def logs_set(enabled: bool, group_id: int | None = None):
-    upd = {"enabled": bool(enabled)}
-    if group_id is not None:
-        upd["group_id"] = int(group_id)
-    elif not enabled:
-        upd["group_id"] = None
-    await _db.logs.update_one({"_id": "config"}, {"$set": upd}, upsert=True)
-
-async def logs_incr_users(user_id: int) -> int:
-    await _db.logs.update_one({"_id": "config"}, {"$inc": {"total_users": 1}}, upsert=True)
-    doc = await _db.logs.find_one({"_id": "config"})
-    return doc.get("total_users", 0)
