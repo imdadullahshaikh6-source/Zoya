@@ -24,7 +24,7 @@ async def init(uri: str, name: str):
     await _db.guardian.create_index("chat_id", unique=True)
     await _db.clean.create_index("chat_id", unique=True)
     await _db.locks.create_index("chat_id", unique=True)
-    await _db.logs.create_index("_id", unique=True)  # ✅ NEW
+    # logs: _id is already unique by default, no index needed
     log.info("MongoDB connected (db: %s)", name)
 
 
