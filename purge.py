@@ -1,4 +1,4 @@
-"""Purge module: provides .purge, .spurge, and .del commands with slow deletion."""
+"""Purge module: provides .purge, .spurge, and .del commands with optimized bulk deletion."""
 import asyncio
 import logging
 
@@ -58,6 +58,34 @@ async def check_purge_permissions(chat, user_id, ctx) -> bool:
     return True
 
 
+async def _fast_purge(ctx, chat_id: int, start_id: int, end_id: int) -> int:
+    """Optimized purge logic: bulk delete in chunks of 100 with fallback."""
+    message_ids = list(range(start_id, end_id + 1))
+    deleted_count = 0
+    
+    # Telegram API allows up to 100 messages to be deleted in a single request.
+    # We process in chunks of 100 for maximum speed.
+    for i in range(0, len(message_ids), 100):
+        batch = message_ids[i:i+100]
+        try:
+            # Bulk delete (very fast)
+            await ctx.bot.delete_messages(chat_id, batch)
+            deleted_count += len(batch)
+            # Small delay between batches to avoid hitting FloodWait limits
+            await asyncio.sleep(0.2)
+        except TelegramError as e:
+            # If bulk delete fails (e.g., one message is already deleted or >48 hours old),
+            # fall back to deleting them one by one for this specific batch.
+            for msg_id in batch:
+                try:
+                    await ctx.bot.delete_message(chat_id, msg_id)
+                    deleted_count += 1
+                    await asyncio.sleep(0.05)  # Minimal delay for individual fallback
+                except TelegramError:
+                    continue
+    return deleted_count
+
+
 async def purge_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     chat = update.effective_chat
@@ -79,19 +107,8 @@ async def purge_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     end_id = msg.message_id
     chat_id = chat.id
 
-    deleted_count = 0
-    # ✅ UPDATED: Slow one-by-one deletion from top to bottom
-    for msg_id in range(start_id, end_id + 1):
-        try:
-            await ctx.bot.delete_message(chat_id, msg_id)
-            deleted_count += 1
-            # Thoda delay taaki Telegram rate limit na lagaye aur koi msg skip na ho
-            await asyncio.sleep(0.3) 
-        except TelegramError as e:
-            # Agar message pehle se deleted hai ya delete nahi ho sakta, toh skip karo
-            if "message to delete not found" not in str(e).lower() and "message can't be deleted" not in str(e).lower():
-                log.warning(f"Failed to delete {msg_id}: {e}")
-            continue
+    # ✅ UPDATED: Fast bulk deletion
+    deleted_count = await _fast_purge(ctx, chat_id, start_id, end_id)
 
     note = await ctx.bot.send_message(chat_id, f"<blockquote>Successfully purged {deleted_count} messages.</blockquote>", parse_mode="HTML")
     asyncio.create_task(auto_delete_msg(ctx, note, 10))
@@ -118,13 +135,8 @@ async def spurge_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     end_id = msg.message_id
     chat_id = chat.id
 
-    # ✅ UPDATED: Silent slow deletion
-    for msg_id in range(start_id, end_id + 1):
-        try:
-            await ctx.bot.delete_message(chat_id, msg_id)
-            await asyncio.sleep(0.3)
-        except TelegramError as e:
-            continue
+    # ✅ UPDATED: Fast silent bulk deletion
+    await _fast_purge(ctx, chat_id, start_id, end_id)
 
 
 async def del_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -153,7 +165,7 @@ async def del_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 def register(app: Application):
-    # ✅ UPDATED: Regex supports both / and . prefixes
+    # ✅ Regex supports both / and . prefixes for all purge commands
     app.add_handler(MessageHandler(
         filters.Regex(r"^[./]purge(?:@\w+)?$") & filters.ChatType.GROUPS, 
         purge_cmd
@@ -162,7 +174,8 @@ def register(app: Application):
         filters.Regex(r"^[./]spurge(?:@\w+)?$") & filters.ChatType.GROUPS, 
         spurge_cmd
     ))
+    # .del aur .dly dono ke liye same handler
     app.add_handler(MessageHandler(
-        filters.Regex(r"^[./]del(?:@\w+)?$") & filters.ChatType.GROUPS, 
+        filters.Regex(r"^[./](?:del|dly)(?:@\w+)?$") & filters.ChatType.GROUPS, 
         del_cmd
     ))
