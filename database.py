@@ -130,10 +130,16 @@ async def filter_count(chat_id: int) -> int:
 async def guardian_get(chat_id: int) -> dict | None:
     return await _db.guardian.find_one({"chat_id": chat_id})
 
-async def guardian_set(chat_id: int, delay_seconds: int | None = None, enabled: bool | None = None):
+async def guardian_set(chat_id: int, delay_seconds: int | None = None, enabled: bool | None = None,
+                       edit_delay_seconds: int | None = None, media_delay_seconds: int | None = None):
+    """✅ UPDATED: Now supports separate edit and media delays."""
     upd = {}
     if delay_seconds is not None:
         upd["delay_seconds"] = int(delay_seconds)
+    if edit_delay_seconds is not None:
+        upd["edit_delay_seconds"] = int(edit_delay_seconds)
+    if media_delay_seconds is not None:
+        upd["media_delay_seconds"] = int(media_delay_seconds)
     if enabled is not None:
         upd["enabled"] = bool(enabled)
     if upd:
