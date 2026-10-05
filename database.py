@@ -23,9 +23,39 @@ async def init(uri: str, name: str):
     await _db.filters.create_index([("chat_id", 1), ("keyword", 1)], unique=True)
     await _db.guardian.create_index("chat_id", unique=True)
     await _db.clean.create_index("chat_id", unique=True)
-    await _db.cleanservice.create_index("chat_id", unique=True)   # ✅ NEW
+
+    # ✅ SAFE: cleanservice index (handles existing duplicates gracefully)
+    try:
+        await _db.cleanservice.create_index("chat_id", unique=True)
+        log.info("[db] cleanservice index ready ✅")
+    except Exception as e:
+        log.warning("[db] cleanservice index creation failed (%s) — cleaning duplicates...", e)
+        await _cleanup_cleanservice_duplicates()
+        try:
+            await _db.cleanservice.create_index("chat_id", unique=True)
+            log.info("[db] cleanservice index created after cleanup ✅")
+        except Exception as e2:
+            log.error("[db] cleanservice index still failed: %s", e2)
+
     await _db.locks.create_index("chat_id", unique=True)
     log.info("MongoDB connected (db: %s)", name)
+
+
+async def _cleanup_cleanservice_duplicates():
+    """Keep only the newest doc per chat_id, delete the rest."""
+    try:
+        pipeline = [
+            {"$group": {"_id": "$chat_id", "ids": {"$push": "$_id"}, "count": {"$sum": 1}}},
+            {"$match": {"count": {"$gt": 1}}},
+        ]
+        dupes = [doc async for doc in _db.cleanservice.aggregate(pipeline)]
+        for d in dupes:
+            keep = d["ids"][-1]              # newest doc
+            remove = d["ids"][:-1]
+            await _db.cleanservice.delete_many({"_id": {"$in": remove}})
+            log.info("[db] cleanservice: cleaned %d dupes for chat_id=%s (kept %s)", len(remove), d["_id"], keep)
+    except Exception as e:
+        log.error("[db] cleanservice cleanup failed: %s", e)
 
 
 async def cfg_get(chat_id: int) -> dict:
@@ -161,12 +191,57 @@ async def clean_set(chat_id: int, enabled: bool, mode: str = "all"):
     await _db.clean.update_one({"chat_id": chat_id}, {"$set": {"enabled": bool(enabled), "mode": mode}}, upsert=True)
 
 
-# ✅ NEW: Clean Service functions
+# ─────────────── clean service (system messages) ───────────────
+
 async def cleanservice_get(chat_id: int) -> dict | None:
-    return await _db.cleanservice.find_one({"chat_id": chat_id})
+    """Fetch cleanservice config. Always returns `enabled` as a strict bool.
+    Validates chat_id type so string/int mismatch can't create shadow docs."""
+    if not isinstance(chat_id, int):
+        try:
+            chat_id = int(chat_id)
+        except (TypeError, ValueError):
+            log.warning("[cleanservice_get] invalid chat_id: %r", chat_id)
+            return None
+
+    doc = await _db.cleanservice.find_one({"chat_id": chat_id})
+    if not doc:
+        return None
+
+    # Normalize: always a real Python bool, never int/str/None
+    raw = doc.get("enabled")
+    if isinstance(raw, str):
+        doc["enabled"] = raw.strip().lower() in ("1", "true", "t", "on", "yes", "y")
+    else:
+        doc["enabled"] = bool(raw)
+    return doc
+
 
 async def cleanservice_set(chat_id: int, enabled: bool):
-    await _db.cleanservice.update_one({"chat_id": chat_id}, {"$set": {"enabled": bool(enabled)}}, upsert=True)
+    """Upsert cleanservice flag. Stores chat_id as int and enabled as strict bool.
+    Re-writes chat_id field so legacy string docs get normalized."""
+    if not isinstance(chat_id, int):
+        try:
+            chat_id = int(chat_id)
+        except (TypeError, ValueError):
+            log.warning("[cleanservice_set] invalid chat_id: %r", chat_id)
+            return
+
+    # Normalize input to a real bool (handles "on"/"off"/1/0 etc.)
+    if isinstance(enabled, str):
+        value = enabled.strip().lower() in ("1", "true", "t", "on", "yes", "y")
+    else:
+        value = bool(enabled)
+
+    result = await _db.cleanservice.update_one(
+        {"chat_id": chat_id},
+        {"$set": {"chat_id": chat_id, "enabled": value}},
+        upsert=True,
+    )
+    log.info(
+        "[cleanservice_set] chat=%s enabled=%s matched=%d modified=%d upserted=%s",
+        chat_id, value, result.matched_count, result.modified_count,
+        bool(result.upserted_id),
+    )
 
 
 # ───────── locks + approved users ─────────
