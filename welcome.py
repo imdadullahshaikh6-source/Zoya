@@ -6,7 +6,7 @@ Features:
 - Direct member add detection
 - Join request detection
 - Approved join request detection
-- Clean welcome / clean service
+- Clean welcome
 - Group rules
 - Admin permission checks
 """
@@ -40,7 +40,6 @@ HELP_TXT = (
     "/welcome — status + preview • /welcome on|off\n"
     "/resetwelcome — back to default\n"
     "/cleanwelcome on|off — delete old welcome when a new member joins\n"
-    "/cleanservice on|off — delete join service messages\n"
     "/setrules • /rules — group rules\n\n"
     "<b>fillings:</b> {first} {last} {fullname} {username} "
     "{mention} {id} {chatname} {count}\n\n"
@@ -58,7 +57,6 @@ COMMANDS = [
     ("welcome", "Welcome status / on / off"),
     ("resetwelcome", "Reset welcome"),
     ("cleanwelcome", "Delete old welcome messages"),
-    ("cleanservice", "Delete join service messages"),
     ("setrules", "Set group rules"),
     ("rules", "Show group rules"),
 ]
@@ -365,7 +363,7 @@ async def setwelcome_cmd(update, ctx):
     if not rights_of(bm)["delete_messages"]:
         extra = "\n\n" + T(
             "{m}, i don't have the {l} power. "
-            "/cleanwelcome and /cleanservice will not work "
+            "/cleanwelcome will not work "
             "until you give it.",
             m=mention(msg.from_user),
             l="<b>Delete Messages</b>",
@@ -425,7 +423,6 @@ async def welcome_cmd(update, ctx):
         "<b>welcome settings</b>\n"
         "welcome: {a}\n"
         "clean welcome: {b}\n"
-        "clean service: {c}\n"
         "message type: {t}",
         a=(
             "ON ✅"
@@ -435,11 +432,6 @@ async def welcome_cmd(update, ctx):
         b=(
             "ON ✅"
             if cfg.get("clean_welcome")
-            else "OFF ❌"
-        ),
-        c=(
-            "ON ✅"
-            if cfg.get("clean_service")
             else "OFF ❌"
         ),
         t=w.get("type", "text"),
@@ -493,7 +485,7 @@ async def resetwelcome_cmd(update, ctx):
 
 
 # --------------------------------------------------
-# CLEAN WELCOME / CLEAN SERVICE
+# CLEAN WELCOME
 # --------------------------------------------------
 
 async def _toggle(update, ctx, key, label, cmd):
@@ -577,16 +569,6 @@ async def cleanwelcome_cmd(update, ctx):
         "clean_welcome",
         "clean welcome",
         "cleanwelcome",
-    )
-
-
-async def cleanservice_cmd(update, ctx):
-    await _toggle(
-        update,
-        ctx,
-        "clean_service",
-        "clean service",
-        "cleanservice",
     )
 
 
@@ -787,17 +769,6 @@ async def on_join(update, ctx):
     if not msg or not msg.new_chat_members:
         return
 
-    cfg = await cfg_get(chat.id)
-
-    # Delete Telegram's "user joined" service message
-    # if cleanservice is enabled.
-    if cfg.get("clean_service"):
-        try:
-            await msg.delete()
-
-        except TelegramError:
-            pass
-
     for user in msg.new_chat_members:
 
         # Bot itself added to the group
@@ -935,21 +906,6 @@ def register(app):
         setwelcome_cmd,
     )
 
-# --------------------------------------------------
-# REGISTER HANDLERS
-# --------------------------------------------------
-
-def register(app):
-
-    grp = filters.ChatType.GROUPS
-
-    # Welcome commands
-    dual_command(
-        app,
-        "setwelcome",
-        setwelcome_cmd,
-    )
-
     # Support media captions such as:
     # photo + caption /setwelcome
     app.add_handler(
@@ -980,12 +936,6 @@ def register(app):
         app,
         "cleanwelcome",
         cleanwelcome_cmd,
-    )
-
-    dual_command(
-        app,
-        "cleanservice",
-        cleanservice_cmd,
     )
 
     # Rules
@@ -1031,3 +981,4 @@ def register(app):
             ChatMemberHandler.CHAT_MEMBER,
         )
     )
+    
