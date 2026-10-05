@@ -59,30 +59,31 @@ async def check_purge_permissions(chat, user_id, ctx) -> bool:
 
 
 async def _perfect_purge(ctx, chat_id: int, start_id: int, end_id: int):
-    """One-by-one deletion with smart delay. Guarantees NO skips."""
+    """One-by-one deletion with smart delay. Handles invalid messages gracefully."""
     for msg_id in range(start_id, end_id + 1):
         try:
             await ctx.bot.delete_message(chat_id, msg_id)
-            # ✅ Perfect balance: 0.08s delay = ~12 messages/second (Fast but safe)
-            await asyncio.sleep(0.08)
+            # ✅ Success! Fast delay for speed (0.05s = 20 msgs/sec)
+            await asyncio.sleep(0.05)
         except RetryAfter as e:
-            # If Telegram says "slow down", we wait exactly that amount of time
+            # Telegram rate limit, wait it out
             log.warning(f"FloodWait hit! Sleeping for {e.retry_after} seconds.")
             await asyncio.sleep(e.retry_after + 1)
-            # Try again after waiting
             try:
                 await ctx.bot.delete_message(chat_id, msg_id)
             except Exception:
                 pass
         except TelegramError as e:
             err_str = str(e).lower()
-            # If message is already deleted (gap) or can't be deleted (service msg), just skip it
-            if "message to delete not found" in err_str or "message can't be deleted" in err_str:
+            # ✅ FIX: If message doesn't exist or can't be deleted (400 Bad Request), 
+            # skip it immediately without wasting time.
+            if "message to delete not found" in err_str or "message can't be deleted" in err_str or "bad request" in err_str:
+                await asyncio.sleep(0.01)  # Very tiny pause to avoid API hammering
                 continue
             else:
                 log.warning(f"Failed to delete {msg_id}: {e}")
-                # Small pause on unexpected error to let things settle
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.1)
+                continue
         except Exception as e:
             log.error(f"Unexpected error deleting {msg_id}: {e}")
             continue
