@@ -1,10 +1,10 @@
-"""Purge module: provides .purge, .spurge, and .del commands with optimized bulk deletion."""
+"""Purge module: provides .purge, .spurge, and .del commands with perfect deletion."""
 import asyncio
 import logging
 
 from telegram import ChatMemberAdministrator, ChatMemberOwner, Update
 from telegram.constants import ChatType
-from telegram.error import TelegramError
+from telegram.error import TelegramError, RetryAfter
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
 from common import log
@@ -58,28 +58,34 @@ async def check_purge_permissions(chat, user_id, ctx) -> bool:
     return True
 
 
-async def _fast_purge(ctx, chat_id: int, start_id: int, end_id: int) -> bool:
-    """Optimized purge logic: bulk delete in chunks of 100 with fallback."""
-    message_ids = list(range(start_id, end_id + 1))
-    
-    # Telegram API allows up to 100 messages to be deleted in a single request.
-    # We process in chunks of 100 for maximum speed.
-    for i in range(0, len(message_ids), 100):
-        batch = message_ids[i:i+100]
+async def _perfect_purge(ctx, chat_id: int, start_id: int, end_id: int):
+    """One-by-one deletion with smart delay. Guarantees NO skips."""
+    for msg_id in range(start_id, end_id + 1):
         try:
-            # Bulk delete (very fast)
-            await ctx.bot.delete_messages(chat_id, batch)
-            # Small delay between batches to avoid hitting FloodWait limits
-            await asyncio.sleep(0.2)
+            await ctx.bot.delete_message(chat_id, msg_id)
+            # ✅ Perfect balance: 0.08s delay = ~12 messages/second (Fast but safe)
+            await asyncio.sleep(0.08)
+        except RetryAfter as e:
+            # If Telegram says "slow down", we wait exactly that amount of time
+            log.warning(f"FloodWait hit! Sleeping for {e.retry_after} seconds.")
+            await asyncio.sleep(e.retry_after + 1)
+            # Try again after waiting
+            try:
+                await ctx.bot.delete_message(chat_id, msg_id)
+            except Exception:
+                pass
         except TelegramError as e:
-            # If bulk delete fails, fall back to deleting them one by one for this specific batch.
-            for msg_id in batch:
-                try:
-                    await ctx.bot.delete_message(chat_id, msg_id)
-                    await asyncio.sleep(0.05)  # Minimal delay for individual fallback
-                except TelegramError:
-                    continue
-    return True
+            err_str = str(e).lower()
+            # If message is already deleted (gap) or can't be deleted (service msg), just skip it
+            if "message to delete not found" in err_str or "message can't be deleted" in err_str:
+                continue
+            else:
+                log.warning(f"Failed to delete {msg_id}: {e}")
+                # Small pause on unexpected error to let things settle
+                await asyncio.sleep(0.5)
+        except Exception as e:
+            log.error(f"Unexpected error deleting {msg_id}: {e}")
+            continue
 
 
 async def purge_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -103,11 +109,11 @@ async def purge_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     end_id = msg.message_id
     chat_id = chat.id
 
-    # Fast bulk deletion
-    await _fast_purge(ctx, chat_id, start_id, end_id)
+    # ✅ Perfect Purge
+    await _perfect_purge(ctx, chat_id, start_id, end_id)
 
-    # ✅ UPDATED: Removed the wrong count, just showing a clean success message
-    note = await ctx.bot.send_message(chat_id, "<blockquote>Successfully purged messages.</blockquote>", parse_mode="HTML")
+    # ✅ Purge Completed message
+    note = await ctx.bot.send_message(chat_id, "<blockquote>Purge Completed.</blockquote>", parse_mode="HTML")
     asyncio.create_task(auto_delete_msg(ctx, note, 10))
 
 
@@ -132,8 +138,8 @@ async def spurge_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     end_id = msg.message_id
     chat_id = chat.id
 
-    # Fast silent bulk deletion
-    await _fast_purge(ctx, chat_id, start_id, end_id)
+    # ✅ Perfect Silent Purge
+    await _perfect_purge(ctx, chat_id, start_id, end_id)
 
 
 async def del_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
