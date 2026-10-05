@@ -160,9 +160,11 @@ def main_page():
     for i in range(0, len(keys), 2):
         row = []
         for j, k in enumerate(keys[i:i + 2]):
-            # ✅ UPDATED: Locks and Purge both green
-            if k in ("locks", "purge"):
+            # ✅ UPDATED: Locks is Green (success), Purge is Blue (primary)
+            if k == "locks":
                 btn_style = "success"
+            elif k == "purge":
+                btn_style = "primary"
             else:
                 btn_style = "success" if (i + j) % 2 == 0 else "primary"
             row.append(B(PAGES[k][0], f"help:{k}", style=btn_style))
