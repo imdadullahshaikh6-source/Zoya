@@ -101,7 +101,7 @@ PURGE_TXT = (
     "<i>Note: You need 'Delete Messages' admin right, and the bot must be an admin with delete rights.</i>"
 )
 
-# ✅ PAGES: Utility hata diya, naye buttons add kiye
+# ✅ PAGES: All categories including new ones
 PAGES = {
     "greet": ("🎉 𝙂𝙧𝙚𝙚𝙩𝙞𝙣𝙜𝙨", welcome.HELP_TXT),
     "admin": ("👮 𝘼𝙙𝙢𝙞𝙣", admin.HELP_TXT),
@@ -159,8 +159,11 @@ def home_page(user, ctx):
 
 def main_page():
     text = sc("<b>✦ command</b>\n\nchoose a category to see all details.")
-    # ✅ Custom layout with required colors
+    # ✅ Full layout with required colors and order (exactly as user requested)
     layout = [
+        [("greet", "success"), ("admin", "primary")],
+        [("afk", "success"), ("mod", "primary")],
+        [("extra", "success"), ("filters", "primary")],
         [("guardian", "success"), ("pin", "primary")],
         [("cleancommand", "success"), ("cleanservice", "primary")],
         [("locks", "success"), ("purge", "primary")],
