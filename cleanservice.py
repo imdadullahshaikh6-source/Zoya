@@ -76,12 +76,19 @@ async def _is_enabled(chat_id: int) -> bool:
 
 
 async def _set_enabled(chat_id: int, value: bool):
+    """Memory-first write with rollback on DB failure."""
     async with _lock(chat_id):
-        _state[chat_id] = value           # memory first -> watcher obeys immediately
+        previous = _state.get(chat_id)
+        _state[chat_id] = value           # optimistic: cache first so watcher obeys instantly
         try:
             await dbase.cleanservice_set(chat_id, value)
         except Exception as e:
-            log.error("[cleanservice] db write failed for %s: %s", chat_id, e)
+            log.error("[cleanservice] db write failed for %s: %s — rolling back cache", chat_id, e)
+            if previous is None:
+                _state.pop(chat_id, None)
+            else:
+                _state[chat_id] = previous
+            raise   # re-raise so the command can report failure
 
 
 async def _is_full_admin(ctx, chat_id: int, user_id: int) -> bool:
@@ -130,7 +137,13 @@ async def cleanservice_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     enabled = arg in ("on", "yes")
-    await _set_enabled(chat.id, enabled)
+
+    try:
+        await _set_enabled(chat.id, enabled)
+    except Exception:
+        await say(ctx, chat.id, T("<blockquote>⚠️ couldn't save setting — try again.</blockquote>"), reply_to=msg.message_id)
+        return
+
     await say(ctx, chat.id, T(
         f"<blockquote>🧼 Cleanservice turned <b>{'ON ✅' if enabled else 'OFF ❌'}</b>.</blockquote>"
     ), reply_to=msg.message_id)
@@ -145,7 +158,12 @@ async def keepservice_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await say(ctx, chat.id, T("<blockquote>⚠️ only full-power admins can use this.</blockquote>"), reply_to=msg.message_id)
         return
 
-    await _set_enabled(chat.id, False)
+    try:
+        await _set_enabled(chat.id, False)
+    except Exception:
+        await say(ctx, chat.id, T("<blockquote>⚠️ couldn't save setting — try again.</blockquote>"), reply_to=msg.message_id)
+        return
+
     await say(ctx, chat.id, T("<blockquote>🧼 Cleanservice turned <b>OFF ❌</b> — service messages will stay.</blockquote>"), reply_to=msg.message_id)
 
 
@@ -189,4 +207,3 @@ def register(app: Application):
         ),
         group=97,
     )
-    
