@@ -31,6 +31,59 @@ COMMANDS = [
 ]
 
 
+# ── in-memory source of truth (instantly honours /keepservice, no stale DB reads) ──
+_state: dict = {}                 # chat_id -> bool
+_locks: dict = {}                 # chat_id -> asyncio.Lock
+
+# service-message types, only used for logging which one got deleted
+_SERVICE_ATTRS = (
+    "new_chat_members", "left_chat_member", "new_chat_title", "new_chat_photo",
+    "delete_chat_photo", "group_chat_created", "supergroup_chat_created",
+    "channel_chat_created", "message_auto_delete_timer_changed", "migrate_to_chat_id",
+    "migrate_from_chat_id", "pinned_message", "video_chat_scheduled",
+    "video_chat_started", "video_chat_ended", "video_chat_participants_invited",
+    "forum_topic_created", "forum_topic_closed", "forum_topic_reopened",
+    "forum_topic_edited", "general_forum_topic_hidden", "general_forum_topic_unhidden",
+    "write_access_allowed", "boost_added", "chat_background_set",
+)
+
+
+def _lock(chat_id: int) -> asyncio.Lock:
+    lk = _locks.get(chat_id)
+    if lk is None:
+        lk = _locks[chat_id] = asyncio.Lock()
+    return lk
+
+
+def _truthy(v) -> bool:
+    """DB may return True/1/'1'/'true'/'False'... normalise safely."""
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "t", "on", "yes", "y")
+    return bool(v)
+
+
+async def _is_enabled(chat_id: int) -> bool:
+    if chat_id in _state:
+        return _state[chat_id]
+    try:
+        cfg = await dbase.cleanservice_get(chat_id)
+    except Exception as e:
+        log.warning("[cleanservice] db read failed for %s: %s (treating as OFF)", chat_id, e)
+        return False                      # fail-safe: never delete if unsure
+    val = _truthy(cfg.get("enabled")) if cfg else False
+    _state.setdefault(chat_id, val)       # don't overwrite a value set while we were awaiting
+    return _state[chat_id]
+
+
+async def _set_enabled(chat_id: int, value: bool):
+    async with _lock(chat_id):
+        _state[chat_id] = value           # memory first -> watcher obeys immediately
+        try:
+            await dbase.cleanservice_set(chat_id, value)
+        except Exception as e:
+            log.error("[cleanservice] db write failed for %s: %s", chat_id, e)
+
+
 async def _is_full_admin(ctx, chat_id: int, user_id: int) -> bool:
     try:
         m = await ctx.bot.get_chat_member(chat_id, user_id)
@@ -44,11 +97,8 @@ async def _is_full_admin(ctx, chat_id: int, user_id: int) -> bool:
 
 
 async def _bot_can_delete(ctx, chat_id: int) -> bool:
-    me = ctx.application.bot_data.get("me")
-    if not me:
-        return False
     try:
-        m = await ctx.bot.get_chat_member(chat_id, me.id)
+        m = await ctx.bot.get_chat_member(chat_id, ctx.bot.id)
     except TelegramError:
         return False
     return (m.status == ChatMemberStatus.ADMINISTRATOR
@@ -69,8 +119,7 @@ async def cleanservice_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     arg = (ctx.args[0].lower() if ctx.args else "")
-    cfg = await dbase.cleanservice_get(chat.id) or {}
-    current = cfg.get("enabled", False)
+    current = await _is_enabled(chat.id)
 
     if arg not in ("on", "off", "yes", "no"):
         state = "🟢 ON" if current else "🔴 OFF"
@@ -81,7 +130,7 @@ async def cleanservice_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     enabled = arg in ("on", "yes")
-    await dbase.cleanservice_set(chat.id, enabled)
+    await _set_enabled(chat.id, enabled)
     await say(ctx, chat.id, T(
         f"<blockquote>🧼 Cleanservice turned <b>{'ON ✅' if enabled else 'OFF ❌'}</b>.</blockquote>"
     ), reply_to=msg.message_id)
@@ -96,12 +145,12 @@ async def keepservice_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await say(ctx, chat.id, T("<blockquote>⚠️ only full-power admins can use this.</blockquote>"), reply_to=msg.message_id)
         return
 
-    await dbase.cleanservice_set(chat.id, False)
+    await _set_enabled(chat.id, False)
     await say(ctx, chat.id, T("<blockquote>🧼 Cleanservice turned <b>OFF ❌</b> — service messages will stay.</blockquote>"), reply_to=msg.message_id)
 
 
 async def _service_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Deletes service messages when enabled."""
+    """Deletes service messages ONLY while cleanservice is ON."""
     msg = update.effective_message
     chat = update.effective_chat
     if not msg or not chat:
@@ -109,19 +158,23 @@ async def _service_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         return
 
-    cfg = await dbase.cleanservice_get(chat.id)
-    if not cfg or not cfg.get("enabled"):
+    if not await _is_enabled(chat.id):
         return
 
-    # Bot must have delete rights
+    # Bot must have delete rights (network call -> state may change meanwhile)
     if not await _bot_can_delete(ctx, chat.id):
         return
 
+    # re-check right before deleting: /keepservice may have run during the await above
+    if not await _is_enabled(chat.id):
+        return
+
+    kinds = [a for a in _SERVICE_ATTRS if getattr(msg, a, None)] or ["unknown"]
     try:
         await ctx.bot.delete_message(chat.id, msg.message_id)
-        log.info("[cleanservice] ✅ deleted service message %s in chat %s", msg.message_id, chat.id)
+        log.info("[cleanservice] ✅ deleted %s (%s) in chat %s", msg.message_id, ",".join(kinds), chat.id)
     except TelegramError as e:
-        log.warning("[cleanservice] ❌ delete failed: %s", e)
+        log.warning("[cleanservice] ❌ delete failed (%s): %s", ",".join(kinds), e)
 
 
 def register(app: Application):
@@ -135,4 +188,5 @@ def register(app: Application):
             _service_watcher,
         ),
         group=97,
-  )
+    )
+    
