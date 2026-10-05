@@ -27,7 +27,7 @@ from common import (
 
 WARN_LIMIT = int(os.getenv("WARN_LIMIT", "3"))
 
-# ⚠️ APNI TELEGRAM ID YAHAN DAALEIN (numeric, e.g. 123456789)
+# ⚠️️ APNI TELEGRAM ID YAHAN DAALEIN (numeric, e.g. 123456789)
 BOT_OWNER_ID = 8373739674
 
 # Telegram's official Anonymous Admin Bot ID
@@ -38,21 +38,20 @@ _PENDING_ANON = {}
 _ANON_SEQ = 0
 
 HELP_TXT = (
-    "<b>✦ moderation — ban / mute / warn</b>\n\n"
-    "/ban (or .ban) — reply / @username / id (+ optional reason)\n"
-    "/kick (or .kick) — same usage, removes them but they can rejoin (no undo button)\n"
-    "/mute (or .mute) — same usage, restricts sending messages\n"
-    "/warn (or .warn) — after {n} warns the user is auto-muted\n"
-    "/unban • /unmute • /unwarn — reverse any of the above\n\n"
-    "<b>✦ delete + action</b>\n"
-    "/dban (or .dban) — deletes the replied message, then bans its sender\n"
-    "/dmute (or .dmute) — deletes the replied message, then mutes its sender\n"
-    "/dwarn (or .dwarn) — deletes the replied message, then warns its sender\n\n"
-    "<b>✦ silent action</b>\n"
-    "/sban (or .sban) — deletes the replied message, silently bans its sender (no event post)\n"
-    "/smute (or .smute) — deletes the replied message, silently mutes its sender (no event post)\n\n"
-    "every action re-checks that you have the <b>Ban Users</b> right and that i "
-    "actually have it too — i tag you if I don't."
+    "<b>🛡 𝙈𝙤𝙙𝙚𝙧𝙖𝙩𝙞𝙤𝙣</b>\n\n"
+    "• <code>/ban</code> (or <code>.ban</code>) — reply / @username / ID (+ optional reason).\n"
+    "• <code>/kick</code> (or <code>.kick</code>) — same usage, removes them but they can rejoin (no undo button).\n"
+    "• <code>/mute</code> (or <code>.mute</code>) — same usage, restricts sending messages.\n"
+    "• <code>/warn</code> (or <code>.warn</code>) — after {n} warns the user is auto-muted.\n"
+    "• <code>/unban</code>, <code>/unmute</code>, <code>/unwarn</code> — reverse any of the above.\n\n"
+    "<b>✦ Delete + Action</b>\n"
+    "• <code>/dban</code> (or <code>.dban</code>) — deletes the replied message, then bans its sender.\n"
+    "• <code>/dmute</code> (or <code>.dmute</code>) — deletes the replied message, then mutes its sender.\n"
+    "• <code>/dwarn</code> (or <code>.dwarn</code>) — deletes the replied message, then warns its sender.\n\n"
+    "<b>✦ Silent Action</b>\n"
+    "• <code>/sban</code> (or <code>.sban</code>) — deletes the replied message, silently bans its sender (no event post).\n"
+    "• <code>/smute</code> (or <code>.smute</code>) — deletes the replied message, silently mutes its sender (no event post).\n\n"
+    "<i>Every action re-checks that you have the ban users right.</i>"
 ).replace("{n}", str(WARN_LIMIT))
 
 COMMANDS = [
@@ -614,4 +613,3 @@ def register(app):
     app.add_handler(CallbackQueryHandler(mod_cb, pattern=r"^mod:"))
     # new anonymous verify buttons
     app.add_handler(CallbackQueryHandler(anon_mod_callback, pattern=r"^anonmod:"))
-    
