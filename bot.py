@@ -20,6 +20,7 @@ import admin
 import afk
 import ban
 import cleancommand
+import cleanservice      # ✅ NEW
 import database as dbase
 import filters as bot_filters
 import fun
@@ -28,7 +29,7 @@ import lock
 import logs
 import pin
 import ping
-import purge          # ✅ NEW: Purge module
+import purge
 import sticker
 import welcome
 import mantion
@@ -58,7 +59,6 @@ START_TXT = (
     "tap <b>command</b> below to see everything i can do."
 )
 
-# ✅ UPDATED: Guardian Help Text (Now includes .editdelay & .mediadelay)
 GUARDIAN_TXT = (
     "<b>🛡 𝙂𝙪𝙖𝙧𝙙𝙞𝙖𝙣 — Media & Edit Defender</b>\n\n"
     "<b>Features Overview:</b>\n"
@@ -101,8 +101,7 @@ PURGE_TXT = (
     "<i>Note: You need 'Delete Messages' admin right, and the bot must be an admin with delete rights.</i>"
 )
 
-UTILITY_TXT = cleancommand.HELP_TXT + "\n\n" + pin.HELP_TXT
-
+# ✅ PAGES: Utility hata diya, naye buttons add kiye
 PAGES = {
     "greet": ("🎉 𝙂𝙧𝙚𝙚𝙩𝙞𝙣𝙜𝙨", welcome.HELP_TXT),
     "admin": ("👮 𝘼𝙙𝙢𝙞𝙣", admin.HELP_TXT),
@@ -111,9 +110,11 @@ PAGES = {
     "extra": ("🎁 𝙀𝙭𝙩𝙧𝙖", sticker.HELP_TXT + "\n\n" + fun.HELP_TXT),
     "filters": ("🔍 𝙁𝙞𝙡𝙩𝙚𝙧𝙨", bot_filters.HELP_TXT),
     "guardian": ("🛡 𝙂𝙪𝙖𝙧𝙙𝙞𝙖𝙣", GUARDIAN_TXT),
-    "utility": ("🧰 𝙐𝙩𝙞𝙡𝙞𝙩𝙮", UTILITY_TXT),
+    "pin": ("📌 𝙋𝙞𝙣", pin.HELP_TXT),
+    "cleancommand": ("🧹 𝘾𝙡𝙚𝙖𝙣 𝘾𝙤𝙢𝙢𝙖𝙣𝙙", cleancommand.HELP_TXT),
+    "cleanservice": ("🧼 𝘾𝙡𝙚𝙖𝙣 𝙎𝙚𝙧𝙫𝙞𝙘𝙚", cleanservice.HELP_TXT),
     "locks": ("🔒 𝙇𝙤𝙘𝙠𝙨", LOCKS_TXT),
-    "purge": ("🧹 𝙋𝙪𝙧𝙜𝙚", PURGE_TXT),   # ✅ NEW
+    "purge": ("🧹 𝙋𝙪𝙧𝙜𝙚", PURGE_TXT),
 }
 
 ALIASES = {
@@ -125,11 +126,12 @@ ALIASES = {
     "kang": "extra", "waifu": "extra", "couple": "extra", "fun": "extra",
     "filter": "filters", "filters": "filters", "f": "filters",
     "guardian": "guardian", "defender": "guardian", "setdelay": "guardian", "permit": "guardian",
-    "editdelay": "guardian", "mediadelay": "guardian", # ✅ NEW aliases
-    "lock": "locks", "locks": "locks", "locktypes": "locks",
-    "utility": "utility", "clean": "utility", "cleancommand": "utility",
-    "pin": "utility", "unpin": "utility",
-    "purge": "purge", "spurge": "purge", "del": "purge",   # ✅ NEW
+    "editdelay": "guardian", "mediadelay": "guardian",
+    "pin": "pin", "unpin": "pin",
+    "clean": "cleancommand", "cleancommand": "cleancommand",
+    "cleanservice": "cleanservice", "keepservice": "cleanservice",
+    "locks": "locks", "locktypes": "locks",
+    "purge": "purge", "spurge": "purge", "del": "purge",
 }
 
 
@@ -157,20 +159,18 @@ def home_page(user, ctx):
 
 def main_page():
     text = sc("<b>✦ command</b>\n\nchoose a category to see all details.")
-    keys = list(PAGES)
+    # ✅ Custom layout with required colors
+    layout = [
+        [("guardian", "success"), ("pin", "primary")],
+        [("cleancommand", "success"), ("cleanservice", "primary")],
+        [("locks", "success"), ("purge", "primary")],
+    ]
     rows = []
-    for i in range(0, len(keys), 2):
-        row = []
-        for j, k in enumerate(keys[i:i + 2]):
-            # ✅ UPDATED: Locks is Green (success), Purge is Blue (primary)
-            if k == "locks":
-                btn_style = "success"
-            elif k == "purge":
-                btn_style = "primary"
-            else:
-                btn_style = "success" if (i + j) % 2 == 0 else "primary"
-            row.append(B(PAGES[k][0], f"help:{k}", style=btn_style))
-        rows.append(row)
+    for row in layout:
+        btn_row = []
+        for key, style in row:
+            btn_row.append(B(PAGES[key][0], f"help:{key}", style=style))
+        rows.append(btn_row)
     rows.append([B("⬅ 𝘽𝙖𝙘𝙠", "help:home"), B("✖ 𝘾𝙡𝙤𝙨𝙚", "help:close", style="danger")])
     return text, InlineKeyboardMarkup(rows)
 
@@ -296,7 +296,7 @@ async def post_init(app: Application):
     app.bot_data["me"] = await app.bot.get_me()
     cmds = [("start", "Start the bot"), ("help", "Show commands")]
     for mod in (welcome, admin, afk, ban, sticker, fun, bot_filters, ping,
-                guardian, cleancommand, pin, lock, purge):   # ✅ purge added
+                guardian, cleancommand, cleanservice, pin, lock, purge):
         cmds += mod.COMMANDS
     await app.bot.set_my_commands(cmds)
     log.info("Started as @%s", app.bot_data["me"].username)
@@ -338,11 +338,12 @@ def main():
     ping.register(app)
     guardian.register(app)
     cleancommand.register(app)
+    cleanservice.register(app)   # ✅ NEW
     pin.register(app)
     mantion.register(app)
     lock.register(app)
     logs.register(app)
-    purge.register(app)   # ✅ NEW: Purge module registered
+    purge.register(app)
 
     app.add_error_handler(on_error)
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
