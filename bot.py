@@ -25,9 +25,10 @@ import filters as bot_filters
 import fun
 import guardian
 import lock
-import logs              # ✅ NEW
+import logs
 import pin
 import ping
+import purge          # ✅ NEW: Purge module
 import sticker
 import welcome
 import mantion
@@ -88,6 +89,17 @@ LOCKS_TXT = (
     "• <code>/locktypes</code>: Show the list of all lockable items."
 )
 
+# ✅ NEW: Purge Help Text (same style as others)
+PURGE_TXT = (
+    "<b>🧹 𝙋𝙪𝙧𝙜𝙚</b>\n\n"
+    "Bulk delete messages with ease.\n\n"
+    "<b>Commands:</b>\n"
+    "• <code>/purge</code> (reply): Delete messages from the replied message to this command.\n"
+    "• <code>/spurge</code> (reply): Same as purge, but completely silent (no confirmation note).\n"
+    "• <code>/del</code> (reply): Delete only the replied message.\n\n"
+    "<i>Note: You need 'Delete Messages' admin right, and the bot must be an admin with delete rights.</i>"
+)
+
 UTILITY_TXT = cleancommand.HELP_TXT + "\n\n" + pin.HELP_TXT
 
 PAGES = {
@@ -100,6 +112,7 @@ PAGES = {
     "guardian": ("🛡 𝙂𝙪𝙖𝙧𝙙𝙞𝙖𝙣", GUARDIAN_TXT),
     "utility": ("🧰 𝙐𝙩𝙞𝙡𝙞𝙩𝙮", UTILITY_TXT),
     "locks": ("🔒 𝙇𝙤𝙘𝙠𝙨", LOCKS_TXT),
+    "purge": ("🧹 𝙋𝙪𝙧𝙜𝙚", PURGE_TXT),   # ✅ NEW
 }
 
 ALIASES = {
@@ -114,6 +127,7 @@ ALIASES = {
     "lock": "locks", "locks": "locks", "locktypes": "locks",
     "utility": "utility", "clean": "utility", "cleancommand": "utility",
     "pin": "utility", "unpin": "utility",
+    "purge": "purge", "spurge": "purge", "del": "purge",   # ✅ NEW
 }
 
 
@@ -146,8 +160,9 @@ def main_page():
     for i in range(0, len(keys), 2):
         row = []
         for j, k in enumerate(keys[i:i + 2]):
-            if k == "locks":
-                btn_style = "danger"
+            # ✅ UPDATED: Locks and Purge both green
+            if k in ("locks", "purge"):
+                btn_style = "success"
             else:
                 btn_style = "success" if (i + j) % 2 == 0 else "primary"
             row.append(B(PAGES[k][0], f"help:{k}", style=btn_style))
@@ -192,7 +207,7 @@ async def start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         pass
 
     await dbase.save_user(user.id, user.first_name, user.username)
-    await logs.log_user_start(ctx, user)  # ✅ NEW: log user start to owner's group
+    await logs.log_user_start(ctx, user)
 
     arg = (ctx.args[0].lower() if ctx.args else "")
     key = ALIASES.get(arg)
@@ -277,7 +292,7 @@ async def post_init(app: Application):
     app.bot_data["me"] = await app.bot.get_me()
     cmds = [("start", "Start the bot"), ("help", "Show commands")]
     for mod in (welcome, admin, afk, ban, sticker, fun, bot_filters, ping,
-                guardian, cleancommand, pin, lock):
+                guardian, cleancommand, pin, lock, purge):   # ✅ purge added
         cmds += mod.COMMANDS
     await app.bot.set_my_commands(cmds)
     log.info("Started as @%s", app.bot_data["me"].username)
@@ -322,7 +337,8 @@ def main():
     pin.register(app)
     mantion.register(app)
     lock.register(app)
-    logs.register(app)  # ✅ NEW
+    logs.register(app)
+    purge.register(app)   # ✅ NEW: Purge module registered
 
     app.add_error_handler(on_error)
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
