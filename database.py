@@ -23,6 +23,7 @@ async def init(uri: str, name: str):
     await _db.filters.create_index([("chat_id", 1), ("keyword", 1)], unique=True)
     await _db.guardian.create_index("chat_id", unique=True)
     await _db.clean.create_index("chat_id", unique=True)
+    await _db.cleanservice.create_index("chat_id", unique=True)   # ✅ NEW
     await _db.locks.create_index("chat_id", unique=True)
     log.info("MongoDB connected (db: %s)", name)
 
@@ -132,7 +133,6 @@ async def guardian_get(chat_id: int) -> dict | None:
 
 async def guardian_set(chat_id: int, delay_seconds: int | None = None, enabled: bool | None = None,
                        edit_delay_seconds: int | None = None, media_delay_seconds: int | None = None):
-    """✅ UPDATED: Now supports separate edit and media delays."""
     upd = {}
     if delay_seconds is not None:
         upd["delay_seconds"] = int(delay_seconds)
@@ -159,6 +159,14 @@ async def clean_get(chat_id: int) -> dict | None:
 
 async def clean_set(chat_id: int, enabled: bool, mode: str = "all"):
     await _db.clean.update_one({"chat_id": chat_id}, {"$set": {"enabled": bool(enabled), "mode": mode}}, upsert=True)
+
+
+# ✅ NEW: Clean Service functions
+async def cleanservice_get(chat_id: int) -> dict | None:
+    return await _db.cleanservice.find_one({"chat_id": chat_id})
+
+async def cleanservice_set(chat_id: int, enabled: bool):
+    await _db.cleanservice.update_one({"chat_id": chat_id}, {"$set": {"enabled": bool(enabled)}}, upsert=True)
 
 
 # ───────── locks + approved users ─────────
