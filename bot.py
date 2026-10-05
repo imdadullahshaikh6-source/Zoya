@@ -58,6 +58,7 @@ START_TXT = (
     "tap <b>command</b> below to see everything i can do."
 )
 
+# ✅ UPDATED: Guardian Help Text (Now includes .editdelay & .mediadelay)
 GUARDIAN_TXT = (
     "<b>🛡 𝙂𝙪𝙖𝙧𝙙𝙞𝙖𝙣 — Media & Edit Defender</b>\n\n"
     "<b>Features Overview:</b>\n"
@@ -66,9 +67,10 @@ GUARDIAN_TXT = (
     "• Configurable Deletion Timer per chat.\n"
     "• Permit System for trusted users.\n\n"
     "<b>Timer Commands:</b>\n"
-    "• <code>/setdelay</code> (or <code>.setdelay</code>) 5m — set deletion delay to 5 minutes.\n"
-    "• <code>/setdelay</code> (or <code>.setdelay</code>) 6h — set deletion delay to 6 hours.\n"
-    "<i>(setdelay range → 1 minute to 6 hours)</i>\n\n"
+    "• <code>/setdelay</code> (or <code>.setdelay</code>) 5m — delete <b>both</b> edits & media after 5 min.\n"
+    "• <code>/editdelay</code> (or <code>.editdelay</code>) 5m — delete <b>only edits</b> after 5 min (media stays).\n"
+    "• <code>/mediadelay</code> (or <code>.mediadelay</code>) 5m — delete <b>only media</b> after 5 min (edits stay).\n"
+    "<i>(range → 1 minute to 6 hours; use <code>off</code> to disable)</i>\n\n"
     "<b>Permit Commands (owner only):</b>\n"
     "• <code>/permit</code> (or <code>.permit</code>) (reply) — whitelist a user (their edits/media won't be deleted).\n"
     "• <code>/unpermit</code> (or <code>.unpermit</code>) (reply) — remove a user from the permit list.\n"
@@ -123,6 +125,7 @@ ALIASES = {
     "kang": "extra", "waifu": "extra", "couple": "extra", "fun": "extra",
     "filter": "filters", "filters": "filters", "f": "filters",
     "guardian": "guardian", "defender": "guardian", "setdelay": "guardian", "permit": "guardian",
+    "editdelay": "guardian", "mediadelay": "guardian", # ✅ NEW aliases
     "lock": "locks", "locks": "locks", "locktypes": "locks",
     "utility": "utility", "clean": "utility", "cleancommand": "utility",
     "pin": "utility", "unpin": "utility",
@@ -347,4 +350,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
