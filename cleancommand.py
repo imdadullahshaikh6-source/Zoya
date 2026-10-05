@@ -27,12 +27,12 @@ HELP_TXT = (
     "Automatically delete commands from the chat after they're used, "
     "so the group stays clean.\n\n"
     "<b>Enable / Disable:</b>\n"
-    "• <code>.cleancommand all</code> — delete every command after use.\n"
-    "• <code>.cleancommand admin</code> — delete only admin/mod commands "
+    "• <code>/cleancommand all</code> (or <code>.cleancommand all</code>) — delete every command after use.\n"
+    "• <code>/cleancommand admin</code> (or <code>.cleancommand admin</code>) — delete only admin/mod commands "
     "(ban, mute, kick, promote, ...).\n"
-    "• <code>.cleancommand users</code> — delete only user commands "
+    "• <code>/cleancommand users</code> (or <code>.cleancommand users</code>) — delete only user commands "
     "(q, kang, waifu, ...).\n"
-    "• <code>.keepcommand</code> — stop auto-deleting commands.\n\n"
+    "• <code>/keepcommand</code> (or <code>.keepcommand</code>) — stop auto-deleting commands.\n\n"
     "<i>Only full admins can change this. Settings are per-chat and survive restarts.</i>"
 )
 COMMANDS = [
@@ -184,3 +184,4 @@ def register(app):
         ),
         group=99,
     )
+  
