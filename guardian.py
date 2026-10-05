@@ -25,9 +25,10 @@ HELP_TXT = (
     "• Configurable Deletion Timer per chat.\n"
     "• Permit System for trusted users.\n\n"
     "<b>Timer Commands:</b>\n"
-    "• <code>.setdelay 5m</code> — set deletion delay to 5 minutes.\n"
-    "• <code>.setdelay 6h</code> — set deletion delay to 6 hours.\n"
-    "<i>(setdelay range → 1 minute to 6 hours)</i>\n\n"
+    "• <code>.setdelay 5m</code> — delete <b>both</b> edits & media after 5 min.\n"
+    "• <code>.editdelay 5m</code> — delete <b>only edits</b> after 5 min (media stays).\n"
+    "• <code>.mediadelay 5m</code> — delete <b>only media</b> after 5 min (edits stay).\n"
+    "<i>(range → 1 minute to 6 hours; use <code>off</code> to disable)</i>\n\n"
     "<b>Permit Commands (owner only):</b>\n"
     "• <code>.permit</code> (reply, or ID, or @username) — whitelist a user.\n"
     "• <code>.unpermit</code> (reply, or ID, or @username) — remove a user.\n"
@@ -36,7 +37,9 @@ HELP_TXT = (
 )
 
 COMMANDS = [
-    ("setdelay", "Set Guardian deletion delay"),
+    ("setdelay", "Set deletion delay for both edits & media"),
+    ("editdelay", "Set deletion delay for edits only"),
+    ("mediadelay", "Set deletion delay for media only"),
     ("guard", "Enable or disable Guardian"),
     ("permit", "Whitelist a user from Guardian"),
     ("unpermit", "Remove a user from the permit list"),
@@ -47,6 +50,7 @@ MIN_DELAY = 60
 MAX_DELAY = 6 * 60 * 60
 _DELAY_RE = re.compile(r"^(\d+)\s*([smh])$", re.IGNORECASE)
 _NOTE_LIFETIME = 5
+_OFF_WORDS = {"off", "0", "stop", "disable", "no"}
 
 
 def _parse_delay(arg: str):
@@ -56,6 +60,17 @@ def _parse_delay(arg: str):
     n, unit = int(m.group(1)), m.group(2).lower()
     mult = {"s": 1, "m": 60, "h": 3600}[unit]
     return n * mult
+
+
+def _fmt_delay(seconds: int) -> str:
+    """Format seconds into a human-friendly string."""
+    if not seconds or seconds <= 0:
+        return "🔴 OFF"
+    if seconds < 3600:
+        return f"🟢 {seconds // 60} min"
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    return f"🟢 {h}h {m}m" if m else f"🟢 {h}h"
 
 
 def _safe_name(user) -> str:
@@ -111,29 +126,90 @@ async def _bot_can_guard(ctx, chat_id: int) -> bool:
             and bool(getattr(m, "can_delete_messages", False)))
 
 
-async def setdelay_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+# ─────────────────── DELAY COMMANDS ───────────────────
+
+async def _apply_delay(ctx, update: Update, mode: str):
+    """
+    mode = 'both' | 'edit' | 'media'
+    - 'both'  → sets edit_delay + media_delay (existing /setdelay)
+    - 'edit'  → sets edit_delay, sets media_delay to 0 (only edits)
+    - 'media' → sets media_delay, sets edit_delay to 0 (only media)
+    """
     msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
     if chat.type == ChatType.PRIVATE:
         return
+
     if not await _is_full_admin(ctx, chat.id, user.id):
         await say(ctx, chat.id, T("<blockquote>⚠️ only full-power admins can use this.</blockquote>"), reply_to=msg.message_id)
         return
     if not await _bot_can_guard(ctx, chat.id):
         await say(ctx, chat.id, T("<blockquote>⚠️ make me an admin with <b>Delete Messages</b> permission first.</blockquote>"), reply_to=msg.message_id)
         return
+
+    usage = {
+        "both": "<code>.setdelay 5m</code>",
+        "edit": "<code>.editdelay 5m</code>",
+        "media": "<code>.mediadelay 5m</code>",
+    }[mode]
+
     if not ctx.args:
-        await say(ctx, chat.id, T("<blockquote>usage: <code>.setdelay 5m</code> — range 1m to 6h</blockquote>"), reply_to=msg.message_id)
+        await say(ctx, chat.id, T(f"<blockquote>usage: {usage} — range 1m to 6h, or <code>off</code></blockquote>"), reply_to=msg.message_id)
         return
-    delay = _parse_delay(ctx.args[0])
-    if delay is None or delay < MIN_DELAY or delay > MAX_DELAY:
-        await say(ctx, chat.id, T("<blockquote>❌ invalid delay — use <code>1m</code> to <code>6h</code> (e.g. <code>.setdelay 10m</code>)</blockquote>"), reply_to=msg.message_id)
-        return
-    await dbase.guardian_set(chat.id, delay_seconds=delay, enabled=True)
-    mins = delay // 60
-    await say(ctx, chat.id, T(
-        f"<blockquote>✅ Guardian active — deletion delay set to <b>{mins} min</b>.\n"
-        f"<i>everyone's edits & media will be deleted — including admins.</i></blockquote>"
-    ), reply_to=msg.message_id)
+
+    arg = ctx.args[0].lower().strip()
+
+    # Handle OFF
+    if arg in _OFF_WORDS:
+        delay = 0
+    else:
+        delay = _parse_delay(arg)
+        if delay is None or delay < MIN_DELAY or delay > MAX_DELAY:
+            await say(ctx, chat.id, T("<blockquote>❌ invalid delay — use <code>1m</code> to <code>6h</code> or <code>off</code></blockquote>"), reply_to=msg.message_id)
+            return
+
+    if mode == "both":
+        if delay == 0:
+            await dbase.guardian_set(chat.id, edit_delay_seconds=0, media_delay_seconds=0, delay_seconds=0, enabled=False)
+            await say(ctx, chat.id, T("<blockquote>✅ Guardian turned <b>OFF</b> — neither edits nor media will be deleted.</blockquote>"), reply_to=msg.message_id)
+        else:
+            await dbase.guardian_set(chat.id, edit_delay_seconds=delay, media_delay_seconds=delay, delay_seconds=delay, enabled=True)
+            await say(ctx, chat.id, T(
+                f"<blockquote>✅ Guardian active — <b>both edits & media</b> will be deleted after <b>{_fmt_delay(delay).replace('🟢 ', '')}</b>.</blockquote>"
+            ), reply_to=msg.message_id)
+
+    elif mode == "edit":
+        if delay == 0:
+            # Turn off edit only, don't touch media
+            await dbase.guardian_set(chat.id, edit_delay_seconds=0)
+            await say(ctx, chat.id, T("<blockquote>✅ Edit deletion turned <b>OFF</b>.</blockquote>"), reply_to=msg.message_id)
+        else:
+            await dbase.guardian_set(chat.id, edit_delay_seconds=delay, media_delay_seconds=0, enabled=True)
+            await say(ctx, chat.id, T(
+                f"<blockquote>✅ Guardian active — <b>only edits</b> will be deleted after <b>{_fmt_delay(delay).replace('🟢 ', '')}</b>. Media will stay.</blockquote>"
+            ), reply_to=msg.message_id)
+
+    elif mode == "media":
+        if delay == 0:
+            # Turn off media only, don't touch edits
+            await dbase.guardian_set(chat.id, media_delay_seconds=0)
+            await say(ctx, chat.id, T("<blockquote>✅ Media deletion turned <b>OFF</b>.</blockquote>"), reply_to=msg.message_id)
+        else:
+            await dbase.guardian_set(chat.id, media_delay_seconds=delay, edit_delay_seconds=0, enabled=True)
+            await say(ctx, chat.id, T(
+                f"<blockquote>✅ Guardian active — <b>only media</b> will be deleted after <b>{_fmt_delay(delay).replace('🟢 ', '')}</b>. Edits will stay.</blockquote>"
+            ), reply_to=msg.message_id)
+
+
+async def setdelay_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await _apply_delay(ctx, update, "both")
+
+
+async def editdelay_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await _apply_delay(ctx, update, "edit")
+
+
+async def mediadelay_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await _apply_delay(ctx, update, "media")
 
 
 async def guard_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -147,9 +223,12 @@ async def guard_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     cfg = await dbase.guardian_get(chat.id) or {}
     if arg not in ("on", "off"):
         state = "🟢 ON" if cfg.get("enabled") else "🔴 OFF"
-        delay = cfg.get("delay_seconds", 0)
+        edit_d = _fmt_delay(cfg.get("edit_delay_seconds") or cfg.get("delay_seconds") or 0)
+        media_d = _fmt_delay(cfg.get("media_delay_seconds") or cfg.get("delay_seconds") or 0)
         await say(ctx, chat.id, T(
-            f"<blockquote>Guardian is <b>{state}</b> — delay <b>{delay // 60} min</b>.\n"
+            f"<blockquote>Guardian is <b>{state}</b>\n"
+            f"• Edits: {edit_d}\n"
+            f"• Media: {media_d}\n\n"
             f"usage: <code>.guard on</code> / <code>.guard off</code></blockquote>"
         ), reply_to=msg.message_id)
         return
@@ -157,6 +236,8 @@ async def guard_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await dbase.guardian_set(chat.id, enabled=enabled)
     await say(ctx, chat.id, T(f"<blockquote>✅ Guardian turned <b>{'ON' if enabled else 'OFF'}</b>.</blockquote>"), reply_to=msg.message_id)
 
+
+# ─────────────────── PERMIT COMMANDS ───────────────────
 
 async def permit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
@@ -337,7 +418,11 @@ async def _delete_after(ctx, chat_id: int, message_id: int, delay: int, note_tex
         log.warning("[guardian] note failed: %s", e)
 
 
-async def _should_guard(ctx, chat, user) -> int:
+async def _get_guard_delay(ctx, chat, user, is_edit: bool, is_media: bool) -> int:
+    """Returns the delay in seconds (0 = don't delete).
+    - is_edit → uses edit_delay_seconds
+    - is_media → uses media_delay_seconds
+    """
     if not chat or chat.type == ChatType.PRIVATE:
         return 0
     me = ctx.application.bot_data.get("me")
@@ -345,13 +430,25 @@ async def _should_guard(ctx, chat, user) -> int:
         return 0
     if not user or user.is_bot:
         return 0
+
     cfg = await dbase.guardian_get(chat.id)
     if not cfg or not cfg.get("enabled"):
         return 0
-    delay = int(cfg.get("delay_seconds") or 0)
-    if delay < MIN_DELAY:
-        return 0
 
+    legacy = int(cfg.get("delay_seconds") or 0)
+    edit_delay = cfg.get("edit_delay_seconds", None)
+    media_delay = cfg.get("media_delay_seconds", None)
+
+    # Migration: old data had only delay_seconds
+    if edit_delay is None:
+        edit_delay = legacy if legacy else 0
+    if media_delay is None:
+        media_delay = legacy if legacy else 0
+
+    edit_delay = int(edit_delay)
+    media_delay = int(media_delay)
+
+    # Check permitted users
     permitted = cfg.get("permitted_users", [])
     for u in permitted:
         if u.get("id") and u.get("id") == user.id:
@@ -364,8 +461,12 @@ async def _should_guard(ctx, chat, user) -> int:
     if not await _bot_can_guard(ctx, chat.id):
         return 0
 
-    # ✅ FIX: Locks compatibility hataya — dono independent kaam karein
-    return delay
+    # Decide which delay to use
+    if is_edit and edit_delay >= MIN_DELAY:
+        return edit_delay
+    if is_media and media_delay >= MIN_DELAY:
+        return media_delay
+    return 0
 
 
 async def _guardian_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -384,11 +485,11 @@ async def _guardian_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_edit and not is_media:
         return
 
-    delay = await _should_guard(ctx, chat, user)
+    delay = await _get_guard_delay(ctx, chat, user, is_edit, is_media)
     if not delay:
         return
 
-    # Sirf edited message ka note, media ka nahi
+    # Note only for edits (media has no note as before)
     if is_edit:
         note = f"<blockquote>🗑️ {_safe_name(user)}'s <b>edited message</b> was deleted.</blockquote>"
     else:
@@ -399,9 +500,12 @@ async def _guardian_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 def register(app):
     dual_command(app, "setdelay", setdelay_cmd)
+    dual_command(app, "editdelay", editdelay_cmd)
+    dual_command(app, "mediadelay", mediadelay_cmd)
     dual_command(app, "guard", guard_cmd)
     dual_command(app, "permit", permit_cmd)
     dual_command(app, "unpermit", unpermit_cmd)
     dual_command(app, "permitlist", permitlist_cmd)
     app.add_handler(CallbackQueryHandler(anon_verify_callback, pattern=r"^anon(perm|unperm|list)\|"))
     app.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.ALL, _guardian_watcher), group=2)
+    
