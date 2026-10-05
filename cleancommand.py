@@ -54,6 +54,9 @@ ADMIN_COMMANDS = {
 
 SELF_COMMANDS = {"cleancommand", "keepcommand"}
 
+# ✅ NEW: Purge commands jo apna deletion khud handle karte hain
+PURGE_COMMANDS = {"purge", "spurge", "del", "dly"}
+
 # Delay (seconds) between command processing and message deletion.
 # Gives the command's reply a moment to land first, so the deletion
 # looks clean and natural.
@@ -120,11 +123,20 @@ async def _clean_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not text or text[0] not in ("/", "."):
         return
 
-    first = text[1:].split()[0].split("@")[0].lower()
+    parts = text[1:].split()
+    if not parts:
+        return
+    first = parts[0].split("@")[0].lower()
+    
     if not first:
         return
     if first in SELF_COMMANDS:
         log.info("[clean] skip self-command: %s", first)
+        return
+
+    # ✅ NEW: Purge commands ko skip karo. Purge module apna message khud delete karega jab wo poora complete ho jayega.
+    if first in PURGE_COMMANDS:
+        log.info("[clean] skip purge command '%s' — purge module will handle deletion upon completion.", first)
         return
 
     cfg = await dbase.clean_get(chat.id)
