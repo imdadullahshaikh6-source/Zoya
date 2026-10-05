@@ -66,14 +66,14 @@ GUARDIAN_TXT = (
     "• Configurable Deletion Timer per chat.\n"
     "• Permit System for trusted users.\n\n"
     "<b>Timer Commands:</b>\n"
-    "• <code>.setdelay 5m</code> — set deletion delay to 5 minutes.\n"
-    "• <code>.setdelay 6h</code> — set deletion delay to 6 hours.\n"
+    "• <code>/setdelay</code> (or <code>.setdelay</code>) 5m — set deletion delay to 5 minutes.\n"
+    "• <code>/setdelay</code> (or <code>.setdelay</code>) 6h — set deletion delay to 6 hours.\n"
     "<i>(setdelay range → 1 minute to 6 hours)</i>\n\n"
     "<b>Permit Commands (owner only):</b>\n"
-    "• <code>.permit</code> (reply) — whitelist a user (their edits/media won't be deleted).\n"
-    "• <code>.unpermit</code> (reply) — remove a user from the permit list.\n"
-    "• <code>.permitlist</code> — view permitted users.\n"
-    "• <code>.guard on</code> / <code>.guard off</code> — enable/disable Guardian."
+    "• <code>/permit</code> (or <code>.permit</code>) (reply) — whitelist a user (their edits/media won't be deleted).\n"
+    "• <code>/unpermit</code> (or <code>.unpermit</code>) (reply) — remove a user from the permit list.\n"
+    "• <code>/permitlist</code> (or <code>.permitlist</code>) — view permitted users.\n"
+    "• <code>/guard on</code> (or <code>.guard on</code>) / <code>/guard off</code> (or <code>.guard off</code>) — enable/disable Guardian."
 )
 
 LOCKS_TXT = (
@@ -83,20 +83,19 @@ LOCKS_TXT = (
     "The locks module allows you to lock away some common items in the Telegram world; "
     "the bot will automatically delete them!\n\n"
     "<b>Admin commands:</b>\n"
-    "• <code>/lock &lt;item(s)&gt;</code>: Lock one or more items. Now, only admins can use this type!\n"
-    "• <code>/unlock &lt;item(s)&gt;</code>: Unlock one or more items. Everyone can use this type again!\n"
-    "• <code>/locks</code>: List currently locked items.\n"
-    "• <code>/locktypes</code>: Show the list of all lockable items."
+    "• <code>/lock</code> (or <code>.lock</code>) &lt;item(s)&gt; — lock one or more items. Now, only admins can use this type!\n"
+    "• <code>/unlock</code> (or <code>.unlock</code>) &lt;item(s)&gt; — unlock one or more items. Everyone can use this type again!\n"
+    "• <code>/locks</code> (or <code>.locks</code>) — list currently locked items.\n"
+    "• <code>/locktypes</code> (or <code>.locktypes</code>) — show the list of all lockable items."
 )
 
-# ✅ NEW: Purge Help Text (same style as others)
 PURGE_TXT = (
     "<b>🧹 𝙋𝙪𝙧𝙜𝙚</b>\n\n"
     "Bulk delete messages with ease.\n\n"
     "<b>Commands:</b>\n"
-    "• <code>/purge</code> (reply): Delete messages from the replied message to this command.\n"
-    "• <code>/spurge</code> (reply): Same as purge, but completely silent (no confirmation note).\n"
-    "• <code>/del</code> (reply): Delete only the replied message.\n\n"
+    "• <code>/purge</code> (or <code>.purge</code>) (reply) — delete messages from the replied message to this command.\n"
+    "• <code>/spurge</code> (or <code>.spurge</code>) (reply) — same as purge, but completely silent (no confirmation note).\n"
+    "• <code>/del</code> (or <code>.del</code>) (reply) — delete only the replied message.\n\n"
     "<i>Note: You need 'Delete Messages' admin right, and the bot must be an admin with delete rights.</i>"
 )
 
@@ -348,3 +347,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
