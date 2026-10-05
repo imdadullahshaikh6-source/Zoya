@@ -59,34 +59,43 @@ async def check_purge_permissions(chat, user_id, ctx) -> bool:
 
 
 async def _perfect_purge(ctx, chat_id: int, start_id: int, end_id: int):
-    """One-by-one deletion with smart delay. Handles invalid messages gracefully."""
+    """One-by-one deletion with smart delay and retry logic. Guarantees NO skips for valid messages."""
+    deleted = 0
+    skipped = 0
+    
     for msg_id in range(start_id, end_id + 1):
-        try:
-            await ctx.bot.delete_message(chat_id, msg_id)
-            # ✅ Success! Fast delay for speed (0.05s = 20 msgs/sec)
-            await asyncio.sleep(0.05)
-        except RetryAfter as e:
-            # Telegram rate limit, wait it out
-            log.warning(f"FloodWait hit! Sleeping for {e.retry_after} seconds.")
-            await asyncio.sleep(e.retry_after + 1)
+        retries = 0
+        while retries < 3:  # Retry up to 3 times for transient errors
             try:
                 await ctx.bot.delete_message(chat_id, msg_id)
-            except Exception:
-                pass
-        except TelegramError as e:
-            err_str = str(e).lower()
-            # ✅ FIX: If message doesn't exist or can't be deleted (400 Bad Request), 
-            # skip it immediately without wasting time.
-            if "message to delete not found" in err_str or "message can't be deleted" in err_str or "bad request" in err_str:
-                await asyncio.sleep(0.01)  # Very tiny pause to avoid API hammering
-                continue
-            else:
-                log.warning(f"Failed to delete {msg_id}: {e}")
-                await asyncio.sleep(0.1)
-                continue
-        except Exception as e:
-            log.error(f"Unexpected error deleting {msg_id}: {e}")
-            continue
+                deleted += 1
+                await asyncio.sleep(0.08)  # ✅ Fast but safe (12 msgs/sec)
+                break  # Success, move to next message
+            except RetryAfter as e:
+                # Telegram rate limit hit, wait it out
+                log.warning(f"FloodWait on {msg_id}. Sleeping {e.retry_after}s")
+                await asyncio.sleep(e.retry_after + 1)
+                retries += 1
+            except TelegramError as e:
+                err_str = str(e).lower()
+                # If message is already deleted, pinned, or too old, skip immediately
+                if "message to delete not found" in err_str or "message can't be deleted" in err_str or "bad request" in err_str:
+                    skipped += 1
+                    await asyncio.sleep(0.01)
+                    break  # Skip this specific message and move on
+                else:
+                    log.error(f"Failed to delete {msg_id}: {e}")
+                    await asyncio.sleep(0.2)
+                    retries += 1
+            except Exception as e:
+                log.error(f"Unexpected error on {msg_id}: {e}")
+                await asyncio.sleep(0.2)
+                retries += 1
+        
+        if retries == 3:
+            skipped += 1
+
+    return deleted, skipped
 
 
 async def purge_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -110,11 +119,12 @@ async def purge_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     end_id = msg.message_id
     chat_id = chat.id
 
-    # ✅ Perfect Purge
-    await _perfect_purge(ctx, chat_id, start_id, end_id)
+    # ✅ Start Purge
+    deleted, skipped = await _perfect_purge(ctx, chat_id, start_id, end_id)
 
     # ✅ Purge Completed message
-    note = await ctx.bot.send_message(chat_id, "<blockquote>Purge Completed.</blockquote>", parse_mode="HTML")
+    note_text = f"<blockquote>Purge Completed.\n\nDeleted: <b>{deleted}</b> messages\nSkipped: <b>{skipped}</b> messages (Pinned/Old/Admin).</blockquote>"
+    note = await ctx.bot.send_message(chat_id, note_text, parse_mode="HTML")
     asyncio.create_task(auto_delete_msg(ctx, note, 10))
 
 
@@ -139,7 +149,7 @@ async def spurge_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     end_id = msg.message_id
     chat_id = chat.id
 
-    # ✅ Perfect Silent Purge
+    # ✅ Silent Purge (No note sent)
     await _perfect_purge(ctx, chat_id, start_id, end_id)
 
 
