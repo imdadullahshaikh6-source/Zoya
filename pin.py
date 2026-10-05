@@ -23,10 +23,10 @@ log = logging.getLogger("pin")
 
 HELP_TXT = (
     "<b>📌 𝙋𝙞𝙣 / 𝙐𝙣𝙥𝙞𝙣</b>\n\n"
-    "• <code>.pin</code> (reply) — silently pin the replied message.\n"
-    "• <code>.unpin</code> (reply) — unpin the replied message.\n"
-    "• <code>.unpin</code> — unpin the last pinned message.\n"
-    "• <code>.unpinall</code> — unpin all pinned messages in this chat.\n\n"
+    "• <code>/pin</code> (or <code>.pin</code>) (reply) — silently pin the replied message.\n"
+    "• <code>/unpin</code> (or <code>.unpin</code>) (reply) — unpin the replied message.\n"
+    "• <code>/unpin</code> (or <code>.unpin</code>) — unpin the last pinned message.\n"
+    "• <code>/unpinall</code> (or <code>.unpinall</code>) — unpin all pinned messages in this chat.\n\n"
     "<i>Only admins with <b>Pin Messages</b> permission can use these. "
     "Bot also needs Pin Messages permission.</i>"
 )
@@ -127,3 +127,4 @@ def register(app):
     dual_command(app, "pin", pin_cmd)
     dual_command(app, "unpin", unpin_cmd)
     dual_command(app, "unpinall", unpinall_cmd)
+  
