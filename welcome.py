@@ -12,6 +12,7 @@ Features:
 """
 
 import re
+import time
 
 from telegram import ReplyParameters
 from telegram.constants import ChatType, ParseMode
@@ -93,26 +94,55 @@ def is_member_status(status):
     )
 
 
-def already_processed(ctx, chat_id, user_id):
+def is_inside_chat(member) -> bool:
     """
-    Prevent duplicate welcomes when Telegram sends both
-    NEW_CHAT_MEMBERS and CHAT_MEMBER updates.
+    True if this ChatMember object is currently INSIDE the group.
+    A muted/restricted user can still be inside (is_member=True),
+    which the plain status check would miss.
     """
-    seen = ctx.application.bot_data.setdefault(
-        "welcome_processed_members", set()
-    )
+    status = member.status
+    if is_member_status(status):
+        return True
+    if status == "restricted":
+        return bool(getattr(member, "is_member", False))
+    return False
 
+
+# Duplicate protection: Telegram can deliver the same join twice
+# (NEW_CHAT_MEMBERS service message + CHAT_MEMBER update).
+# Entries expire quickly so a user who leaves and joins again
+# later still gets a fresh welcome.
+_DEDUP_SECONDS = 60
+
+
+def already_processed(ctx, chat_id, user_id):
+    seen = ctx.application.bot_data.setdefault(
+        "welcome_processed_members", {}
+    )
+    if not isinstance(seen, dict):          # old set from a previous version
+        seen = ctx.application.bot_data["welcome_processed_members"] = {}
+
+    now = time.time()
     key = (chat_id, user_id)
 
-    if key in seen:
+    last = seen.get(key)
+    if last is not None and now - last < _DEDUP_SECONDS:
         return True
 
-    # Prevent unlimited growth in bot memory.
-    if len(seen) >= 5000:
-        seen.clear()
+    # Drop expired entries so memory never grows.
+    if len(seen) >= 2000:
+        for k in [k for k, t in seen.items() if now - t >= _DEDUP_SECONDS]:
+            seen.pop(k, None)
 
-    seen.add(key)
+    seen[key] = now
     return False
+
+
+def forget_processed(ctx, chat_id, user_id):
+    """Allow a retry (e.g. other update path) if sending failed."""
+    seen = ctx.application.bot_data.get("welcome_processed_members")
+    if isinstance(seen, dict):
+        seen.pop((chat_id, user_id), None)
 
 
 def media_of(m):
@@ -750,6 +780,7 @@ async def process_new_member(ctx, chat, user):
         )
 
     except TelegramError as e:
+        forget_processed(ctx, chat.id, user.id)
         log.warning(
             "Welcome failed in chat %s for user %s: %s",
             chat.id,
@@ -770,6 +801,13 @@ async def on_join(update, ctx):
         return
 
     for user in msg.new_chat_members:
+
+        from common import log as _jlog
+        _jlog.info(
+            "NEW MEMBER DETECTED BY SERVICE MESSAGE | chat=%s | user=%s",
+            chat.id,
+            user.id,
+        )
 
         # Bot itself added to the group
         if user.id == ctx.bot.id:
@@ -858,13 +896,9 @@ async def on_chat_member(update, ctx):
     old_status = old_member.status
     new_status = new_member.status
 
-    was_member = is_member_status(
-        old_status
-    )
+    was_member = is_inside_chat(old_member)
 
-    is_now_member = is_member_status(
-        new_status
-    )
+    is_now_member = is_inside_chat(new_member)
 
     # Only process transitions from non-member
     # to member. Ignore promotions and unrelated updates.
@@ -878,7 +912,7 @@ async def on_chat_member(update, ctx):
     log.info(
         "NEW MEMBER DETECTED BY CHAT_MEMBER | "
         "chat=%s | user=%s | old=%s | new=%s",
-    chat.id,
+        chat.id,
         user.id,
         old_status,
         new_status,
@@ -981,4 +1015,4 @@ def register(app):
             ChatMemberHandler.CHAT_MEMBER,
         )
     )
-    
+
