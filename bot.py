@@ -29,7 +29,6 @@ import lock
 import logs
 import pin
 import ping
-import pdebug      # ✅ NEW (.pdebug – purge diagnostics)
 import purge
 import sticker
 import welcome
