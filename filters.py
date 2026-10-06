@@ -134,7 +134,6 @@ async def filter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     native_btns = _extract_native_buttons(reply)
 
     if reply.text:
-        # Ab raw HTML save hoga, parse_buttons common.py se load hoga runtime pe!
         data.update(type="text", content=reply.text_html, buttons=native_btns)
         
     elif reply.sticker:
@@ -157,7 +156,13 @@ async def filter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     await dbase.filter_set(chat.id, keyword, data)
-    await msg.reply_text(f"✅ Filter <b>{keyword}</b> saved with formatting and buttons.")
+
+    # ✅ Verify the save actually persisted in MongoDB
+    verify = await dbase.filter_get(chat.id, keyword)
+    if verify:
+        await msg.reply_text(f"✅ Filter <b>{keyword}</b> saved with formatting and buttons.")
+    else:
+        await msg.reply_text(f"❌ Filter <b>{keyword}</b> could not be saved — check bot logs.")
 
 
 async def unfilter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -254,6 +259,13 @@ async def trigger_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 else:
                     final_kb = n_kb
 
+        # ✅ NEW: Wrap text and captions in <blockquote> for a nice quote UI
+        if ftype == "text":
+            content = f"<blockquote>{content}</blockquote>" if content else ""
+        else:
+            if caption:
+                caption = f"<blockquote>{caption}</blockquote>"
+
         try:
             if ftype == "text":
                 await msg.reply_text(content or "", reply_markup=final_kb, parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id)
@@ -302,4 +314,3 @@ def register(app: Application):
         (tg_filters.TEXT | tg_filters.CAPTION) & tg_filters.ChatType.GROUPS,
         trigger_filter
     ), group=-2)
-  
