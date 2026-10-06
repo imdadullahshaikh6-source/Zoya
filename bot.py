@@ -43,8 +43,9 @@ DB_NAME = os.getenv("DB_NAME", "zoya_bot")
 OWNER_USERNAME = "Ownerbackk"
 OWNER_URL = f"https://t.me/{OWNER_USERNAME}"
 CHANNEL_URL = os.getenv("CHANNEL_URL", "")
-# ✅ UPDATED: New photo URL (direct link)
-START_IMG = os.getenv("START_IMG", "https://i.ibb.co/Lh2bKfYk/41bf95c9-19f1-412e-a0a9-17de479ee822.jpg")
+
+# ✅ FORCE UPDATE: os.getenv hata diya taaki .env ka purana link override na kare
+START_IMG = "https://i.ibb.co/Lh2bKfYk/41bf95c9-19f1-412e-a0a9-17de479ee822.jpg"
 
 START_TXT = (
     "<b>✦ hey {m} !</b>\n\n"
@@ -152,7 +153,6 @@ def home_page(user, ctx):
     ]
     row2 = [B("👑 𝙊𝙬𝙣𝙚𝙧", url=OWNER_URL, style="danger")]
     if CHANNEL_URL:
-        # ✅ FIX: Yahan se square brackets hataye hain
         row2.append(B("🔔 𝘾𝙝𝙖𝙣𝙣𝙚𝙡", url=CHANNEL_URL, style="danger"))
     rows.append(row2)
     rows.append([B("➕ 𝘼𝙙𝙙 𝙈𝙚", url=add_me_url(me.username), style="success")])
