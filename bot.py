@@ -43,7 +43,8 @@ DB_NAME = os.getenv("DB_NAME", "zoya_bot")
 OWNER_USERNAME = "Ownerbackk"
 OWNER_URL = f"https://t.me/{OWNER_USERNAME}"
 CHANNEL_URL = os.getenv("CHANNEL_URL", "")
-START_IMG = os.getenv("START_IMG", "https://graph.org/file/d3a2c17942e606f4ec811-9c0373fa8bb10f4448.jpg")
+# ✅ UPDATED: New photo URL (direct link)
+START_IMG = os.getenv("START_IMG", "https://i.ibb.co/1tPhNDP7/RBuwr-Qwhz-Dy.jpg")
 
 START_TXT = (
     "<b>✦ hey {m} !</b>\n\n"
@@ -151,7 +152,7 @@ def home_page(user, ctx):
     ]
     row2 = [B("👑 𝙊𝙬𝙣𝙚𝙧", url=OWNER_URL, style="danger")]
     if CHANNEL_URL:
-        row2.append(B("🔔 𝘾𝙝𝙖𝙣𝙣𝙚𝙡", url=CHANNEL_URL, style="danger"))
+        row2.append([B("🔔 𝘾𝙝𝙖𝙣𝙣𝙚𝙡", url=CHANNEL_URL, style="danger")])
     rows.append(row2)
     rows.append([B("➕ 𝘼𝙙𝙙 𝙈𝙚", url=add_me_url(me.username), style="success")])
     return text, InlineKeyboardMarkup(rows)
@@ -220,15 +221,16 @@ async def start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     key = ALIASES.get(arg)
     if key:
         text, kb = section_page(key)
-        await ctx.bot.send_message(chat.id, f"<blockquote>{text}</blockquote>", parse_mode=ParseMode.HTML, reply_markup=kb)
+        await ctx.bot.send_message(chat.id, f"<blockquote expandable>{text}</blockquote>", parse_mode=ParseMode.HTML, reply_markup=kb)
         return
 
     text, kb = home_page(user, ctx)
     try:
-        await ctx.bot.send_photo(chat.id, START_IMG, caption=f"<blockquote>{text}</blockquote>", parse_mode=ParseMode.HTML, reply_markup=kb)
+        # ✅ UPDATED: Collapsible (expandable) blockquote
+        await ctx.bot.send_photo(chat.id, START_IMG, caption=f"<blockquote expandable>{text}</blockquote>", parse_mode=ParseMode.HTML, reply_markup=kb)
     except TelegramError as e:
         log.warning("start image failed: %s", e)
-        await ctx.bot.send_message(chat.id, f"<blockquote>{text}</blockquote>", parse_mode=ParseMode.HTML, reply_markup=kb)
+        await ctx.bot.send_message(chat.id, f"<blockquote expandable>{text}</blockquote>", parse_mode=ParseMode.HTML, reply_markup=kb)
 
 
 async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
