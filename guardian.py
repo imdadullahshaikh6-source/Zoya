@@ -52,6 +52,10 @@ _DELAY_RE = re.compile(r"^(\d+)\s*([smh])$", re.IGNORECASE)
 _NOTE_LIFETIME = 5
 _OFF_WORDS = {"off", "0", "stop", "disable", "no"}
 
+# In-memory cache to avoid repeated DB hits per message
+_cfg_cache: dict = {}          # chat_id -> (timestamp, cfg_dict)
+_CACHE_TTL = 30                # seconds
+
 
 def _parse_delay(arg: str):
     m = _DELAY_RE.match((arg or "").strip())
@@ -63,7 +67,6 @@ def _parse_delay(arg: str):
 
 
 def _fmt_delay(seconds: int) -> str:
-    """Format seconds into a human-friendly string."""
     if not seconds or seconds <= 0:
         return "🔴 OFF"
     if seconds < 3600:
@@ -77,6 +80,23 @@ def _safe_name(user) -> str:
     if not user:
         return "Unknown"
     return html.escape(user.first_name or "User")
+
+
+async def _cached_guardian_get(chat_id: int, use_cache: bool = True):
+    """Fetch guardian config with a short cache to reduce DB load."""
+    import time as _time
+    now = _time.time()
+    if use_cache:
+        cached = _cfg_cache.get(chat_id)
+        if cached and (now - cached[0]) < _CACHE_TTL:
+            return cached[1]
+    cfg = await dbase.guardian_get(chat_id)
+    _cfg_cache[chat_id] = (now, cfg)
+    return cfg
+
+
+def _invalidate_cache(chat_id: int):
+    _cfg_cache.pop(chat_id, None)
 
 
 async def _get_real_group_owner_id(ctx, chat_id: int):
@@ -120,21 +140,17 @@ async def _bot_can_guard(ctx, chat_id: int) -> bool:
         return False
     try:
         m = await ctx.bot.get_chat_member(chat_id, me.id)
-    except TelegramError:
+    except TelegramError as e:
+        log.warning("[guardian] bot_can_guard check failed: %s", e)
         return False
-    return (m.status == ChatMemberStatus.ADMINISTRATOR
-            and bool(getattr(m, "can_delete_messages", False)))
+    ok = (m.status == ChatMemberStatus.ADMINISTRATOR
+          and bool(getattr(m, "can_delete_messages", False)))
+    return ok
 
 
 # ─────────────────── DELAY COMMANDS ───────────────────
 
 async def _apply_delay(ctx, update: Update, mode: str):
-    """
-    mode = 'both' | 'edit' | 'media'
-    - 'both'  → sets edit_delay + media_delay (existing /setdelay)
-    - 'edit'  → sets edit_delay, sets media_delay to 0 (only edits)
-    - 'media' → sets media_delay, sets edit_delay to 0 (only media)
-    """
     msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
     if chat.type == ChatType.PRIVATE:
         return
@@ -158,7 +174,6 @@ async def _apply_delay(ctx, update: Update, mode: str):
 
     arg = ctx.args[0].lower().strip()
 
-    # Handle OFF
     if arg in _OFF_WORDS:
         delay = 0
     else:
@@ -170,31 +185,38 @@ async def _apply_delay(ctx, update: Update, mode: str):
     if mode == "both":
         if delay == 0:
             await dbase.guardian_set(chat.id, edit_delay_seconds=0, media_delay_seconds=0, delay_seconds=0, enabled=False)
+            _invalidate_cache(chat.id)
             await say(ctx, chat.id, T("<blockquote>✅ Guardian turned <b>OFF</b> — neither edits nor media will be deleted.</blockquote>"), reply_to=msg.message_id)
         else:
             await dbase.guardian_set(chat.id, edit_delay_seconds=delay, media_delay_seconds=delay, delay_seconds=delay, enabled=True)
+            _invalidate_cache(chat.id)
+            log.info("[guardian] setdelay both=%ds for chat %s", delay, chat.id)
             await say(ctx, chat.id, T(
                 f"<blockquote>✅ Guardian active — <b>both edits & media</b> will be deleted after <b>{_fmt_delay(delay).replace('🟢 ', '')}</b>.</blockquote>"
             ), reply_to=msg.message_id)
 
     elif mode == "edit":
         if delay == 0:
-            # Turn off edit only, don't touch media
             await dbase.guardian_set(chat.id, edit_delay_seconds=0)
+            _invalidate_cache(chat.id)
             await say(ctx, chat.id, T("<blockquote>✅ Edit deletion turned <b>OFF</b>.</blockquote>"), reply_to=msg.message_id)
         else:
             await dbase.guardian_set(chat.id, edit_delay_seconds=delay, media_delay_seconds=0, enabled=True)
+            _invalidate_cache(chat.id)
+            log.info("[guardian] editdelay=%ds for chat %s", delay, chat.id)
             await say(ctx, chat.id, T(
                 f"<blockquote>✅ Guardian active — <b>only edits</b> will be deleted after <b>{_fmt_delay(delay).replace('🟢 ', '')}</b>. Media will stay.</blockquote>"
             ), reply_to=msg.message_id)
 
     elif mode == "media":
         if delay == 0:
-            # Turn off media only, don't touch edits
             await dbase.guardian_set(chat.id, media_delay_seconds=0)
+            _invalidate_cache(chat.id)
             await say(ctx, chat.id, T("<blockquote>✅ Media deletion turned <b>OFF</b>.</blockquote>"), reply_to=msg.message_id)
         else:
             await dbase.guardian_set(chat.id, media_delay_seconds=delay, edit_delay_seconds=0, enabled=True)
+            _invalidate_cache(chat.id)
+            log.info("[guardian] mediadelay=%ds for chat %s", delay, chat.id)
             await say(ctx, chat.id, T(
                 f"<blockquote>✅ Guardian active — <b>only media</b> will be deleted after <b>{_fmt_delay(delay).replace('🟢 ', '')}</b>. Edits will stay.</blockquote>"
             ), reply_to=msg.message_id)
@@ -220,7 +242,7 @@ async def guard_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await say(ctx, chat.id, T("<blockquote>⚠️ only full-power admins can use this.</blockquote>"), reply_to=msg.message_id)
         return
     arg = (ctx.args[0].lower() if ctx.args else "")
-    cfg = await dbase.guardian_get(chat.id) or {}
+    cfg = await _cached_guardian_get(chat.id, use_cache=False) or {}
     if arg not in ("on", "off"):
         state = "🟢 ON" if cfg.get("enabled") else "🔴 OFF"
         edit_d = _fmt_delay(cfg.get("edit_delay_seconds") or cfg.get("delay_seconds") or 0)
@@ -234,6 +256,7 @@ async def guard_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     enabled = arg == "on"
     await dbase.guardian_set(chat.id, enabled=enabled)
+    _invalidate_cache(chat.id)
     await say(ctx, chat.id, T(f"<blockquote>✅ Guardian turned <b>{'ON' if enabled else 'OFF'}</b>.</blockquote>"), reply_to=msg.message_id)
 
 
@@ -274,6 +297,7 @@ async def permit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     target_id = target.id
     target_name = html.escape(target.first_name or "User")
     await dbase.guardian_permit_add(chat.id, target_id, target_name)
+    _invalidate_cache(chat.id)
     mention_txt = f"<a href='tg://user?id={target_id}'>{target_name}</a>"
     await say(ctx, chat.id, T(f"<blockquote>✅ {mention_txt} is now <b>permitted</b> — their edits/media won't be deleted.</blockquote>"), reply_to=msg.message_id)
 
@@ -313,6 +337,7 @@ async def unpermit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     target_id = target.id
     target_name = html.escape(target.first_name or "User")
     removed = await dbase.guardian_permit_remove(chat.id, target_id)
+    _invalidate_cache(chat.id)
     txt = f"<blockquote>✅ <b>{target_name}</b> is no longer permitted.</blockquote>" if removed else f"<blockquote>ℹ️ <b>{target_name}</b> wasn't in the permit list.</blockquote>"
     await say(ctx, chat.id, T(txt), reply_to=msg.message_id)
 
@@ -337,7 +362,7 @@ async def permitlist_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _is_owner(ctx, chat.id, user.id):
         await say(ctx, chat.id, T("<blockquote>⚠️ only the <b>group owner</b> or <b>bot owner</b> can use this.</blockquote>"), reply_to=msg.message_id)
         return
-    cfg = await dbase.guardian_get(chat.id) or {}
+    cfg = await _cached_guardian_get(chat.id, use_cache=False) or {}
     users = cfg.get("permitted_users", [])
     if not users:
         await say(ctx, chat.id, T("<blockquote>no permitted users in this chat.</blockquote>"), reply_to=msg.message_id)
@@ -365,16 +390,18 @@ async def anon_verify_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         target_id = int(data[2])
         target_name = data[3]
         await dbase.guardian_permit_add(chat_id, target_id, target_name)
+        _invalidate_cache(chat_id)
         mention_txt = f"<a href='tg://user?id={target_id}'>{target_name}</a>"
         await query.edit_message_text(T(f"<blockquote>✅ Approved by owner. {mention_txt} is now <b>permitted</b>.</blockquote>"), parse_mode=ParseMode.HTML)
     elif action == "anonunperm":
         target_id = int(data[2]) if data[2] != "0" else None
         target_name = data[3] if data[3] else None
         removed = await dbase.guardian_permit_remove(chat_id, target_id) if target_id else False
+        _invalidate_cache(chat_id)
         txt = f"<blockquote>✅ Approved by owner. <b>{target_name or target_id}</b> is no longer permitted.</blockquote>" if removed else f"<blockquote>ℹ️ Approved by owner. <b>{target_name or target_id}</b> wasn't in the list.</blockquote>"
         await query.edit_message_text(T(txt), parse_mode=ParseMode.HTML)
     elif action == "anonlist":
-        cfg = await dbase.guardian_get(chat_id) or {}
+        cfg = await _cached_guardian_get(chat_id, use_cache=False) or {}
         users = cfg.get("permitted_users", [])
         if not users:
             await query.edit_message_text(T("<blockquote>no permitted users in this chat.</blockquote>"), parse_mode=ParseMode.HTML)
@@ -396,17 +423,36 @@ def _msg_has_media(msg) -> bool:
 
 
 async def _delete_after(ctx, chat_id: int, message_id: int, delay: int, note_text: str):
-    await asyncio.sleep(delay)
+    """Sleep, then delete. Retry once on failure."""
+    log.info("[guardian] ⏳ scheduled delete msg=%s chat=%s in %ds", message_id, chat_id, delay)
     try:
-        await ctx.bot.delete_message(chat_id, message_id)
-        log.info("[guardian] deleted msg %s in chat %s", message_id, chat_id)
-    except TelegramError as e:
-        log.warning("[guardian] delete failed for msg %s: %s", message_id, e)
+        await asyncio.sleep(delay)
+    except asyncio.CancelledError:
         return
-    
+
+    for attempt in range(2):
+        try:
+            await ctx.bot.delete_message(chat_id, message_id)
+            log.info("[guardian] ✅ deleted msg %s in chat %s", message_id, chat_id)
+            break
+        except TelegramError as e:
+            err = str(e).lower()
+            if "message to delete not found" in err or "message can't be deleted" in err:
+                log.info("[guardian] msg %s already gone", message_id)
+                return
+            if attempt == 0:
+                log.warning("[guardian] delete retry for msg %s: %s", message_id, e)
+                await asyncio.sleep(2)
+                continue
+            log.warning("[guardian] ❌ delete failed for msg %s: %s", message_id, e)
+            return
+        except Exception as e:
+            log.error("[guardian] unexpected delete error for %s: %s", message_id, e)
+            return
+
     if not note_text:
         return
-        
+
     try:
         note = await ctx.bot.send_message(chat_id, note_text, parse_mode=ParseMode.HTML)
         await asyncio.sleep(_NOTE_LIFETIME)
@@ -419,10 +465,7 @@ async def _delete_after(ctx, chat_id: int, message_id: int, delay: int, note_tex
 
 
 async def _get_guard_delay(ctx, chat, user, is_edit: bool, is_media: bool) -> int:
-    """Returns the delay in seconds (0 = don't delete).
-    - is_edit → uses edit_delay_seconds
-    - is_media → uses media_delay_seconds
-    """
+    """Returns delay in seconds (0 = don't delete)."""
     if not chat or chat.type == ChatType.PRIVATE:
         return 0
     me = ctx.application.bot_data.get("me")
@@ -431,7 +474,7 @@ async def _get_guard_delay(ctx, chat, user, is_edit: bool, is_media: bool) -> in
     if not user or user.is_bot:
         return 0
 
-    cfg = await dbase.guardian_get(chat.id)
+    cfg = await _cached_guardian_get(chat.id)
     if not cfg or not cfg.get("enabled"):
         return 0
 
@@ -439,7 +482,6 @@ async def _get_guard_delay(ctx, chat, user, is_edit: bool, is_media: bool) -> in
     edit_delay = cfg.get("edit_delay_seconds", None)
     media_delay = cfg.get("media_delay_seconds", None)
 
-    # Migration: old data had only delay_seconds
     if edit_delay is None:
         edit_delay = legacy if legacy else 0
     if media_delay is None:
@@ -448,7 +490,7 @@ async def _get_guard_delay(ctx, chat, user, is_edit: bool, is_media: bool) -> in
     edit_delay = int(edit_delay)
     media_delay = int(media_delay)
 
-    # Check permitted users
+    # Permitted user check
     permitted = cfg.get("permitted_users", [])
     for u in permitted:
         if u.get("id") and u.get("id") == user.id:
@@ -461,7 +503,6 @@ async def _get_guard_delay(ctx, chat, user, is_edit: bool, is_media: bool) -> in
     if not await _bot_can_guard(ctx, chat.id):
         return 0
 
-    # Decide which delay to use
     if is_edit and edit_delay >= MIN_DELAY:
         return edit_delay
     if is_media and media_delay >= MIN_DELAY:
@@ -470,32 +511,49 @@ async def _get_guard_delay(ctx, chat, user, is_edit: bool, is_media: bool) -> in
 
 
 async def _guardian_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    msg = update.effective_message
-    chat = update.effective_chat
-    user = update.effective_user
-    if not msg or not chat or not user:
-        return
-    if chat.type == ChatType.PRIVATE:
-        return
-    if user.is_bot:
-        return
+    try:
+        msg = update.effective_message
+        chat = update.effective_chat
+        user = update.effective_user
+        if not msg or not chat or not user:
+            return
+        if chat.type == ChatType.PRIVATE:
+            return
+        if user.is_bot:
+            return
 
-    is_edit = bool(msg.edit_date)
-    is_media = _msg_has_media(msg)
-    if not is_edit and not is_media:
-        return
+        is_edit = bool(msg.edit_date)
+        is_media = _msg_has_media(msg)
 
-    delay = await _get_guard_delay(ctx, chat, user, is_edit, is_media)
-    if not delay:
-        return
+        # Log EVERY message that has media/edit so we can debug
+        if is_edit or is_media:
+            kind = "edit" if is_edit else "media"
+            media_kind = ""
+            if msg.sticker: media_kind = "sticker"
+            elif msg.photo: media_kind = "photo"
+            elif msg.video: media_kind = "video"
+            elif msg.animation: media_kind = "animation"
+            elif msg.document: media_kind = "document"
+            elif msg.audio: media_kind = "audio"
+            elif msg.voice: media_kind = "voice"
+            log.info("[guardian] 🔍 %s detected (kind=%s) chat=%s user=%s msg=%s",
+                     kind, media_kind, chat.id, user.id, msg.message_id)
 
-    # Note only for edits (media has no note as before)
-    if is_edit:
-        note = f"<blockquote>🗑️ {_safe_name(user)}'s <b>edited message</b> was deleted.</blockquote>"
-    else:
+        if not is_edit and not is_media:
+            return
+
+        delay = await _get_guard_delay(ctx, chat, user, is_edit, is_media)
+        log.info("[guardian] delay for msg=%s is %ds", msg.message_id, delay)
+        if not delay:
+            return
+
         note = ""
+        if is_edit:
+            note = f"<blockquote>🗑️ {_safe_name(user)}'s <b>edited message</b> was deleted.</blockquote>"
 
-    asyncio.create_task(_delete_after(ctx, chat.id, msg.message_id, delay, note))
+        asyncio.create_task(_delete_after(ctx, chat.id, msg.message_id, delay, note))
+    except Exception as e:
+        log.exception("[guardian] watcher error: %s", e)
 
 
 def register(app):
@@ -507,5 +565,7 @@ def register(app):
     dual_command(app, "unpermit", unpermit_cmd)
     dual_command(app, "permitlist", permitlist_cmd)
     app.add_handler(CallbackQueryHandler(anon_verify_callback, pattern=r"^anon(perm|unperm|list)\|"))
-    app.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.ALL, _guardian_watcher), group=2)
+    # group=3 → runs after command handlers (group=0) and before cleanservice (group=97)
+    app.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.ALL, _guardian_watcher), group=3)
     
+            
