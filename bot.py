@@ -44,7 +44,7 @@ OWNER_USERNAME = "Ownerbackk"
 OWNER_URL = f"https://t.me/{OWNER_USERNAME}"
 CHANNEL_URL = os.getenv("CHANNEL_URL", "")
 # ✅ UPDATED: New photo URL (direct link)
-START_IMG = os.getenv("START_IMG", "https://i.ibb.co/1tPhNDP7/RBuwr-Qwhz-Dy.jpg")
+START_IMG = os.getenv("START_IMG", "https://i.ibb.co/Lh2bKfYk/41bf95c9-19f1-412e-a0a9-17de479ee822.jpg")
 
 START_TXT = (
     "<b>✦ hey {m} !</b>\n\n"
