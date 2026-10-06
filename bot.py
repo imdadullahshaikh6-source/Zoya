@@ -45,7 +45,7 @@ OWNER_URL = f"https://t.me/{OWNER_USERNAME}"
 CHANNEL_URL = os.getenv("CHANNEL_URL", "")
 
 # ✅ FORCE UPDATE: os.getenv hata diya taaki .env ka purana link override na kare
-START_IMG = "https://i.ibb.co/Lh2bKfYk/41bf95c9-19f1-412e-a0a9-17de479ee822.jpg"
+START_IMG = "https://i.ibb.co/Vct9gs09/image.jpg"
 
 START_TXT = (
     "<b>✦ hey {m} !</b>\n\n"
