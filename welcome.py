@@ -3,9 +3,12 @@ ZOYA Welcome Plugin
 Features:
 - Rose-style welcome buttons
 - Text, photo, video, GIF, sticker, document welcomes
-- Direct member add detection
+- Direct member add detection (manual admin add)
+- Link join detection
 - Join request detection
 - Approved join request detection
+- Bot itself added detection
+- Optional welcome for other bots
 - Clean welcome
 - Group rules
 - Admin permission checks
@@ -39,6 +42,7 @@ HELP_TXT = (
     "<b>✦ greetings — welcome system</b>\n\n"
     "/setwelcome (or .setwelcome) — reply to any message or type text after it\n"
     "/welcome — status + preview • /welcome on|off\n"
+    "/welcomebots on|off — welcome bots too\n"
     "/resetwelcome — back to default\n"
     "/cleanwelcome on|off — delete old welcome when a new member joins\n"
     "/setrules • /rules — group rules\n\n"
@@ -56,6 +60,7 @@ HELP_TXT = (
 COMMANDS = [
     ("setwelcome", "Set welcome message"),
     ("welcome", "Welcome status / on / off"),
+    ("welcomebots", "Welcome bots too on / off"),
     ("resetwelcome", "Reset welcome"),
     ("cleanwelcome", "Delete old welcome messages"),
     ("setrules", "Set group rules"),
@@ -452,6 +457,7 @@ async def welcome_cmd(update, ctx):
     status = T(
         "<b>welcome settings</b>\n"
         "welcome: {a}\n"
+        "welcome bots: {c}\n"
         "clean welcome: {b}\n"
         "message type: {t}",
         a=(
@@ -462,6 +468,11 @@ async def welcome_cmd(update, ctx):
         b=(
             "ON ✅"
             if cfg.get("clean_welcome")
+            else "OFF ❌"
+        ),
+        c=(
+            "ON ✅"
+            if cfg.get("welcome_bots")
             else "OFF ❌"
         ),
         t=w.get("type", "text"),
@@ -488,6 +499,60 @@ async def welcome_cmd(update, ctx):
             chat.id,
             T("preview failed:") + f" {esc(e)}",
         )
+
+
+# --------------------------------------------------
+# WELCOME BOTS TOGGLE
+# --------------------------------------------------
+
+async def welcomebots_cmd(update, ctx):
+    msg = update.message
+    chat = update.effective_chat
+
+    if not msg:
+        return
+
+    if not await require_admin(update, ctx, "change_info"):
+        return
+
+    arg = ctx.args[0].lower() if ctx.args else ""
+
+    cfg = await cfg_get(chat.id)
+
+    if arg not in ("on", "off", "yes", "no"):
+        cur = (
+            "ON ✅"
+            if cfg.get("welcome_bots")
+            else "OFF ❌"
+        )
+        await say(
+            ctx,
+            chat.id,
+            T(
+                "welcome bots is currently {c}.\n"
+                "usage: /welcomebots on|off",
+                c=cur,
+            ),
+            reply_to=msg.message_id,
+        )
+        return
+
+    val = arg in ("on", "yes")
+
+    await cfg_set(chat.id, welcome_bots=val)
+
+    await say(
+        ctx,
+        chat.id,
+        T(
+            "welcome bots is now {s}.",
+            s=(
+                "<b>ON ✅</b>"
+                if val else "<b>OFF ❌</b>"
+            ),
+        ),
+        reply_to=msg.message_id,
+    )
 
 
 # --------------------------------------------------
@@ -717,29 +782,23 @@ async def botperms_cmd(update, ctx):
 
 async def process_new_member(ctx, chat, user):
     """
-    Shared function for direct joins and approved requests.
-    Checks settings, ignores bots and prevents duplicate welcomes.
+    Shared function for direct joins, manual admin adds,
+    link joins, approved requests, and (optionally) bots.
     """
-
     from common import log
-
-    if user.is_bot:
-        return
 
     cfg = await cfg_get(chat.id)
 
-    if not cfg.get("welcome_on", True):
-        log.info(
-            "Welcome disabled in chat %s",
-            chat.id,
-        )
+    # Bots: only welcome if welcome_bots is ON
+    if user.is_bot and not cfg.get("welcome_bots", False):
+        log.info("Bot %s skipped (welcome_bots OFF)", user.id)
         return
 
-    if already_processed(
-        ctx,
-        chat.id,
-        user.id,
-    ):
+    if not cfg.get("welcome_on", True):
+        log.info("Welcome disabled in chat %s", chat.id)
+        return
+
+    if already_processed(ctx, chat.id, user.id):
         log.info(
             "Duplicate welcome ignored: chat=%s user=%s",
             chat.id,
@@ -756,7 +815,6 @@ async def process_new_member(ctx, chat, user):
                 chat.id,
                 cfg["last_welcome"],
             )
-
         except TelegramError:
             pass
 
@@ -790,7 +848,7 @@ async def process_new_member(ctx, chat, user):
 
 
 # --------------------------------------------------
-# DIRECT ADD / NEW MEMBERS SERVICE UPDATE
+# 1. NEW CHAT MEMBERS SERVICE MESSAGE
 # --------------------------------------------------
 
 async def on_join(update, ctx):
@@ -809,14 +867,10 @@ async def on_join(update, ctx):
             user.id,
         )
 
-        # Bot itself added to the group
+        # Bot itself added
         if user.id == ctx.bot.id:
             from common import log
-
-            log.info(
-                "ZOYA added to chat %s",
-                chat.id,
-            )
+            log.info("ZOYA added to chat %s", chat.id)
 
             await say(
                 ctx,
@@ -830,34 +884,29 @@ async def on_join(update, ctx):
             )
             continue
 
-        # Ignore bots and process human members
-        if not user.is_bot:
-            await process_new_member(
-                ctx,
-                chat,
-                user,
-            )
+        # Handles both bots (if enabled) and humans
+        await process_new_member(
+            ctx,
+            chat,
+            user,
+        )
 
 
 # --------------------------------------------------
-# JOIN REQUEST DETECTION
+# 2. JOIN REQUEST DETECTION
 # --------------------------------------------------
 
 async def on_join_request(update, ctx):
     """
     Detects pending join requests.
-
-    A pending request is NOT a group membership.
-    Therefore, do not send the normal group welcome yet.
+    A pending request is NOT a group membership, so we just log it.
+    Welcome is sent when the user actually becomes a member.
     """
-
     request = update.chat_join_request
-
     if not request:
         return
 
     from common import log
-
     chat = request.chat
     user = request.from_user
 
@@ -867,25 +916,21 @@ async def on_join_request(update, ctx):
         user.id,
     )
 
-    # Welcome will be sent after Telegram reports
-    # that this user actually becomes a member.
-
 
 # --------------------------------------------------
-# APPROVED REQUEST / CHAT MEMBER UPDATE
+# 3. CHAT MEMBER UPDATE (manual add / approved request / link join)
 # --------------------------------------------------
 
 async def on_chat_member(update, ctx):
     """
-    Detects membership status changes.
-
-    This is important because a user approved from a
-    join request may not produce the usual new_chat_members
-    service message in every update delivery scenario.
+    Detects membership status changes:
+    - Manual admin add
+    - Link join
+    - Approved join request
+    - Restriction changes (ignored)
+    - Promotions (ignored)
     """
-
     member_update = update.chat_member
-
     if not member_update:
         return
 
@@ -897,18 +942,15 @@ async def on_chat_member(update, ctx):
     new_status = new_member.status
 
     was_member = is_inside_chat(old_member)
-
     is_now_member = is_inside_chat(new_member)
 
-    # Only process transitions from non-member
-    # to member. Ignore promotions and unrelated updates.
+    # Only process transitions from non-member -> member
     if was_member or not is_now_member:
         return
 
     user = new_member.user
 
     from common import log
-
     log.info(
         "NEW MEMBER DETECTED BY CHAT_MEMBER | "
         "chat=%s | user=%s | old=%s | new=%s",
@@ -918,11 +960,60 @@ async def on_chat_member(update, ctx):
         new_status,
     )
 
-    await process_new_member(
-        ctx,
-        chat,
-        user,
+    await process_new_member(ctx, chat, user)
+
+
+# --------------------------------------------------
+# 4. BOT ITSELF ADDED / PROMOTED (my_chat_member)
+# --------------------------------------------------
+
+async def on_my_chat_member(update, ctx):
+    """
+    Fires when THIS bot is added/removed/promoted in a chat.
+    'new_chat_members' does NOT always fire when a bot is added,
+    so this is the ONLY reliable way to detect bot being added.
+    """
+    mcu = update.my_chat_member
+    if not mcu:
+        return
+
+    chat = mcu.chat
+    old = mcu.old_chat_member
+    new = mcu.new_chat_member
+
+    from common import log
+
+    was_member = is_inside_chat(old)
+    is_now_member = is_inside_chat(new)
+
+    log.info(
+        "MY_CHAT_MEMBER | chat=%s | old=%s | new=%s",
+        chat.id,
+        old.status,
+        new.status,
     )
+
+    # Bot just got added
+    if not was_member and is_now_member:
+        try:
+            await say(
+                ctx,
+                chat.id,
+                T(
+                    "thanks for adding me! ✨ "
+                    "make me admin so every feature works."
+                )
+                + "\n\n"
+                + await perm_report(ctx, chat),
+            )
+        except TelegramError as e:
+            log.warning("Bot welcome failed in %s: %s", chat.id, e)
+        return
+
+    # Bot got promoted
+    if was_member and is_now_member and new.status in ("administrator", "creator"):
+        if old.status != new.status:
+            log.info("Bot promoted in chat %s", chat.id)
 
 
 # --------------------------------------------------
@@ -933,15 +1024,10 @@ def register(app):
 
     grp = filters.ChatType.GROUPS
 
-    # Welcome commands
-    dual_command(
-        app,
-        "setwelcome",
-        setwelcome_cmd,
-    )
+    # ---- Welcome commands ----
+    dual_command(app, "setwelcome", setwelcome_cmd)
 
-    # Support media captions such as:
-    # photo + caption /setwelcome
+    # Support media captions such as: photo + caption /setwelcome
     app.add_handler(
         MessageHandler(
             filters.CaptionRegex(
@@ -953,47 +1039,20 @@ def register(app):
             setwelcome_cmd,
         )
     )
-    
-    dual_command(
-        app,
-        "welcome",
-        welcome_cmd,
-    )
 
-    dual_command(
-        app,
-        "resetwelcome",
-        resetwelcome_cmd,
-    )
+    dual_command(app, "welcome", welcome_cmd)
+    dual_command(app, "welcomebots", welcomebots_cmd)
+    dual_command(app, "resetwelcome", resetwelcome_cmd)
+    dual_command(app, "cleanwelcome", cleanwelcome_cmd)
 
-    dual_command(
-        app,
-        "cleanwelcome",
-        cleanwelcome_cmd,
-    )
+    # ---- Rules ----
+    dual_command(app, "setrules", setrules_cmd)
+    dual_command(app, "rules", rules_cmd, group_only=False)
 
-    # Rules
-    dual_command(
-        app,
-        "setrules",
-        setrules_cmd,
-    )
+    # ---- Permissions ----
+    dual_command(app, "botperms", botperms_cmd)
 
-    dual_command(
-        app,
-        "rules",
-        rules_cmd,
-        group_only=False,
-    )
-
-    # Permissions
-    dual_command(
-        app,
-        "botperms",
-        botperms_cmd,
-    )
-
-    # 1. Direct adds / Telegram new member service messages
+    # ---- 1. Service message: new_chat_members ----
     app.add_handler(
         MessageHandler(
             filters.StatusUpdate.NEW_CHAT_MEMBERS,
@@ -1001,14 +1060,12 @@ def register(app):
         )
     )
 
-    # 2. Join requests
+    # ---- 2. Join requests (pending) ----
     app.add_handler(
-        ChatJoinRequestHandler(
-            on_join_request
-        )
+        ChatJoinRequestHandler(on_join_request)
     )
-    
-    # 3. Approved requests and other membership changes
+
+    # ---- 3. Membership status changes (manual add / link / approved request) ----
     app.add_handler(
         ChatMemberHandler(
             on_chat_member,
@@ -1016,3 +1073,11 @@ def register(app):
         )
     )
 
+    # ---- 4. Bot itself added / promoted ----
+    app.add_handler(
+        ChatMemberHandler(
+            on_my_chat_member,
+            ChatMemberHandler.MY_CHAT_MEMBER,
+        )
+    )
+    
