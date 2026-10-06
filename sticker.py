@@ -7,9 +7,11 @@ Quote commands:
   .q r / .q reply → quote sticker sent as a reply to the source message
   .qr             → shortcut for .q r
 
-Nested quotes: if the replied-to message was itself a reply, we fetch its
-parent and include it in the sticker. Handles multiple PTB attribute shapes
-(reply_to_message, reply_to_message_id, external_reply)."""
+Nested quotes (.qr / .q r): if the replied-to message was itself a reply, the
+message it was replying to is shown inside the quote sticker.
+NOTE: the Telegram Bot API never includes the parent of a replied message, so
+the bot remembers "message -> parent" for every reply it sees in a group
+(see _parent_cache). Only replies sent while the bot was online can be nested."""
 from __future__ import annotations
 
 import asyncio
@@ -20,12 +22,14 @@ import logging
 import os
 import re
 import time
+from collections import OrderedDict
 
 import httpx
 from fontTools.ttLib import TTFont
 from PIL import Image, ImageDraw, ImageFont
 from telegram import InputSticker, MessageEntity
 from telegram.error import TelegramError
+from telegram.ext import MessageHandler, filters
 
 import database as dbase
 from common import (
@@ -39,8 +43,8 @@ log = logging.getLogger("sticker")
 HELP_TXT = (
     "<b>✦ stickers</b>\n\n"
     "/q (or .q) — reply to any message to turn it into a quote sticker\n"
-    "/q r (or .q r) — same, but sent as a reply to the original message\n"
-    "/qr (or .qr) — shortcut for .q r\n"
+    "/qr (or .qr, /q r) — nested quote: also shows the message that the quoted "
+    "message was replying to, and is sent as a reply to the original message\n"
     "/kang (or .kang) [emoji] — reply to a sticker or photo to add it to your "
     "own sticker pack."
 )
@@ -260,7 +264,7 @@ def _build_reply_block(reply) -> dict | None:
     }
 
 
-def _build_message(msg, avatar: str | None = None) -> dict:
+def _build_message(msg, avatar: str | None = None, reply_override: dict | None = None) -> dict:
     block = {
         "entities": _extract_entities(msg),
         "avatar": True,
@@ -272,10 +276,12 @@ def _build_message(msg, avatar: str | None = None) -> dict:
     reply_block = _build_reply_block(getattr(msg, "reply_to_message", None))
     if reply_block:
         block["replyMessage"] = reply_block
+    if reply_override:                      # nested quote supplied by .qr
+        block["replyMessage"] = reply_override
     return block
 
 
-def _build_payload(msg, avatar: str | None = None) -> dict:
+def _build_payload(msg, avatar: str | None = None, reply_override: dict | None = None) -> dict:
     return {
         "type": "quote",
         "format": "webp",
@@ -284,7 +290,7 @@ def _build_payload(msg, avatar: str | None = None) -> dict:
         "height": 512,
         "scale": 1,
         "emojiBrand": "apple",
-        "messages": [_build_message(msg, avatar)],
+        "messages": [_build_message(msg, avatar, reply_override)],
     }
 
 
@@ -329,7 +335,7 @@ async def _try_one_api(client: httpx.AsyncClient, url: str, payload: dict) -> by
         return None
 
 
-async def _build_quote_via_api(ctx, src_msg, sender) -> bytes | None:
+async def _build_quote_via_api(ctx, src_msg, sender, reply_override: dict | None = None) -> bytes | None:
     text = _text_of(src_msg)
     if not text:
         return None
@@ -337,7 +343,7 @@ async def _build_quote_via_api(ctx, src_msg, sender) -> bytes | None:
     avatar_url = await _avatar_url(ctx, sender.id)
     log.info("[sticker] avatar url: %s", "yes" if avatar_url else "none")
 
-    payload = _build_payload(src_msg, avatar_url)
+    payload = _build_payload(src_msg, avatar_url, reply_override)
     msg0 = payload["messages"][0]
     if "replyMessage" in msg0:
         log.info("[sticker] nested reply: %r", msg0["replyMessage"].get("text", "")[:50])
@@ -438,15 +444,101 @@ async def _build_quote_via_pillow(ctx, src_msg, sender) -> bytes:
     return out.getvalue()
 
 
-async def _build_quote_sticker(ctx, src_msg, sender) -> bytes:
+async def _build_quote_sticker(ctx, src_msg, sender, reply_override: dict | None = None) -> bytes:
     try:
-        data = await _build_quote_via_api(ctx, src_msg, sender)
+        data = await _build_quote_via_api(ctx, src_msg, sender, reply_override)
         if data:
             return data
     except Exception as e:
         log.warning("[sticker] API path raised: %s", e)
     log.warning("[sticker] all APIs failed — using local Pillow fallback")
     return await _build_quote_via_pillow(ctx, src_msg, sender)
+
+
+# ───────── nested-quote parent cache ─────────
+# Bot API never sends "reply_to_message.reply_to_message", so we remember the
+# parent of every reply we see: (chat_id, message_id) -> replyMessage block.
+
+_PARENT_CACHE_MAX = 20000
+_parent_cache: "OrderedDict[tuple[int, int], dict]" = OrderedDict()
+
+
+def _media_label(m) -> str | None:
+    if getattr(m, "photo", None):
+        return "📷 Photo"
+    if getattr(m, "sticker", None):
+        return f"{m.sticker.emoji or ''} Sticker".strip()
+    if getattr(m, "animation", None):
+        return "GIF"
+    if getattr(m, "video", None):
+        return "🎬 Video"
+    if getattr(m, "video_note", None):
+        return "🎬 Video message"
+    if getattr(m, "voice", None):
+        return "🎤 Voice message"
+    if getattr(m, "audio", None):
+        return "🎵 Audio"
+    if getattr(m, "document", None):
+        return "📄 " + (m.document.file_name or "File")
+    if getattr(m, "poll", None):
+        return "📊 Poll"
+    return None
+
+
+def _snapshot_parent(parent) -> dict | None:
+    """replyMessage block (LyoSU quote-api shape) for a parent message."""
+    if parent is None:
+        return None
+    text = _text_of(parent)
+    entities = _extract_entities(parent) if text else []
+    if not text:
+        text = _media_label(parent) or ""
+    if not text:
+        return None                      # service message / unsupported -> skip
+    user = getattr(parent, "from_user", None)
+    chat_obj = getattr(parent, "sender_chat", None)
+    if user is None and chat_obj is not None:
+        title = chat_obj.title or "Channel"
+        frm = {"id": int(chat_obj.id), "first_name": title, "name": title}
+    else:
+        frm = _from_block(user)
+    return {
+        "name": frm.get("name") or "User",
+        "text": text,
+        "entities": entities,
+        "chatId": int(getattr(parent, "chat_id", 0) or 0),
+        "from": frm,
+    }
+
+
+def _remember_parent(chat_id: int, msg_id: int, block: dict) -> None:
+    key = (chat_id, msg_id)
+    _parent_cache[key] = block
+    _parent_cache.move_to_end(key)
+    while len(_parent_cache) > _PARENT_CACHE_MAX:
+        _parent_cache.popitem(last=False)
+
+
+async def _cache_reply_watcher(update, ctx):
+    """Silently remembers the parent of every reply in groups."""
+    m = update.effective_message
+    chat = update.effective_chat
+    if not m or not chat or not m.reply_to_message:
+        return
+    if not _text_of(m):                  # only text/caption messages can be quoted
+        return
+    block = _snapshot_parent(m.reply_to_message)
+    if block:
+        _remember_parent(chat.id, m.message_id, block)
+
+
+def _find_parent_block(chat_id: int, src) -> dict | None:
+    live = getattr(src, "reply_to_message", None)       # present on some setups
+    if live is not None:
+        block = _snapshot_parent(live)
+        if block:
+            return block
+    return _parent_cache.get((chat_id, src.message_id))
 
 
 # ───────── parent-message helper ─────────
@@ -496,7 +588,7 @@ def _cooldown_left(uid: int) -> float:
     return max(0.0, _last_quote.get(uid, 0.0) + COOLDOWN - time.time())
 
 
-async def _quote_and_send(update, ctx, as_reply: bool):
+async def _quote_and_send(update, ctx, as_reply: bool, nested: bool = False):
     msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
     src = msg.reply_to_message
 
@@ -520,6 +612,13 @@ async def _quote_and_send(update, ctx, as_reply: bool):
     else:
         log.info("[sticker] no parent message found")
 
+    reply_override = None
+    nested_missing = False
+    if nested:
+        reply_override = _find_parent_block(chat.id, src)
+        nested_missing = reply_override is None
+        log.info("[sticker] nested requested, parent block found: %s", not nested_missing)
+
     left = _cooldown_left(user.id)
     if left > 0:
         await say(ctx, chat.id, T(f"⏳ please wait {int(left) + 1}s before the next quote."), reply_to=msg.message_id)
@@ -540,7 +639,7 @@ async def _quote_and_send(update, ctx, as_reply: bool):
 
     try:
         sticker_bytes = await asyncio.wait_for(
-            _build_quote_sticker(ctx, src, sender), timeout=TOTAL_TIMEOUT
+            _build_quote_sticker(ctx, src, sender, reply_override), timeout=TOTAL_TIMEOUT
         )
     except asyncio.TimeoutError:
         log.error("[sticker] total timeout reached")
@@ -590,15 +689,31 @@ async def _quote_and_send(update, ctx, as_reply: bool):
             log.error("[sticker] send failed: %s", e)
             await say(ctx, chat.id, T("❌ couldn't send that sticker:") + f" {esc(e)}", reply_to=msg.message_id)
 
+    if nested and nested_missing:
+        try:
+            note = await say(ctx, chat.id, T(
+                "ℹ️ no parent message found — that message isn't a reply, or it was "
+                "sent before I saw it. Made a normal quote."), reply_to=msg.message_id)
+
+            async def _drop(n=note):
+                await asyncio.sleep(8)
+                try:
+                    await n.delete()
+                except Exception:
+                    pass
+            asyncio.create_task(_drop())
+        except Exception:
+            pass
+
 
 async def q_cmd(update, ctx):
     args = [a.lower() for a in (ctx.args or [])]
     as_reply = bool(args) and args[0] in ("r", "reply", "re")
-    await _quote_and_send(update, ctx, as_reply=as_reply)
+    await _quote_and_send(update, ctx, as_reply=as_reply, nested=as_reply)
 
 
 async def qr_cmd(update, ctx):
-    await _quote_and_send(update, ctx, as_reply=True)
+    await _quote_and_send(update, ctx, as_reply=True, nested=True)
 
 
 # ───────── .kang helpers ─────────
@@ -687,4 +802,13 @@ def register(app):
     dual_command(app, "q", q_cmd)
     dual_command(app, "qr", qr_cmd)
     dual_command(app, "kang", kang_cmd)
-    
+    # runs first (group -100) and never blocks other handlers
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.GROUPS & filters.REPLY & (filters.TEXT | filters.CAPTION),
+            _cache_reply_watcher,
+            block=False,
+        ),
+        group=-100,
+    )
+
