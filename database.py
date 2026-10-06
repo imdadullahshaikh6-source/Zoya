@@ -21,7 +21,7 @@ async def init(uri: str, name: str):
     await _db.warns.create_index([("chat_id", 1), ("user_id", 1)])
     await _db.members.create_index("chat_id")
 
-    # ✅ SAFE: filters index (handles existing duplicates gracefully)
+    # ✅ SAFE: filters index
     try:
         await _db.filters.create_index([("chat_id", 1), ("keyword", 1)], unique=True)
         log.info("[db] filters index ready ✅")
@@ -34,9 +34,34 @@ async def init(uri: str, name: str):
         except Exception as e2:
             log.error("[db] filters index still failed: %s", e2)
 
-    await _db.guardian.create_index("chat_id", unique=True)
+    # ✅ SAFE: guardian index (handles existing duplicates gracefully)
+    try:
+        await _db.guardian.create_index("chat_id", unique=True)
+        log.info("[db] guardian index ready ✅")
+    except Exception as e:
+        log.warning("[db] guardian index creation failed (%s) — cleaning duplicates...", e)
+        await _cleanup_guardian_duplicates()
+        try:
+            await _db.guardian.create_index("chat_id", unique=True)
+            log.info("[db] guardian index created after cleanup ✅")
+        except Exception as e2:
+            log.error("[db] guardian index still failed: %s", e2)
+
     await _db.clean.create_index("chat_id", unique=True)
-    await _db.cleanservice.create_index("chat_id", unique=True)
+
+    # ✅ SAFE: cleanservice index
+    try:
+        await _db.cleanservice.create_index("chat_id", unique=True)
+        log.info("[db] cleanservice index ready ✅")
+    except Exception as e:
+        log.warning("[db] cleanservice index creation failed (%s) — cleaning duplicates...", e)
+        await _cleanup_cleanservice_duplicates()
+        try:
+            await _db.cleanservice.create_index("chat_id", unique=True)
+            log.info("[db] cleanservice index created after cleanup ✅")
+        except Exception as e2:
+            log.error("[db] cleanservice index still failed: %s", e2)
+
     await _db.locks.create_index("chat_id", unique=True)
     log.info("MongoDB connected (db: %s)", name)
 
@@ -54,12 +79,46 @@ async def _cleanup_filters_duplicates():
         ]
         dupes = [doc async for doc in _db.filters.aggregate(pipeline)]
         for d in dupes:
-            keep = d["ids"][-1]              # newest doc
+            keep = d["ids"][-1]
             remove = d["ids"][:-1]
             await _db.filters.delete_many({"_id": {"$in": remove}})
             log.info("[db] filters: cleaned %d dupes for %s (kept %s)", len(remove), d["_id"], keep)
     except Exception as e:
         log.error("[db] filters cleanup failed: %s", e)
+
+
+async def _cleanup_guardian_duplicates():
+    """Keep only the newest doc per chat_id, delete the rest."""
+    try:
+        pipeline = [
+            {"$group": {"_id": "$chat_id", "ids": {"$push": "$_id"}, "count": {"$sum": 1}}},
+            {"$match": {"count": {"$gt": 1}}},
+        ]
+        dupes = [doc async for doc in _db.guardian.aggregate(pipeline)]
+        for d in dupes:
+            keep = d["ids"][-1]
+            remove = d["ids"][:-1]
+            await _db.guardian.delete_many({"_id": {"$in": remove}})
+            log.info("[db] guardian: cleaned %d dupes for chat_id=%s (kept %s)", len(remove), d["_id"], keep)
+    except Exception as e:
+        log.error("[db] guardian cleanup failed: %s", e)
+
+
+async def _cleanup_cleanservice_duplicates():
+    """Keep only the newest doc per chat_id, delete the rest."""
+    try:
+        pipeline = [
+            {"$group": {"_id": "$chat_id", "ids": {"$push": "$_id"}, "count": {"$sum": 1}}},
+            {"$match": {"count": {"$gt": 1}}},
+        ]
+        dupes = [doc async for doc in _db.cleanservice.aggregate(pipeline)]
+        for d in dupes:
+            keep = d["ids"][-1]
+            remove = d["ids"][:-1]
+            await _db.cleanservice.delete_many({"_id": {"$in": remove}})
+            log.info("[db] cleanservice: cleaned %d dupes for chat_id=%s (kept %s)", len(remove), d["_id"], keep)
+    except Exception as e:
+        log.error("[db] cleanservice cleanup failed: %s", e)
 
 
 async def cfg_get(chat_id: int) -> dict:
@@ -141,7 +200,6 @@ async def kang_set(user_id: int, name: str, count: int, part: int | None = None)
 # ─────────────── filters ───────────────
 
 async def filter_set(chat_id: int, keyword: str, data: dict):
-    """Type-safe filter save with logging and strict normalization."""
     if not isinstance(chat_id, int):
         try:
             chat_id = int(chat_id)
@@ -177,7 +235,6 @@ async def filter_set(chat_id: int, keyword: str, data: dict):
 
 
 async def filter_get(chat_id: int, keyword: str):
-    """Type-safe filter fetch."""
     if not isinstance(chat_id, int):
         try:
             chat_id = int(chat_id)
@@ -231,11 +288,53 @@ async def filter_count(chat_id: int) -> int:
     return await _db.filters.count_documents({"chat_id": chat_id})
 
 
+# ─────────────── guardian ───────────────
+
 async def guardian_get(chat_id: int) -> dict | None:
-    return await _db.guardian.find_one({"chat_id": chat_id})
+    """Fetch guardian config with strict chat_id type.
+    Always returns normalized int/bool fields so callers don't need to coerce."""
+    if not isinstance(chat_id, int):
+        try:
+            chat_id = int(chat_id)
+        except (TypeError, ValueError):
+            log.warning("[guardian_get] invalid chat_id: %r", chat_id)
+            return None
+
+    doc = await _db.guardian.find_one({"chat_id": chat_id})
+    if not doc:
+        return None
+
+    # Normalize numeric delay fields
+    for k in ("delay_seconds", "edit_delay_seconds", "media_delay_seconds"):
+        if k in doc and doc[k] is not None:
+            try:
+                doc[k] = int(doc[k])
+            except (TypeError, ValueError):
+                doc[k] = 0
+
+    # Normalize enabled flag
+    raw = doc.get("enabled")
+    if isinstance(raw, str):
+        doc["enabled"] = raw.strip().lower() in ("1", "true", "t", "on", "yes", "y")
+    elif raw is None:
+        doc["enabled"] = False
+    else:
+        doc["enabled"] = bool(raw)
+
+    return doc
+
 
 async def guardian_set(chat_id: int, delay_seconds: int | None = None, enabled: bool | None = None,
                        edit_delay_seconds: int | None = None, media_delay_seconds: int | None = None):
+    """Upsert guardian config with strict type normalization and logging.
+    Persists across restarts because every field is written to MongoDB."""
+    if not isinstance(chat_id, int):
+        try:
+            chat_id = int(chat_id)
+        except (TypeError, ValueError):
+            log.warning("[guardian_set] invalid chat_id: %r", chat_id)
+            return
+
     upd = {}
     if delay_seconds is not None:
         upd["delay_seconds"] = int(delay_seconds)
@@ -245,14 +344,40 @@ async def guardian_set(chat_id: int, delay_seconds: int | None = None, enabled: 
         upd["media_delay_seconds"] = int(media_delay_seconds)
     if enabled is not None:
         upd["enabled"] = bool(enabled)
-    if upd:
-        await _db.guardian.update_one({"chat_id": chat_id}, {"$set": upd}, upsert=True)
+
+    if not upd:
+        return
+
+    # Also re-write chat_id so any legacy string-typed docs get normalized
+    upd["chat_id"] = chat_id
+
+    result = await _db.guardian.update_one(
+        {"chat_id": chat_id},
+        {"$set": upd},
+        upsert=True,
+    )
+    log.info(
+        "[guardian_set] chat=%s fields=%s matched=%d modified=%d upserted=%s",
+        chat_id, list(upd.keys()), result.matched_count, result.modified_count,
+        bool(result.upserted_id),
+    )
+
 
 async def guardian_permit_add(chat_id: int, user_id: int, name: str):
+    if not isinstance(chat_id, int):
+        try:
+            chat_id = int(chat_id)
+        except (TypeError, ValueError):
+            return
     await _db.guardian.update_one({"chat_id": chat_id}, {"$pull": {"permitted_users": {"id": user_id}}})
     await _db.guardian.update_one({"chat_id": chat_id}, {"$push": {"permitted_users": {"id": user_id, "name": name}}}, upsert=True)
 
 async def guardian_permit_remove(chat_id: int, user_id: int) -> bool:
+    if not isinstance(chat_id, int):
+        try:
+            chat_id = int(chat_id)
+        except (TypeError, ValueError):
+            return False
     res = await _db.guardian.update_one({"chat_id": chat_id}, {"$pull": {"permitted_users": {"id": user_id}}})
     return res.modified_count > 0
 
@@ -267,8 +392,6 @@ async def clean_set(chat_id: int, enabled: bool, mode: str = "all"):
 # ─────────────── clean service (system messages) ───────────────
 
 async def cleanservice_get(chat_id: int) -> dict | None:
-    """Fetch cleanservice config. Always returns `enabled` as a strict bool.
-    Validates chat_id type so string/int mismatch can't create shadow docs."""
     if not isinstance(chat_id, int):
         try:
             chat_id = int(chat_id)
@@ -280,7 +403,6 @@ async def cleanservice_get(chat_id: int) -> dict | None:
     if not doc:
         return None
 
-    # Normalize: always a real Python bool, never int/str/None
     raw = doc.get("enabled")
     if isinstance(raw, str):
         doc["enabled"] = raw.strip().lower() in ("1", "true", "t", "on", "yes", "y")
@@ -290,8 +412,6 @@ async def cleanservice_get(chat_id: int) -> dict | None:
 
 
 async def cleanservice_set(chat_id: int, enabled: bool):
-    """Upsert cleanservice flag. Stores chat_id as int and enabled as strict bool.
-    Re-writes chat_id field so legacy string docs get normalized."""
     if not isinstance(chat_id, int):
         try:
             chat_id = int(chat_id)
@@ -299,7 +419,6 @@ async def cleanservice_set(chat_id: int, enabled: bool):
             log.warning("[cleanservice_set] invalid chat_id: %r", chat_id)
             return
 
-    # Normalize input to a real bool (handles "on"/"off"/1/0 etc.)
     if isinstance(enabled, str):
         value = enabled.strip().lower() in ("1", "true", "t", "on", "yes", "y")
     else:
