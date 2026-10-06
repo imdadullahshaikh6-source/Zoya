@@ -229,7 +229,7 @@ async def start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # ✅ NEW: Custom Emoji Animation Sequence (Only for plain /start)
     emoji_ids = [
-        "6172370910662628916",
+        "6170217276621465566",
         "5839324431972831360",
         "5839258615893987760",
         "5839197580113744758",
