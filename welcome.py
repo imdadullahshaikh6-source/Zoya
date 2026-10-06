@@ -8,7 +8,7 @@ Features:
 - Join request detection
 - Approved join request detection
 - Bot itself added detection
-- Optional welcome for other bots
+- ALL members (humans + bots) get welcome when welcome is ON
 - Clean welcome
 - Group rules
 - Admin permission checks
@@ -42,7 +42,6 @@ HELP_TXT = (
     "<b>✦ greetings — welcome system</b>\n\n"
     "/setwelcome (or .setwelcome) — reply to any message or type text after it\n"
     "/welcome — status + preview • /welcome on|off\n"
-    "/welcomebots on|off — welcome bots too\n"
     "/resetwelcome — back to default\n"
     "/cleanwelcome on|off — delete old welcome when a new member joins\n"
     "/setrules • /rules — group rules\n\n"
@@ -60,7 +59,6 @@ HELP_TXT = (
 COMMANDS = [
     ("setwelcome", "Set welcome message"),
     ("welcome", "Welcome status / on / off"),
-    ("welcomebots", "Welcome bots too on / off"),
     ("resetwelcome", "Reset welcome"),
     ("cleanwelcome", "Delete old welcome messages"),
     ("setrules", "Set group rules"),
@@ -457,7 +455,6 @@ async def welcome_cmd(update, ctx):
     status = T(
         "<b>welcome settings</b>\n"
         "welcome: {a}\n"
-        "welcome bots: {c}\n"
         "clean welcome: {b}\n"
         "message type: {t}",
         a=(
@@ -468,11 +465,6 @@ async def welcome_cmd(update, ctx):
         b=(
             "ON ✅"
             if cfg.get("clean_welcome")
-            else "OFF ❌"
-        ),
-        c=(
-            "ON ✅"
-            if cfg.get("welcome_bots")
             else "OFF ❌"
         ),
         t=w.get("type", "text"),
@@ -499,60 +491,6 @@ async def welcome_cmd(update, ctx):
             chat.id,
             T("preview failed:") + f" {esc(e)}",
         )
-
-
-# --------------------------------------------------
-# WELCOME BOTS TOGGLE
-# --------------------------------------------------
-
-async def welcomebots_cmd(update, ctx):
-    msg = update.message
-    chat = update.effective_chat
-
-    if not msg:
-        return
-
-    if not await require_admin(update, ctx, "change_info"):
-        return
-
-    arg = ctx.args[0].lower() if ctx.args else ""
-
-    cfg = await cfg_get(chat.id)
-
-    if arg not in ("on", "off", "yes", "no"):
-        cur = (
-            "ON ✅"
-            if cfg.get("welcome_bots")
-            else "OFF ❌"
-        )
-        await say(
-            ctx,
-            chat.id,
-            T(
-                "welcome bots is currently {c}.\n"
-                "usage: /welcomebots on|off",
-                c=cur,
-            ),
-            reply_to=msg.message_id,
-        )
-        return
-
-    val = arg in ("on", "yes")
-
-    await cfg_set(chat.id, welcome_bots=val)
-
-    await say(
-        ctx,
-        chat.id,
-        T(
-            "welcome bots is now {s}.",
-            s=(
-                "<b>ON ✅</b>"
-                if val else "<b>OFF ❌</b>"
-            ),
-        ),
-        reply_to=msg.message_id,
-    )
 
 
 # --------------------------------------------------
@@ -782,17 +720,12 @@ async def botperms_cmd(update, ctx):
 
 async def process_new_member(ctx, chat, user):
     """
-    Shared function for direct joins, manual admin adds,
-    link joins, approved requests, and (optionally) bots.
+    Shared function for every new member.
+    Welcomes humans AND bots (if welcome is ON).
     """
     from common import log
 
     cfg = await cfg_get(chat.id)
-
-    # Bots: only welcome if welcome_bots is ON
-    if user.is_bot and not cfg.get("welcome_bots", False):
-        log.info("Bot %s skipped (welcome_bots OFF)", user.id)
-        return
 
     if not cfg.get("welcome_on", True):
         log.info("Welcome disabled in chat %s", chat.id)
@@ -832,9 +765,10 @@ async def process_new_member(ctx, chat, user):
         )
 
         log.info(
-            "Welcome sent successfully: chat=%s user=%s",
+            "Welcome sent successfully: chat=%s user=%s (bot=%s)",
             chat.id,
             user.id,
+            user.is_bot,
         )
 
     except TelegramError as e:
@@ -884,7 +818,7 @@ async def on_join(update, ctx):
             )
             continue
 
-        # Handles both bots (if enabled) and humans
+        # Humans AND bots both go through welcome
         await process_new_member(
             ctx,
             chat,
@@ -1041,7 +975,6 @@ def register(app):
     )
 
     dual_command(app, "welcome", welcome_cmd)
-    dual_command(app, "welcomebots", welcomebots_cmd)
     dual_command(app, "resetwelcome", resetwelcome_cmd)
     dual_command(app, "cleanwelcome", cleanwelcome_cmd)
 
