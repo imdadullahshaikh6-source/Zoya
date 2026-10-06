@@ -161,7 +161,6 @@ def home_page(user, ctx):
 
 def main_page():
     text = sc("<b>✦ command</b>\n\nchoose a category to see all details.")
-    # ✅ Full layout with required colors and order (exactly as user requested)
     layout = [
         [("greet", "success"), ("admin", "primary")],
         [("afk", "success"), ("mod", "primary")],
@@ -225,9 +224,47 @@ async def start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(chat.id, f"<blockquote expandable>{text}</blockquote>", parse_mode=ParseMode.HTML, reply_markup=kb)
         return
 
+    # 🌟 Premium Custom Emojis Animation Sequence
+    emoji_ids = [
+        "6172370910662628916",
+        "5839324431972831360",
+        "5839258615893987760",
+        "5839197580113744758",
+        "5841653515428041932",
+        "5411439857002113489"
+    ]
+
+    sent_anim_msg = None
+    try:
+        # Pehli emoji ke sath message bhejo
+        first_emoji_tag = f'<emoji id="{emoji_ids[0]}">💎</emoji>'
+        sent_anim_msg = await ctx.bot.send_message(chat.id, first_emoji_tag, parse_mode=ParseMode.HTML)
+        
+        # Baaki emojis se ek-ek karke edit karo (animation effect ke liye chota delay)
+        for e_id in emoji_ids[1:]:
+            await asyncio.sleep(0.3)
+            try:
+                emoji_tag = f'<emoji id="{e_id}">💎</emoji>'
+                await ctx.bot.edit_message_text(chat.id, sent_anim_msg.message_id, text=emoji_tag, parse_mode=ParseMode.HTML)
+            except TelegramError:
+                pass
+        
+        # Thoda sa final pause animation ke baad
+        await asyncio.sleep(0.3)
+        # Animation message ko delete kar do taaki final photo aaraam se aaye
+        try:
+            await ctx.bot.delete_message(chat.id, sent_anim_msg.message_id)
+        except TelegramError:
+            pass
+    except TelegramError:
+        if sent_anim_msg:
+            try:
+                await ctx.bot.delete_message(chat.id, sent_anim_msg.message_id)
+            except TelegramError:
+                pass
+
     text, kb = home_page(user, ctx)
     try:
-        # ✅ UPDATED: Collapsible (expandable) blockquote
         await ctx.bot.send_photo(chat.id, START_IMG, caption=f"<blockquote expandable>{text}</blockquote>", parse_mode=ParseMode.HTML, reply_markup=kb)
     except TelegramError as e:
         log.warning("start image failed: %s", e)
@@ -357,3 +394,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+        
