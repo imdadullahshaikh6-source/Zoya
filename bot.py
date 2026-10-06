@@ -29,6 +29,7 @@ import lock
 import logs
 import pin
 import ping
+import pdebug      # ✅ NEW (.pdebug – purge diagnostics)
 import purge
 import sticker
 import welcome
@@ -388,6 +389,7 @@ def main():
     lock.register(app)
     logs.register(app)
     purge.register(app)
+    pdebug.register(app)         # ✅ NEW
 
     app.add_error_handler(on_error)
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
@@ -395,3 +397,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
