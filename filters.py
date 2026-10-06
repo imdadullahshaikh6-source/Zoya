@@ -160,9 +160,9 @@ async def filter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ✅ Verify the save actually persisted in MongoDB
     verify = await dbase.filter_get(chat.id, keyword)
     if verify:
-        await msg.reply_text(f"✅ Filter <b>{keyword}</b> saved with formatting and buttons.")
+        await msg.reply_text(f"<blockquote>✅ Filter <b>{keyword}</b> saved with formatting and buttons.</blockquote>")
     else:
-        await msg.reply_text(f"❌ Filter <b>{keyword}</b> could not be saved — check bot logs.")
+        await msg.reply_text(f"<blockquote>❌ Filter <b>{keyword}</b> could not be saved — check bot logs.</blockquote>")
 
 
 async def unfilter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -177,20 +177,21 @@ async def unfilter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     keyword = args[0].strip().lower()
     deleted = await dbase.filter_delete(chat.id, keyword)
     if deleted:
-        await msg.reply_text(f"🗑 Filter <b>{keyword}</b> removed.")
+        await msg.reply_text(f"<blockquote>🗑 Filter <b>{keyword}</b> removed.</blockquote>")
     else:
-        await msg.reply_text(f"❓ No filter named <b>{keyword}</b> in this chat.")
+        await msg.reply_text(f"<blockquote>❓ No filter named <b>{keyword}</b> in this chat.</blockquote>")
 
 
 async def list_filters_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg, chat = update.effective_message, update.effective_chat
     rows = await dbase.filter_list(chat.id)
     if not rows:
-        await msg.reply_text("No filters set in this chat yet.")
+        await msg.reply_text("<blockquote>No filters set in this chat yet.</blockquote>")
         return
     lines = [f"• <code>{r['keyword']}</code>  <i>({r.get('type', 'text')})</i>" for r in rows]
     header = f"<b>🔍 Filters in this chat — {len(rows)}</b>\n\n"
-    await msg.reply_text(header + "\n".join(lines))
+    text_body = "\n".join(lines)
+    await msg.reply_text(f"<blockquote>{header}{text_body}</blockquote>")
 
 
 async def stop_filters_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -200,9 +201,9 @@ async def stop_filters_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     n = await dbase.filter_delete_all(chat.id)
     if n:
-        await msg.reply_text(f"🗑 Deleted <b>{n}</b> filter(s) from this chat.")
+        await msg.reply_text(f"<blockquote>🗑 Deleted <b>{n}</b> filter(s) from this chat.</blockquote>")
     else:
-        await msg.reply_text("There were no filters to delete.")
+        await msg.reply_text("<blockquote>There were no filters to delete.</blockquote>")
 
 
 async def trigger_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
