@@ -20,42 +20,46 @@ async def init(uri: str, name: str):
     await _db.moderation.create_index([("chat_id", 1), ("user_id", 1)])
     await _db.warns.create_index([("chat_id", 1), ("user_id", 1)])
     await _db.members.create_index("chat_id")
-    await _db.filters.create_index([("chat_id", 1), ("keyword", 1)], unique=True)
+
+    # ✅ SAFE: filters index (handles existing duplicates gracefully)
+    try:
+        await _db.filters.create_index([("chat_id", 1), ("keyword", 1)], unique=True)
+        log.info("[db] filters index ready ✅")
+    except Exception as e:
+        log.warning("[db] filters index creation failed (%s) — cleaning duplicates...", e)
+        await _cleanup_filters_duplicates()
+        try:
+            await _db.filters.create_index([("chat_id", 1), ("keyword", 1)], unique=True)
+            log.info("[db] filters index created after cleanup ✅")
+        except Exception as e2:
+            log.error("[db] filters index still failed: %s", e2)
+
     await _db.guardian.create_index("chat_id", unique=True)
     await _db.clean.create_index("chat_id", unique=True)
-
-    # ✅ SAFE: cleanservice index (handles existing duplicates gracefully)
-    try:
-        await _db.cleanservice.create_index("chat_id", unique=True)
-        log.info("[db] cleanservice index ready ✅")
-    except Exception as e:
-        log.warning("[db] cleanservice index creation failed (%s) — cleaning duplicates...", e)
-        await _cleanup_cleanservice_duplicates()
-        try:
-            await _db.cleanservice.create_index("chat_id", unique=True)
-            log.info("[db] cleanservice index created after cleanup ✅")
-        except Exception as e2:
-            log.error("[db] cleanservice index still failed: %s", e2)
-
+    await _db.cleanservice.create_index("chat_id", unique=True)
     await _db.locks.create_index("chat_id", unique=True)
     log.info("MongoDB connected (db: %s)", name)
 
 
-async def _cleanup_cleanservice_duplicates():
-    """Keep only the newest doc per chat_id, delete the rest."""
+async def _cleanup_filters_duplicates():
+    """Keep only the newest doc per (chat_id, keyword), delete the rest."""
     try:
         pipeline = [
-            {"$group": {"_id": "$chat_id", "ids": {"$push": "$_id"}, "count": {"$sum": 1}}},
+            {"$group": {
+                "_id": {"chat_id": "$chat_id", "keyword": "$keyword"},
+                "ids": {"$push": "$_id"},
+                "count": {"$sum": 1},
+            }},
             {"$match": {"count": {"$gt": 1}}},
         ]
-        dupes = [doc async for doc in _db.cleanservice.aggregate(pipeline)]
+        dupes = [doc async for doc in _db.filters.aggregate(pipeline)]
         for d in dupes:
             keep = d["ids"][-1]              # newest doc
             remove = d["ids"][:-1]
-            await _db.cleanservice.delete_many({"_id": {"$in": remove}})
-            log.info("[db] cleanservice: cleaned %d dupes for chat_id=%s (kept %s)", len(remove), d["_id"], keep)
+            await _db.filters.delete_many({"_id": {"$in": remove}})
+            log.info("[db] filters: cleaned %d dupes for %s (kept %s)", len(remove), d["_id"], keep)
     except Exception as e:
-        log.error("[db] cleanservice cleanup failed: %s", e)
+        log.error("[db] filters cleanup failed: %s", e)
 
 
 async def cfg_get(chat_id: int) -> dict:
@@ -134,27 +138,96 @@ async def kang_set(user_id: int, name: str, count: int, part: int | None = None)
     await _db.kangs.update_one({"_id": user_id}, {"$set": fields}, upsert=True)
 
 
+# ─────────────── filters ───────────────
+
 async def filter_set(chat_id: int, keyword: str, data: dict):
-    keyword = keyword.lower()
-    doc = {"chat_id": chat_id, "keyword": keyword, "type": data.get("type", "text"), "content": data.get("content", ""), "caption": data.get("caption", ""), "buttons": data.get("buttons"), "set_by": data.get("set_by"), "since": time.time()}
-    await _db.filters.update_one({"chat_id": chat_id, "keyword": keyword}, {"$set": doc}, upsert=True)
+    """Type-safe filter save with logging and strict normalization."""
+    if not isinstance(chat_id, int):
+        try:
+            chat_id = int(chat_id)
+        except (TypeError, ValueError):
+            log.warning("[filter_set] invalid chat_id: %r", chat_id)
+            return
+
+    if not keyword:
+        log.warning("[filter_set] empty keyword for chat %s", chat_id)
+        return
+
+    keyword = keyword.lower().strip()
+    doc = {
+        "chat_id": chat_id,
+        "keyword": keyword,
+        "type": data.get("type", "text"),
+        "content": data.get("content", ""),
+        "caption": data.get("caption", ""),
+        "buttons": data.get("buttons"),
+        "set_by": data.get("set_by"),
+        "since": time.time(),
+    }
+    result = await _db.filters.update_one(
+        {"chat_id": chat_id, "keyword": keyword},
+        {"$set": doc},
+        upsert=True,
+    )
+    log.info(
+        "[filter_set] chat=%s keyword=%s matched=%d modified=%d upserted=%s",
+        chat_id, keyword, result.matched_count, result.modified_count,
+        bool(result.upserted_id),
+    )
+
 
 async def filter_get(chat_id: int, keyword: str):
-    return await _db.filters.find_one({"chat_id": chat_id, "keyword": keyword.lower()})
+    """Type-safe filter fetch."""
+    if not isinstance(chat_id, int):
+        try:
+            chat_id = int(chat_id)
+        except (TypeError, ValueError):
+            return None
+    return await _db.filters.find_one({
+        "chat_id": chat_id,
+        "keyword": keyword.lower().strip(),
+    })
+
 
 async def filter_delete(chat_id: int, keyword: str) -> int:
-    res = await _db.filters.delete_one({"chat_id": chat_id, "keyword": keyword.lower()})
+    if not isinstance(chat_id, int):
+        try:
+            chat_id = int(chat_id)
+        except (TypeError, ValueError):
+            return 0
+    res = await _db.filters.delete_one({
+        "chat_id": chat_id,
+        "keyword": keyword.lower().strip(),
+    })
     return res.deleted_count
 
+
 async def filter_delete_all(chat_id: int) -> int:
+    if not isinstance(chat_id, int):
+        try:
+            chat_id = int(chat_id)
+        except (TypeError, ValueError):
+            return 0
     res = await _db.filters.delete_many({"chat_id": chat_id})
     return res.deleted_count
 
+
 async def filter_list(chat_id: int):
+    if not isinstance(chat_id, int):
+        try:
+            chat_id = int(chat_id)
+        except (TypeError, ValueError):
+            return []
     cursor = _db.filters.find({"chat_id": chat_id}).sort("keyword", 1)
     return [doc async for doc in cursor]
 
+
 async def filter_count(chat_id: int) -> int:
+    if not isinstance(chat_id, int):
+        try:
+            chat_id = int(chat_id)
+        except (TypeError, ValueError):
+            return 0
     return await _db.filters.count_documents({"chat_id": chat_id})
 
 
