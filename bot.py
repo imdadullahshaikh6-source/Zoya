@@ -35,7 +35,11 @@ import welcome
 import mantion
 from common import B, T, log, mention, say, sc
 
-logging.basicConfig(format="%(asctime)s | %(levelname)s | %(name)s | %(message)s", level=logging.INFO)
+# ✅ LOGGING FIX: INFO se WARNING kar diya aur httpx/telegram ka spam band kiya
+logging.basicConfig(format="%(asctime)s | %(levelname)s | %(name)s | %(message)s", level=logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("aiofastnet").setLevel(logging.WARNING)
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 MONGO_URI = os.environ["MONGO_URI"]
@@ -395,4 +399,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
