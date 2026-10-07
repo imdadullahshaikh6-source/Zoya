@@ -53,12 +53,10 @@ COMMANDS = [
 
 
 # ─────────────────────────── STATE ───────────────────────────
-# (channel_id, message_id) -> timestamp  — messages awaiting forward
 _pending_setup: dict = {}
 
 
 def _cleanup_pending():
-    """Drop pending setups older than 30 min."""
     now = time.time()
     for k in list(_pending_setup.keys()):
         if now - _pending_setup[k] > 1800:
@@ -82,7 +80,6 @@ def _chat_line(chat) -> str:
 
 
 async def send_log(bot, chat_id: int, text: str):
-    """Send a log message to the channel linked to chat_id. Silent if none."""
     try:
         cfg = await dbase.logchannel_get(chat_id)
     except Exception as e:
@@ -102,7 +99,6 @@ async def send_log(bot, chat_id: int, text: str):
         log.warning("[logchannel] send to %s failed: %s", channel_id, e)
 
 
-# ─────────────────────────── PUBLIC API ───────────────────────────
 async def log_action(
     bot, chat_id: int, action: str, *,
     chat_title: str = "",
@@ -113,13 +109,6 @@ async def log_action(
     extra_lines: list | None = None,
     footer: str = "",
 ):
-    """
-    Public logging API. Any module can call this to log an action.
-
-    action: "BAN", "UNBAN", "MUTE", "UNMUTE", "WARN", "KICK",
-            "PROMOTE", "DEMOTE", "LOCK", "UNLOCK", "PIN", "APPROVE",
-            "JOINREQUEST", "FLOODACTION", "WELCOME", "JOIN", "LEAVE", etc.
-    """
     lines = [f"<b>#{action.upper()}:</b>"]
     if chat_title:
         lines.append(f"<b>Chat:</b> {_esc(chat_title)}")
@@ -142,17 +131,13 @@ async def log_action(
 
 # ─────────────────────────── COMMAND HANDLERS ───────────────────────────
 async def setlog_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
+    msg, chat = update.effective_message, update.effective_chat
+    if not msg or not chat:
+        return
 
     # ── Case 1: run in a channel ──
     if chat.type == ChatType.CHANNEL:
-        try:
-            m = await ctx.bot.get_chat_member(chat.id, user.id)
-        except TelegramError:
-            return
-        if m.status not in (ChatMemberStatus.OWNER, ChatMemberStatus.ADMINISTRATOR):
-            return
-
+        # Skip user admin check because channel posts don't carry user info properly
         try:
             bm = await ctx.bot.get_chat_member(chat.id, ctx.bot.id)
         except TelegramError:
@@ -161,11 +146,9 @@ async def setlog_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ctx.bot.send_message(
                 chat.id,
                 "⚠️ Make me an admin here first (with post rights), then try again.",
-                reply_to_message_id=msg.message_id,
             )
             return
 
-        # Send forwardable setup message
         setup_msg = await ctx.bot.send_message(
             chat.id,
             "<b>🔗 Log Channel Setup</b>\n\n"
@@ -188,11 +171,13 @@ async def setlog_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def unsetlog_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
+    msg, chat = update.effective_message, update.effective_chat
+    if not msg or not chat:
+        return
 
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
         try:
-            m = await ctx.bot.get_chat_member(chat.id, user.id)
+            m = await ctx.bot.get_chat_member(chat.id, update.effective_user.id)
         except TelegramError:
             return
         if m.status not in (ChatMemberStatus.OWNER, ChatMemberStatus.ADMINISTRATOR):
@@ -207,24 +192,20 @@ async def unsetlog_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if chat.type == ChatType.CHANNEL:
-        try:
-            m = await ctx.bot.get_chat_member(chat.id, user.id)
-        except TelegramError:
-            return
-        if m.status not in (ChatMemberStatus.OWNER, ChatMemberStatus.ADMINISTRATOR):
-            return
+        # In channels, just remove by channel ID
         n = await dbase.logchannel_unset_by_channel(chat.id)
         await ctx.bot.send_message(
             chat.id,
             f"✅ Removed log setup for <b>{n}</b> group(s).",
             parse_mode=ParseMode.HTML,
-            reply_to_message_id=msg.message_id,
         )
         return
 
 
 async def logchannel_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg, chat = update.effective_message, update.effective_chat
+    if not msg or not chat:
+        return
 
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
         cfg = await dbase.logchannel_get(chat.id)
@@ -254,7 +235,6 @@ async def logchannel_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ctx.bot.send_message(
                 chat.id,
                 "ℹ️ No groups are linked to this channel.",
-                reply_to_message_id=msg.message_id,
             )
             return
         lines = ["📋 <b>Groups linked to this channel:</b>", ""]
@@ -265,14 +245,12 @@ async def logchannel_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(
             chat.id, "\n".join(lines),
             parse_mode=ParseMode.HTML,
-            reply_to_message_id=msg.message_id,
         )
         return
 
 
 # ─────────────────────────── AUTO-LOGGERS ───────────────────────────
 async def _service_logger(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Auto-detect service messages (pin, photo, title, joins/leaves)."""
     msg = update.effective_message
     chat = update.effective_chat
     if not msg or not chat:
@@ -284,7 +262,6 @@ async def _service_logger(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not cfg or not cfg.get("channel_id"):
         return
 
-    # ── PIN ──
     if msg.pinned_message:
         actor = update.effective_user
         lines = [f"<b>#PIN:</b>", _chat_line(chat)]
@@ -294,7 +271,6 @@ async def _service_logger(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await send_log(ctx.bot, chat.id, "\n".join(lines))
         return
 
-    # ── PHOTO / BACKGROUND ──
     if msg.new_chat_photo or msg.delete_chat_photo or msg.chat_background_set:
         actor = update.effective_user
         lines = [f"<b>#PHOTO:</b>", _chat_line(chat)]
@@ -309,7 +285,6 @@ async def _service_logger(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await send_log(ctx.bot, chat.id, "\n".join(lines))
         return
 
-    # ── TITLE ──
     if msg.new_chat_title:
         actor = update.effective_user
         lines = [
@@ -322,7 +297,6 @@ async def _service_logger(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await send_log(ctx.bot, chat.id, "\n".join(lines))
         return
 
-    # ── JOIN (new members) ──
     if msg.new_chat_members:
         for u in msg.new_chat_members:
             if u.is_bot:
@@ -336,7 +310,6 @@ async def _service_logger(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await send_log(ctx.bot, chat.id, "\n".join(lines))
         return
 
-    # ── LEAVE ──
     if msg.left_chat_member:
         u = msg.left_chat_member
         lines = [
@@ -350,7 +323,6 @@ async def _service_logger(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def _chat_member_logger(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Auto-detect ban/unban/promote/demote/mute via chat_member updates."""
     cmu = update.chat_member
     if not cmu:
         return
@@ -363,7 +335,6 @@ async def _chat_member_logger(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     actor = cmu.from_user
-    # If the bot itself did the action, skip — the calling module logs it explicitly.
     if actor and actor.id == ctx.bot.id:
         return
 
@@ -377,49 +348,36 @@ async def _chat_member_logger(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_name = target.full_name
 
     lines = None
-    action = None
 
     old_s = old.status
     new_s = new.status
 
-    # BAN (kicked)
     if new_s == ChatMemberStatus.BANNED and old_s != ChatMemberStatus.BANNED:
-        action = "BAN"
         lines = [f"<b>#BAN:</b>", _chat_line(chat)]
         if admin_id: lines.append(_user_line("Admin", admin_id, admin_name))
         lines.append(_user_line("User", user_id, user_name))
         lines.append("Reason:")
-    # UNBAN
     elif old_s == ChatMemberStatus.BANNED and new_s != ChatMemberStatus.BANNED:
-        action = "UNBAN"
         lines = [f"<b>#UNBAN:</b>", _chat_line(chat)]
         if admin_id: lines.append(_user_line("Admin", admin_id, admin_name))
         lines.append(_user_line("User", user_id, user_name))
         lines.append("Reason:")
-    # PROMOTE
     elif old_s in (ChatMemberStatus.MEMBER, ChatMemberStatus.RESTRICTED) and new_s == ChatMemberStatus.ADMINISTRATOR:
-        action = "PROMOTE"
         lines = [f"<b>#PROMOTE:</b>", _chat_line(chat)]
         if admin_id: lines.append(_user_line("Admin", admin_id, admin_name))
         lines.append(_user_line("User", user_id, user_name))
         lines.append(f"{_esc(user_name)} was promoted to admin.")
-    # DEMOTE
     elif old_s == ChatMemberStatus.ADMINISTRATOR and new_s in (ChatMemberStatus.MEMBER, ChatMemberStatus.RESTRICTED):
-        action = "DEMOTE"
         lines = [f"<b>#DEMOTE:</b>", _chat_line(chat)]
         if admin_id: lines.append(_user_line("Admin", admin_id, admin_name))
         lines.append(_user_line("User", user_id, user_name))
         lines.append(f"{_esc(user_name)} was demoted.")
-    # MUTE (restricted with no send)
     elif new_s == ChatMemberStatus.RESTRICTED and not getattr(new, "can_send_messages", True) and old_s != ChatMemberStatus.RESTRICTED:
-        action = "MUTE"
         lines = [f"<b>#MUTE:</b>", _chat_line(chat)]
         if admin_id: lines.append(_user_line("Admin", admin_id, admin_name))
         lines.append(_user_line("User", user_id, user_name))
         lines.append("Reason:")
-    # UNMUTE
     elif old_s == ChatMemberStatus.RESTRICTED and new_s == ChatMemberStatus.MEMBER:
-        action = "UNMUTE"
         lines = [f"<b>#UNMUTE:</b>", _chat_line(chat)]
         if admin_id: lines.append(_user_line("Admin", admin_id, admin_name))
         lines.append(_user_line("User", user_id, user_name))
@@ -430,7 +388,6 @@ async def _chat_member_logger(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def _join_request_logger(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Auto-log chat join requests."""
     req = update.chat_join_request
     if not req:
         return
@@ -458,7 +415,6 @@ async def _join_request_logger(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def _forward_detector(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Detect forwarded setup message from a channel to a group."""
     msg = update.effective_message
     chat = update.effective_chat
     user = update.effective_user
@@ -474,7 +430,6 @@ async def _forward_detector(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if key not in _pending_setup:
         return
 
-    # Verify forwarder is admin in this group
     try:
         m = await ctx.bot.get_chat_member(chat.id, user.id)
     except TelegramError:
@@ -506,11 +461,26 @@ async def _forward_detector(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ─────────────────────────── REGISTER ───────────────────────────
 def register(app: Application):
+    # 1. Group & Private commands
     dual_command(app, "setlog", setlog_cmd)
     dual_command(app, "unsetlog", unsetlog_cmd)
     dual_command(app, "logchannel", logchannel_cmd)
 
-    # Service messages (pin/photo/title/join/leave)
+    # 2. Channel Post commands (since dual_command only handles Update.message)
+    app.add_handler(MessageHandler(
+        filters.UpdateType.CHANNEL_POST & filters.Regex(r"^[/\.]setlog(@\w+)?$"),
+        setlog_cmd
+    ), group=95)
+    app.add_handler(MessageHandler(
+        filters.UpdateType.CHANNEL_POST & filters.Regex(r"^[/\.]unsetlog(@\w+)?$"),
+        unsetlog_cmd
+    ), group=95)
+    app.add_handler(MessageHandler(
+        filters.UpdateType.CHANNEL_POST & filters.Regex(r"^[/\.]logchannel(@\w+)?$"),
+        logchannel_cmd
+    ), group=95)
+
+    # 3. Auto-loggers
     app.add_handler(
         MessageHandler(
             filters.StatusUpdate.ALL & filters.ChatType.GROUPS,
@@ -518,24 +488,18 @@ def register(app: Application):
         ),
         group=98,
     )
-
-    # Chat member changes (ban/promote/demote/mute)
     app.add_handler(
         ChatMemberHandler(_chat_member_logger, ChatMemberHandler.CHAT_MEMBER),
         group=99,
     )
-
-    # Join requests
     app.add_handler(
         ChatJoinRequestHandler(_join_request_logger),
         group=99,
     )
-
-    # Forward detection for /setlog setup
     app.add_handler(
         MessageHandler(
             filters.FORWARDED & filters.ChatType.GROUPS,
             _forward_detector,
         ),
         group=96,
-  )
+)
