@@ -79,6 +79,41 @@ def _chat_line(chat) -> str:
     return f"<b>Chat:</b> {_esc(chat.title) if chat.title else 'Unknown'}"
 
 
+def _msg_link(chat, message_id) -> str | None:
+    """Build a t.me message link for the given chat + message id.
+    Returns None if chat type can't produce a link (e.g. basic groups)."""
+    if not chat or not message_id:
+        return None
+    try:
+        # Public supergroup / channel with username
+        if getattr(chat, "username", None):
+            return f"https://t.me/{chat.username}/{message_id}"
+        # Private supergroup: chat_id = -100XXXXXXXXXX
+        cid = str(chat.id)
+        if cid.startswith("-100"):
+            short = cid[4:]
+            return f"https://t.me/c/{short}/{message_id}"
+    except Exception:
+        pass
+    return None
+
+
+def _msg_link_for_chat_id(chat_id: int, message_id: int, username: str | None = None) -> str | None:
+    """Build a t.me message link using raw chat_id when we don't have a Chat object."""
+    if not chat_id or not message_id:
+        return None
+    try:
+        if username:
+            return f"https://t.me/{username}/{message_id}"
+        cid = str(chat_id)
+        if cid.startswith("-100"):
+            short = cid[4:]
+            return f"https://t.me/c/{short}/{message_id}"
+    except Exception:
+        pass
+    return None
+
+
 async def send_log(bot, chat_id: int, text: str):
     try:
         cfg = await dbase.logchannel_get(chat_id)
@@ -135,7 +170,6 @@ async def setlog_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not msg or not chat:
         return
 
-    # ── Case 1: run in a channel ──
     if chat.type == ChatType.CHANNEL:
         try:
             bm = await ctx.bot.get_chat_member(chat.id, ctx.bot.id)
@@ -158,7 +192,6 @@ async def setlog_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         _pending_setup[(chat.id, setup_msg.message_id)] = time.time()
         return
 
-    # ── Case 2: run in a group ──
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
         await say(
             ctx, chat.id,
@@ -260,15 +293,22 @@ async def _service_logger(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not cfg or not cfg.get("channel_id"):
         return
 
+    # ── PIN: embed link of the pinned message inside the word "pinned" ──
     if msg.pinned_message:
         actor = update.effective_user
+        pinned_id = msg.pinned_message.message_id
+        link = _msg_link(chat, pinned_id)
         lines = [f"<b>#PIN:</b>", _chat_line(chat)]
         if actor and not actor.is_bot:
             lines.append(_user_line("Admin", actor.id, actor.full_name))
-        lines.append("A new message has been pinned.")
+        if link:
+            lines.append(f'A new message has been <a href="{link}">pinned</a>.')
+        else:
+            lines.append("A new message has been pinned.")
         await send_log(ctx.bot, chat.id, "\n".join(lines))
         return
 
+    # ── PHOTO / BACKGROUND ──
     if msg.new_chat_photo or msg.delete_chat_photo or msg.chat_background_set:
         actor = update.effective_user
         lines = [f"<b>#PHOTO:</b>", _chat_line(chat)]
@@ -283,6 +323,7 @@ async def _service_logger(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await send_log(ctx.bot, chat.id, "\n".join(lines))
         return
 
+    # ── TITLE ──
     if msg.new_chat_title:
         actor = update.effective_user
         lines = [
@@ -295,6 +336,7 @@ async def _service_logger(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await send_log(ctx.bot, chat.id, "\n".join(lines))
         return
 
+    # ── LEAVE ──
     if msg.left_chat_member:
         u = msg.left_chat_member
         lines = [
@@ -343,35 +385,35 @@ async def _chat_member_logger(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if admin_id: lines.append(_user_line("Admin", admin_id, admin_name))
         lines.append(_user_line("User", user_id, user_name))
         lines.append("Reason:")
-    
+
     # ── UNBAN ──
     elif old_s == ChatMemberStatus.BANNED and new_s != ChatMemberStatus.BANNED:
         lines = [f"<b>#UNBAN:</b>", _chat_line(chat)]
         if admin_id: lines.append(_user_line("Admin", admin_id, admin_name))
         lines.append(_user_line("User", user_id, user_name))
         lines.append("Reason:")
-    
+
     # ── PROMOTE ──
     elif old_s in (ChatMemberStatus.MEMBER, ChatMemberStatus.RESTRICTED) and new_s == ChatMemberStatus.ADMINISTRATOR:
         lines = [f"<b>#PROMOTE:</b>", _chat_line(chat)]
         if admin_id: lines.append(_user_line("Admin", admin_id, admin_name))
         lines.append(_user_line("User", user_id, user_name))
         lines.append(f"{_esc(user_name)} was promoted to admin.")
-    
+
     # ── DEMOTE ──
     elif old_s == ChatMemberStatus.ADMINISTRATOR and new_s in (ChatMemberStatus.MEMBER, ChatMemberStatus.RESTRICTED):
         lines = [f"<b>#DEMOTE:</b>", _chat_line(chat)]
         if admin_id: lines.append(_user_line("Admin", admin_id, admin_name))
         lines.append(_user_line("User", user_id, user_name))
         lines.append(f"{_esc(user_name)} was demoted.")
-    
+
     # ── MUTE ──
     elif new_s == ChatMemberStatus.RESTRICTED and not getattr(new, "can_send_messages", True) and old_s != ChatMemberStatus.RESTRICTED:
         lines = [f"<b>#MUTE:</b>", _chat_line(chat)]
         if admin_id: lines.append(_user_line("Admin", admin_id, admin_name))
         lines.append(_user_line("User", user_id, user_name))
         lines.append("Reason:")
-    
+
     # ── WELCOME (Join / Approve) ──
     elif new_s == ChatMemberStatus.MEMBER and old_s in (ChatMemberStatus.LEFT, ChatMemberStatus.RESTRICTED):
         lines = [f"<b>#WELCOME:</b>", _chat_line(chat)]
@@ -464,12 +506,10 @@ async def _forward_detector(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ─────────────────────────── REGISTER ───────────────────────────
 def register(app: Application):
-    # 1. Group & Private commands
     dual_command(app, "setlog", setlog_cmd)
     dual_command(app, "unsetlog", unsetlog_cmd)
     dual_command(app, "logchannel", logchannel_cmd)
 
-    # 2. Channel Post commands (since dual_command only handles Update.message)
     app.add_handler(MessageHandler(
         filters.UpdateType.CHANNEL_POST & filters.Regex(r"^[/\.]setlog(@\w+)?$"),
         setlog_cmd
@@ -483,7 +523,6 @@ def register(app: Application):
         logchannel_cmd
     ), group=95)
 
-    # 3. Auto-loggers
     app.add_handler(
         MessageHandler(
             filters.StatusUpdate.ALL & filters.ChatType.GROUPS,
@@ -505,4 +544,4 @@ def register(app: Application):
             _forward_detector,
         ),
         group=96,
-     )
+                                   )
