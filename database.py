@@ -34,7 +34,7 @@ async def init(uri: str, name: str):
         except Exception as e2:
             log.error("[db] filters index still failed: %s", e2)
 
-    # ✅ SAFE: guardian index (handles existing duplicates gracefully)
+    # ✅ SAFE: guardian index
     try:
         await _db.guardian.create_index("chat_id", unique=True)
         log.info("[db] guardian index ready ✅")
@@ -63,18 +63,21 @@ async def init(uri: str, name: str):
             log.error("[db] cleanservice index still failed: %s", e2)
 
     await _db.locks.create_index("chat_id", unique=True)
+
+    # ✅ NEW: logchannels index
+    try:
+        await _db.logchannels.create_index("chat_id", unique=True)
+        log.info("[db] logchannels index ready ✅")
+    except Exception as e:
+        log.warning("[db] logchannels index creation failed: %s", e)
+
     log.info("MongoDB connected (db: %s)", name)
 
 
 async def _cleanup_filters_duplicates():
-    """Keep only the newest doc per (chat_id, keyword), delete the rest."""
     try:
         pipeline = [
-            {"$group": {
-                "_id": {"chat_id": "$chat_id", "keyword": "$keyword"},
-                "ids": {"$push": "$_id"},
-                "count": {"$sum": 1},
-            }},
+            {"$group": {"_id": {"chat_id": "$chat_id", "keyword": "$keyword"}, "ids": {"$push": "$_id"}, "count": {"$sum": 1}}},
             {"$match": {"count": {"$gt": 1}}},
         ]
         dupes = [doc async for doc in _db.filters.aggregate(pipeline)]
@@ -88,7 +91,6 @@ async def _cleanup_filters_duplicates():
 
 
 async def _cleanup_guardian_duplicates():
-    """Keep only the newest doc per chat_id, delete the rest."""
     try:
         pipeline = [
             {"$group": {"_id": "$chat_id", "ids": {"$push": "$_id"}, "count": {"$sum": 1}}},
@@ -105,7 +107,6 @@ async def _cleanup_guardian_duplicates():
 
 
 async def _cleanup_cleanservice_duplicates():
-    """Keep only the newest doc per chat_id, delete the rest."""
     try:
         pipeline = [
             {"$group": {"_id": "$chat_id", "ids": {"$push": "$_id"}, "count": {"$sum": 1}}},
@@ -201,183 +202,97 @@ async def kang_set(user_id: int, name: str, count: int, part: int | None = None)
 
 async def filter_set(chat_id: int, keyword: str, data: dict):
     if not isinstance(chat_id, int):
-        try:
-            chat_id = int(chat_id)
-        except (TypeError, ValueError):
-            log.warning("[filter_set] invalid chat_id: %r", chat_id)
-            return
-
-    if not keyword:
-        log.warning("[filter_set] empty keyword for chat %s", chat_id)
-        return
-
+        try: chat_id = int(chat_id)
+        except (TypeError, ValueError): return
+    if not keyword: return
     keyword = keyword.lower().strip()
-    doc = {
-        "chat_id": chat_id,
-        "keyword": keyword,
-        "type": data.get("type", "text"),
-        "content": data.get("content", ""),
-        "caption": data.get("caption", ""),
-        "buttons": data.get("buttons"),
-        "set_by": data.get("set_by"),
-        "since": time.time(),
-    }
-    result = await _db.filters.update_one(
-        {"chat_id": chat_id, "keyword": keyword},
-        {"$set": doc},
-        upsert=True,
-    )
-    log.info(
-        "[filter_set] chat=%s keyword=%s matched=%d modified=%d upserted=%s",
-        chat_id, keyword, result.matched_count, result.modified_count,
-        bool(result.upserted_id),
-    )
+    doc = {"chat_id": chat_id, "keyword": keyword, "type": data.get("type", "text"), "content": data.get("content", ""), "caption": data.get("caption", ""), "buttons": data.get("buttons"), "set_by": data.get("set_by"), "since": time.time()}
+    await _db.filters.update_one({"chat_id": chat_id, "keyword": keyword}, {"$set": doc}, upsert=True)
 
 
 async def filter_get(chat_id: int, keyword: str):
     if not isinstance(chat_id, int):
-        try:
-            chat_id = int(chat_id)
-        except (TypeError, ValueError):
-            return None
-    return await _db.filters.find_one({
-        "chat_id": chat_id,
-        "keyword": keyword.lower().strip(),
-    })
+        try: chat_id = int(chat_id)
+        except (TypeError, ValueError): return None
+    return await _db.filters.find_one({"chat_id": chat_id, "keyword": keyword.lower().strip()})
 
 
 async def filter_delete(chat_id: int, keyword: str) -> int:
     if not isinstance(chat_id, int):
-        try:
-            chat_id = int(chat_id)
-        except (TypeError, ValueError):
-            return 0
-    res = await _db.filters.delete_one({
-        "chat_id": chat_id,
-        "keyword": keyword.lower().strip(),
-    })
+        try: chat_id = int(chat_id)
+        except (TypeError, ValueError): return 0
+    res = await _db.filters.delete_one({"chat_id": chat_id, "keyword": keyword.lower().strip()})
     return res.deleted_count
 
 
 async def filter_delete_all(chat_id: int) -> int:
     if not isinstance(chat_id, int):
-        try:
-            chat_id = int(chat_id)
-        except (TypeError, ValueError):
-            return 0
+        try: chat_id = int(chat_id)
+        except (TypeError, ValueError): return 0
     res = await _db.filters.delete_many({"chat_id": chat_id})
     return res.deleted_count
 
 
 async def filter_list(chat_id: int):
     if not isinstance(chat_id, int):
-        try:
-            chat_id = int(chat_id)
-        except (TypeError, ValueError):
-            return []
+        try: chat_id = int(chat_id)
+        except (TypeError, ValueError): return []
     cursor = _db.filters.find({"chat_id": chat_id}).sort("keyword", 1)
     return [doc async for doc in cursor]
 
 
 async def filter_count(chat_id: int) -> int:
     if not isinstance(chat_id, int):
-        try:
-            chat_id = int(chat_id)
-        except (TypeError, ValueError):
-            return 0
+        try: chat_id = int(chat_id)
+        except (TypeError, ValueError): return 0
     return await _db.filters.count_documents({"chat_id": chat_id})
 
 
 # ─────────────── guardian ───────────────
 
 async def guardian_get(chat_id: int) -> dict | None:
-    """Fetch guardian config with strict chat_id type.
-    Always returns normalized int/bool fields so callers don't need to coerce."""
     if not isinstance(chat_id, int):
-        try:
-            chat_id = int(chat_id)
-        except (TypeError, ValueError):
-            log.warning("[guardian_get] invalid chat_id: %r", chat_id)
-            return None
-
+        try: chat_id = int(chat_id)
+        except (TypeError, ValueError): return None
     doc = await _db.guardian.find_one({"chat_id": chat_id})
-    if not doc:
-        return None
-
-    # Normalize numeric delay fields
+    if not doc: return None
     for k in ("delay_seconds", "edit_delay_seconds", "media_delay_seconds"):
         if k in doc and doc[k] is not None:
-            try:
-                doc[k] = int(doc[k])
-            except (TypeError, ValueError):
-                doc[k] = 0
-
-    # Normalize enabled flag
+            try: doc[k] = int(doc[k])
+            except (TypeError, ValueError): doc[k] = 0
     raw = doc.get("enabled")
-    if isinstance(raw, str):
-        doc["enabled"] = raw.strip().lower() in ("1", "true", "t", "on", "yes", "y")
-    elif raw is None:
-        doc["enabled"] = False
-    else:
-        doc["enabled"] = bool(raw)
-
+    if isinstance(raw, str): doc["enabled"] = raw.strip().lower() in ("1", "true", "t", "on", "yes", "y")
+    elif raw is None: doc["enabled"] = False
+    else: doc["enabled"] = bool(raw)
     return doc
 
 
 async def guardian_set(chat_id: int, delay_seconds: int | None = None, enabled: bool | None = None,
                        edit_delay_seconds: int | None = None, media_delay_seconds: int | None = None):
-    """Upsert guardian config with strict type normalization and logging.
-    Persists across restarts because every field is written to MongoDB."""
     if not isinstance(chat_id, int):
-        try:
-            chat_id = int(chat_id)
-        except (TypeError, ValueError):
-            log.warning("[guardian_set] invalid chat_id: %r", chat_id)
-            return
-
+        try: chat_id = int(chat_id)
+        except (TypeError, ValueError): return
     upd = {}
-    if delay_seconds is not None:
-        upd["delay_seconds"] = int(delay_seconds)
-    if edit_delay_seconds is not None:
-        upd["edit_delay_seconds"] = int(edit_delay_seconds)
-    if media_delay_seconds is not None:
-        upd["media_delay_seconds"] = int(media_delay_seconds)
-    if enabled is not None:
-        upd["enabled"] = bool(enabled)
-
-    if not upd:
-        return
-
-    # Also re-write chat_id so any legacy string-typed docs get normalized
+    if delay_seconds is not None: upd["delay_seconds"] = int(delay_seconds)
+    if edit_delay_seconds is not None: upd["edit_delay_seconds"] = int(edit_delay_seconds)
+    if media_delay_seconds is not None: upd["media_delay_seconds"] = int(media_delay_seconds)
+    if enabled is not None: upd["enabled"] = bool(enabled)
+    if not upd: return
     upd["chat_id"] = chat_id
-
-    result = await _db.guardian.update_one(
-        {"chat_id": chat_id},
-        {"$set": upd},
-        upsert=True,
-    )
-    log.info(
-        "[guardian_set] chat=%s fields=%s matched=%d modified=%d upserted=%s",
-        chat_id, list(upd.keys()), result.matched_count, result.modified_count,
-        bool(result.upserted_id),
-    )
+    await _db.guardian.update_one({"chat_id": chat_id}, {"$set": upd}, upsert=True)
 
 
 async def guardian_permit_add(chat_id: int, user_id: int, name: str):
     if not isinstance(chat_id, int):
-        try:
-            chat_id = int(chat_id)
-        except (TypeError, ValueError):
-            return
+        try: chat_id = int(chat_id)
+        except (TypeError, ValueError): return
     await _db.guardian.update_one({"chat_id": chat_id}, {"$pull": {"permitted_users": {"id": user_id}}})
     await _db.guardian.update_one({"chat_id": chat_id}, {"$push": {"permitted_users": {"id": user_id, "name": name}}}, upsert=True)
 
 async def guardian_permit_remove(chat_id: int, user_id: int) -> bool:
     if not isinstance(chat_id, int):
-        try:
-            chat_id = int(chat_id)
-        except (TypeError, ValueError):
-            return False
+        try: chat_id = int(chat_id)
+        except (TypeError, ValueError): return False
     res = await _db.guardian.update_one({"chat_id": chat_id}, {"$pull": {"permitted_users": {"id": user_id}}})
     return res.modified_count > 0
 
@@ -389,51 +304,27 @@ async def clean_set(chat_id: int, enabled: bool, mode: str = "all"):
     await _db.clean.update_one({"chat_id": chat_id}, {"$set": {"enabled": bool(enabled), "mode": mode}}, upsert=True)
 
 
-# ─────────────── clean service (system messages) ───────────────
+# ─────────────── cleanservice ───────────────
 
 async def cleanservice_get(chat_id: int) -> dict | None:
     if not isinstance(chat_id, int):
-        try:
-            chat_id = int(chat_id)
-        except (TypeError, ValueError):
-            log.warning("[cleanservice_get] invalid chat_id: %r", chat_id)
-            return None
-
+        try: chat_id = int(chat_id)
+        except (TypeError, ValueError): return None
     doc = await _db.cleanservice.find_one({"chat_id": chat_id})
-    if not doc:
-        return None
-
+    if not doc: return None
     raw = doc.get("enabled")
-    if isinstance(raw, str):
-        doc["enabled"] = raw.strip().lower() in ("1", "true", "t", "on", "yes", "y")
-    else:
-        doc["enabled"] = bool(raw)
+    if isinstance(raw, str): doc["enabled"] = raw.strip().lower() in ("1", "true", "t", "on", "yes", "y")
+    else: doc["enabled"] = bool(raw)
     return doc
 
 
 async def cleanservice_set(chat_id: int, enabled: bool):
     if not isinstance(chat_id, int):
-        try:
-            chat_id = int(chat_id)
-        except (TypeError, ValueError):
-            log.warning("[cleanservice_set] invalid chat_id: %r", chat_id)
-            return
-
-    if isinstance(enabled, str):
-        value = enabled.strip().lower() in ("1", "true", "t", "on", "yes", "y")
-    else:
-        value = bool(enabled)
-
-    result = await _db.cleanservice.update_one(
-        {"chat_id": chat_id},
-        {"$set": {"chat_id": chat_id, "enabled": value}},
-        upsert=True,
-    )
-    log.info(
-        "[cleanservice_set] chat=%s enabled=%s matched=%d modified=%d upserted=%s",
-        chat_id, value, result.matched_count, result.modified_count,
-        bool(result.upserted_id),
-    )
+        try: chat_id = int(chat_id)
+        except (TypeError, ValueError): return
+    if isinstance(enabled, str): value = enabled.strip().lower() in ("1", "true", "t", "on", "yes", "y")
+    else: value = bool(enabled)
+    await _db.cleanservice.update_one({"chat_id": chat_id}, {"$set": {"chat_id": chat_id, "enabled": value}}, upsert=True)
 
 
 # ───────── locks + approved users ─────────
@@ -441,11 +332,7 @@ async def locks_get(chat_id: int) -> dict:
     doc = await _db.locks.find_one({"chat_id": chat_id}) or {}
     approved_raw = doc.get("approved", [])
     approved = {u["id"]: u.get("name", "User") for u in approved_raw}
-    return {
-        "locks": set(doc.get("locks", [])),
-        "unlocks": set(doc.get("unlocks", [])),
-        "approved": approved,
-    }
+    return {"locks": set(doc.get("locks", [])), "unlocks": set(doc.get("unlocks", [])), "approved": approved}
 
 async def locks_set_locks(chat_id: int, locks: set):
     await _db.locks.update_one({"chat_id": chat_id}, {"$set": {"locks": list(locks)}}, upsert=True)
@@ -464,3 +351,62 @@ async def approved_remove(chat_id: int, user_id: int) -> bool:
 async def approved_list(chat_id: int) -> dict:
     doc = await _db.locks.find_one({"chat_id": chat_id}) or {}
     return {u["id"]: u.get("name", "User") for u in doc.get("approved", [])}
+
+
+# ─────────────── logchannel (NEW) ───────────────
+
+async def logchannel_set(chat_id: int, channel_id: int, channel_name: str, set_by: int):
+    """Save log-channel mapping for a group."""
+    if not isinstance(chat_id, int):
+        try: chat_id = int(chat_id)
+        except (TypeError, ValueError): return
+    if not isinstance(channel_id, int):
+        try: channel_id = int(channel_id)
+        except (TypeError, ValueError): return
+    await _db.logchannels.update_one(
+        {"chat_id": chat_id},
+        {"$set": {
+            "chat_id": chat_id,
+            "channel_id": channel_id,
+            "channel_name": channel_name or "Log Channel",
+            "set_by": set_by,
+            "since": time.time(),
+        }},
+        upsert=True,
+    )
+    log.info("[logchannel] set chat=%s -> channel=%s (%s)", chat_id, channel_id, channel_name)
+
+
+async def logchannel_get(chat_id: int) -> dict | None:
+    """Get log-channel config for a group."""
+    if not isinstance(chat_id, int):
+        try: chat_id = int(chat_id)
+        except (TypeError, ValueError): return None
+    return await _db.logchannels.find_one({"chat_id": chat_id})
+
+
+async def logchannel_unset(chat_id: int) -> bool:
+    """Remove log-channel mapping for a group."""
+    if not isinstance(chat_id, int):
+        try: chat_id = int(chat_id)
+        except (TypeError, ValueError): return False
+    res = await _db.logchannels.delete_one({"chat_id": chat_id})
+    return res.deleted_count > 0
+
+
+async def logchannel_unset_by_channel(channel_id: int) -> int:
+    """Remove all mappings pointing to a channel. Returns count."""
+    if not isinstance(channel_id, int):
+        try: channel_id = int(channel_id)
+        except (TypeError, ValueError): return 0
+    res = await _db.logchannels.delete_many({"channel_id": channel_id})
+    return res.deleted_count
+
+
+async def logchannel_groups_for_channel(channel_id: int) -> list:
+    """Get all groups linked to a channel."""
+    if not isinstance(channel_id, int):
+        try: channel_id = int(channel_id)
+        except (TypeError, ValueError): return []
+    cursor = _db.logchannels.find({"channel_id": channel_id})
+    return [doc async for doc in cursor]
