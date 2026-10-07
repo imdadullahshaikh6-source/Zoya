@@ -1,14 +1,15 @@
 """Admin plugin: /promote and /demote with a live power-selection panel."""
 from collections import OrderedDict
+import inspect
 
-from telegram import InlineKeyboardMarkup, ReplyParameters
+from telegram import InlineKeyboardMarkup, ReplyParameters, Bot
 from telegram.constants import ChatMemberStatus, ChatType, ParseMode
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import CallbackQueryHandler
 
 import logchannel
 from common import (
-    ADMIN, B, OWNER, RIGHTS, RL, T, dual_command, esc, explain, get_member,
+    ADMIN, B, OWNER, T, dual_command, esc, explain, get_member,
     mention, q, require_admin, resolve_target, rights_of, say, tag_missing,
 )
 
@@ -21,22 +22,74 @@ ANON_ADMIN_ID = 1087968824
 HELP_TXT = (
     "<b>✦ admin — promote &amp; demote</b>\n\n"
     "/promote (or .promote) — reply / @username / id (+ optional custom title). "
-    "a panel opens: tap ✅ / ❌ to choose powers, ⚡ full power, then ✅ promote.\n"
+    "a panel opens with paginated buttons: tap 🟢/🔴 to toggle each power, "
+    "⬅️/➡️ to change pages, ✨ Confirm to promote.\n"
     "/demote (or .demote) — removes all admin powers after confirmation\n\n"
-    "every action is verified: you need add admins, and i must have it too — plus every power i give. "
-    "if i lack something i tag you and say so. 🔒 buttons = powers i don't have."
+    "every action is verified: you need add admins, and i must have it too. "
+    "🔒 buttons = powers i don't have."
 )
 
 COMMANDS = [("promote", "Promote a user"), ("demote", "Demote an admin")]
 
 PANELS: "OrderedDict[str, dict]" = OrderedDict()
-ANON_PENDING = {}  # Anonymous verification pending actions
+ANON_PENDING = {}
 
-# How many permission buttons per page
+# ── Permission buttons per page ──
 PER_PAGE = 4
 
 
-# ───────────────────── FANCY FONT CONVERTER ─────────────────────
+# ───────────────────── EXTENDED RIGHTS ─────────────────────
+# (key, fancy_label, [api_param_names])
+_ALL_RIGHTS = [
+    ("change_info", "Change Group Info", ["can_change_info"]),
+    ("delete_messages", "Delete Messages", ["can_delete_messages"]),
+    ("restrict_members", "Ban Users", ["can_restrict_members"]),
+    ("invite_users", "Add Users", ["can_invite_users"]),
+    ("pin_messages", "Pin Messages", ["can_pin_messages"]),
+    ("manage_tags", "Edit Member Tags", ["can_manage_tags"]),
+    ("stories", "Manage Stories", ["can_post_stories", "can_edit_stories", "can_delete_stories"]),
+    ("send_welcome", "Send Welcome Messages", ["can_send_welcome_messages"]),
+    ("manage_live_streams", "Manage Live Streams", ["can_manage_live_streams"]),
+    ("promote_members", "Add New Admins", ["can_promote_members"]),
+    ("manage_video_chats", "Manage Video Chats", ["can_manage_video_chats"]),
+    ("manage_topics", "Manage Topics", ["can_manage_topics"]),
+    ("anonymous", "Remain Anonymous", ["is_anonymous"]),
+]
+
+
+def _has_all(member, params):
+    """True only if member has ALL the api params set."""
+    try:
+        return all(bool(getattr(member, p, False)) for p in params)
+    except Exception:
+        return False
+
+
+def _valid_promote_params():
+    """Return set of parameters supported by promote_chat_member."""
+    try:
+        sig = inspect.signature(Bot.promote_chat_member)
+        params = set(sig.parameters.keys())
+        # If method uses **kwargs (VAR_KEYWORD), assume all params are passable
+        for p in sig.parameters.values():
+            if p.kind == inspect.Parameter.VAR_KEYWORD:
+                return None  # None = don't filter
+        return params
+    except Exception:
+        return None
+
+
+_VALID_PARAMS = _valid_promote_params()
+
+
+def _filter_kwargs(kw):
+    """Strip kwargs that the library doesn't accept."""
+    if _VALID_PARAMS is None:
+        return dict(kw)
+    return {k: v for k, v in kw.items() if k in _VALID_PARAMS}
+
+
+# ───────────────────── FANCY FONT ─────────────────────
 _FANCY_MAP = {}
 for _n, _f in zip("abcdefghijklmnopqrstuvwxyz",
                   "𝙖𝙗𝙘𝙙𝙚𝙛𝙜𝙝𝙞𝙟𝙠𝙡𝙢𝙣𝙤𝙥𝙦𝙧𝙨𝙩𝙪𝙫𝙬𝙭𝙮𝙯"):
@@ -47,7 +100,6 @@ for _n, _f in zip("ABCDEFGHIJKLMNOPQRSTUVWXYZ",
 
 
 def _fancy(s: str) -> str:
-    """Convert string to bold-italic sans-serif unicode (𝙘𝙝𝙖𝙣𝙜𝙚 𝙞𝙣𝙛𝙤 style)."""
     if not s:
         return ""
     return "".join(_FANCY_MAP.get(c, c) for c in s)
@@ -86,7 +138,6 @@ async def _precheck(update, ctx, mode: str):
         await say(ctx, chat.id, T("/promote and /demote work inside groups. add me to your group and make me admin."), kb=kb)
         return None
 
-    # 🔹 Anonymous Admin Detection
     if user.id == ANON_ADMIN_ID:
         target, title = await resolve_target(update, ctx)
         if not target:
@@ -95,12 +146,9 @@ async def _precheck(update, ctx, mode: str):
 
         action_id = f"anon_{mode}_{chat.id}_{msg.message_id}"
         ANON_PENDING[action_id] = {
-            "mode": mode,
-            "chat_id": chat.id,
-            "target_id": target.id,
-            "target_name": target.first_name,
-            "title": title[:16] if title else "",
-            "invoker_msg_id": msg.message_id
+            "mode": mode, "chat_id": chat.id, "target_id": target.id,
+            "target_name": target.first_name, "title": title[:16] if title else "",
+            "invoker_msg_id": msg.message_id,
         }
 
         kb = InlineKeyboardMarkup([[B("𝙥𝙧𝙤𝙫𝙚 𝙊𝙬𝙣𝙚𝙧/𝙖𝙙𝙢𝙞𝙣", action_id, style="success")]])
@@ -108,7 +156,7 @@ async def _precheck(update, ctx, mode: str):
             chat.id,
             q(T("<b>⚠️ Anonymous Admin detected.</b>\n"
                 "Only the real group owner can approve this. "
-                "Please tap the button below to verify.")),
+                "Tap the button below to verify.")),
             parse_mode=ParseMode.HTML,
             reply_to_message_id=msg.message_id,
             reply_markup=kb,
@@ -129,9 +177,10 @@ async def _precheck(update, ctx, mode: str):
         return None
     bm = await get_member(ctx, chat.id, ctx.bot.id)
     br = rights_of(bm)
-    if not br["promote_members"]:
+    if not br.get("promote_members"):
         if not bm or bm.status not in (ADMIN, OWNER):
-            await say(ctx, chat.id, T("{m}, i am not an admin here. make me admin with the {l} power first.", m=mention(user), l="<b>Add New Admins</b>"), reply_to=msg.message_id)
+            await say(ctx, chat.id, T("{m}, i am not an admin here. make me admin with the {l} power first.",
+                                      m=mention(user), l="<b>Add New Admins</b>"), reply_to=msg.message_id)
         else:
             await tag_missing(ctx, chat.id, user, ["Add New Admins"], msg.message_id)
         return None
@@ -143,28 +192,41 @@ async def _precheck(update, ctx, mode: str):
         await say(ctx, chat.id, T("that user is the group owner. nothing can be changed."), reply_to=msg.message_id)
         return None
     if tm.status == ADMIN and not tm.can_be_edited:
-        await say(ctx, chat.id, T("{m} is an admin promoted by someone else, so i can't edit their powers. only that admin or the owner can.", m=mention(target)), reply_to=msg.message_id)
+        await say(ctx, chat.id, T("{m} is an admin promoted by someone else, so i can't edit their powers. only that admin or the owner can.",
+                                  m=mention(target)), reply_to=msg.message_id)
         return None
     if mode == "demote" and tm.status != ADMIN:
         await say(ctx, chat.id, T("{m} is not an admin.", m=mention(target)), reply_to=msg.message_id)
         return None
-    return dict(chat=chat, user=user, target=target, title=title[:16], tm=tm, br=br, msg=msg)
+    return dict(chat=chat, user=user, target=target, title=title[:16], tm=tm, br=br, msg=msg, bot_member=bm)
 
 
-# ───────────────────── PANEL BUILDERS ─────────────────────
+# ───────────────────── PANEL ITEMS ─────────────────────
 
-def _all_items(st):
-    """Return list of (key, label) including anonymous."""
-    items = list(st["rights_list"])
-    items.append(("anonymous", "Anonymous"))
+def _build_items(st):
+    """Return list of (key, fancy_label, params, bot_has) for all items."""
+    items = []
+    forum = st.get("forum", False)
+    bm = st["bot_member"]
+
+    for key, label, params in _ALL_RIGHTS:
+        # topics only for forum
+        if key == "manage_topics" and not forum:
+            continue
+        # video chats irrelevant for forums
+        if key == "manage_video_chats" and forum:
+            # still show, since forum supergroups can have video chats
+            pass
+        bot_has = _has_all(bm, params)
+        items.append((key, label, params, bot_has))
     return items
 
 
 def _panel_text(st) -> str:
-    items = _all_items(st)
+    items = _build_items(st)
     total_pages = max(1, (len(items) + PER_PAGE - 1) // PER_PAGE)
     page = st.get("page", 0)
-    selected = sum(1 for k, _ in items if st["sel"].get(k))
+    selected = sum(1 for k, _, _, _ in items if st["sel"].get(k))
 
     lines = [
         T("<b>✦ 𝙋𝙧𝙤𝙢𝙤𝙩𝙚 𝙎𝙚𝙩𝙪𝙥</b>"),
@@ -175,15 +237,15 @@ def _panel_text(st) -> str:
         lines.append("🏷 " + T("Title: ") + f"<b>{esc(st['title'])}</b>")
     lines.append(f"📄 {_fancy('Page')}: <b>{page + 1}/{total_pages}</b>")
     lines.append(f"✅ {_fancy('Selected Rights')}: <b>{selected}</b>")
-    if st["missing"]:
+    missing_labels = [label for _, label, _, bot_has in items if not bot_has]
+    if missing_labels:
         lines += ["", T("{m}, i don't have: {l}. those buttons are locked 🔒",
-                        m=st["inv_m"],
-                        l="<b>" + esc(", ".join(st["missing"])) + "</b>")]
+                        m=st["inv_m"], l="<b>" + esc(", ".join(missing_labels)) + "</b>")]
     return "\n".join(lines)
 
 
 def _panel_kb(st):
-    items = _all_items(st)
+    items = _build_items(st)
     total_pages = max(1, (len(items) + PER_PAGE - 1) // PER_PAGE)
     page = st.get("page", 0)
     start = page * PER_PAGE
@@ -191,17 +253,20 @@ def _panel_kb(st):
     page_items = items[start:end]
 
     btns = []
-    for k, label in page_items:
-        on = bool(st["sel"].get(k))
+    for key, label, params, bot_has in page_items:
+        on = bool(st["sel"].get(key))
+        if not bot_has:
+            btns.append(B(f"🔒 {_fancy(label)}", f"pr:na:{key}", style="danger"))
+            continue
         mark = "🟢" if on else "🔴"
         btns.append(B(
             f"{mark} {_fancy(label)}",
-            f"pr:t:{k}",
+            f"pr:t:{key}",
             style="success" if on else "danger",
         ))
     rows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
 
-    # Nav row: Back / Next (blue)
+    # Nav row (blue)
     nav = []
     if page > 0:
         nav.append(B("⬅️ " + _fancy("Back"), "pr:prev", style="primary"))
@@ -213,7 +278,7 @@ def _panel_kb(st):
         nav.append(B(_fancy("Next") + " ➡️", "pr:noop", style="primary"))
     rows.append(nav)
 
-    # Full power + Clear all
+    # Full + Clear
     rows.append([
         B("⚡ " + _fancy("Full Power"), "pr:full", style="primary"),
         B("🧹 " + _fancy("Clear All"), "pr:clear", style="danger"),
@@ -226,26 +291,34 @@ def _panel_kb(st):
     return InlineKeyboardMarkup(rows)
 
 
+# ───────────────────── PROMOTE / DEMOTE COMMANDS ─────────────────────
+
 async def promote_cmd(update, ctx):
     if not update.message:
         return
     p = await _precheck(update, ctx, "promote")
     if not p:
         return
-    chat, user, target, tm, br = p["chat"], p["user"], p["target"], p["tm"], p["br"]
-    rights_list = [(k, l) for k, l in RIGHTS if k != "manage_topics" or chat.is_forum]
+    chat, user, target, tm, br, bm = p["chat"], p["user"], p["target"], p["tm"], p["br"], p["bot_member"]
+
+    # Build selected state
+    sel = {}
     if tm.status == ADMIN:
-        cur = rights_of(tm)
-        sel = {k: cur[k] and br[k] for k, _ in rights_list}
-        sel["anonymous"] = bool(tm.is_anonymous)
+        for key, _, params in _ALL_RIGHTS:
+            cur = _has_all(tm, params)
+            bot_h = _has_all(bm, params)
+            sel[key] = cur and bot_h
     else:
-        sel = {k: (k in ("delete_messages", "invite_users", "pin_messages")) and br[k] for k, _ in rights_list}
+        # default: some basics if bot has them
+        defaults = ("delete_messages", "invite_users", "pin_messages")
+        for key, _, params in _ALL_RIGHTS:
+            bot_h = _has_all(bm, params)
+            sel[key] = (key in defaults) and bot_h
+
     st = dict(
         mode="promote", chat_id=chat.id, invoker=user.id, target=target.id,
         tgt_m=mention(target), inv_m=mention(user), title=p["title"],
-        rights_list=rights_list, bot=br, sel=sel, forum=bool(chat.is_forum),
-        missing=[l for k, l in rights_list if not br[k]],
-        page=0,
+        bot_member=bm, sel=sel, forum=bool(chat.is_forum), page=0,
     )
     sent = await ctx.bot.send_message(
         chat.id, q(_panel_text(st)), reply_markup=_panel_kb(st),
@@ -294,15 +367,16 @@ async def _verify_now(ctx, qy, st):
     if not inv or inv.status not in (OWNER, ADMIN) or (inv.status == ADMIN and not inv.can_promote_members):
         await qy.answer("You no longer have the Add Admins right.", show_alert=True)
         return None
-    br = rights_of(await get_member(ctx, cid, ctx.bot.id))
-    if not br["promote_members"]:
+    bm = await get_member(ctx, cid, ctx.bot.id)
+    br = rights_of(bm)
+    if not br.get("promote_members"):
         await qy.answer("I don't have the Add New Admins power.", show_alert=True)
         await tag_missing(ctx, cid, qy.from_user, ["Add New Admins"])
         return None
-    return br
+    return bm
 
 
-# ───────────── Anonymous Verification Callback ─────────────
+# ───────────── Anonymous Verification ─────────────
 
 async def anon_verify_callback(update, ctx):
     query = update.callback_query
@@ -323,7 +397,7 @@ async def anon_verify_callback(update, ctx):
 
     bm = await get_member(ctx, chat_id, ctx.bot.id)
     br = rights_of(bm)
-    if not br["promote_members"]:
+    if not br.get("promote_members"):
         await query.edit_message_text(T("I don't have the Add New Admins power."))
         return
 
@@ -335,20 +409,19 @@ async def anon_verify_callback(update, ctx):
     chat = await ctx.bot.get_chat(chat_id)
     user = query.from_user
 
-    rights_list = [(k, l) for k, l in RIGHTS if k != "manage_topics" or chat.is_forum]
+    sel = {}
     if target.status == ADMIN:
-        cur = rights_of(target)
-        sel = {k: cur[k] and br[k] for k, _ in rights_list}
-        sel["anonymous"] = bool(target.is_anonymous)
+        for key, _, params in _ALL_RIGHTS:
+            sel[key] = _has_all(target, params) and _has_all(bm, params)
     else:
-        sel = {k: (k in ("delete_messages", "invite_users", "pin_messages")) and br[k] for k, _ in rights_list}
+        defaults = ("delete_messages", "invite_users", "pin_messages")
+        for key, _, params in _ALL_RIGHTS:
+            sel[key] = (key in defaults) and _has_all(bm, params)
 
     panel_st = dict(
         mode=st["mode"], chat_id=chat.id, invoker=user.id, target=target.user.id,
         tgt_m=mention(target.user), inv_m=mention(user), title=st["title"],
-        rights_list=rights_list, bot=br, sel=sel, forum=bool(chat.is_forum),
-        missing=[l for k, l in rights_list if not br[k]],
-        page=0,
+        bot_member=bm, sel=sel, forum=bool(chat.is_forum), page=0,
     )
 
     await query.edit_message_text(q(_panel_text(panel_st)), reply_markup=_panel_kb(panel_st), parse_mode=ParseMode.HTML)
@@ -366,12 +439,10 @@ async def promote_cb(update, ctx):
     action = parts[1]
     arg = parts[2] if len(parts) > 2 else None
 
-    # ── Nav: noop ──
     if action == "noop":
         await qy.answer()
         return
 
-    # ── Nav: prev ──
     if action == "prev":
         st["page"] = max(0, st.get("page", 0) - 1)
         try:
@@ -382,9 +453,8 @@ async def promote_cb(update, ctx):
         await qy.answer()
         return
 
-    # ── Nav: next ──
     if action == "next":
-        items = _all_items(st)
+        items = _build_items(st)
         total_pages = max(1, (len(items) + PER_PAGE - 1) // PER_PAGE)
         st["page"] = min(total_pages - 1, st.get("page", 0) + 1)
         try:
@@ -404,36 +474,67 @@ async def promote_cb(update, ctx):
         await qy.answer()
         return
     if action == "t":
-        if arg != "anonymous" and not st["bot"].get(arg):
+        # Find the params for this key
+        params = None
+        bot_has = False
+        for k, _, p in _ALL_RIGHTS:
+            if k == arg:
+                params = p
+                bot_has = _has_all(st["bot_member"], p)
+                break
+        if params is None:
+            await qy.answer()
+            return
+        if not bot_has:
             await qy.answer("❌ I don't have this power.", show_alert=True)
             return
         st["sel"][arg] = not st["sel"].get(arg)
     elif action == "full":
-        for k, _ in st["rights_list"]:
-            st["sel"][k] = bool(st["bot"].get(k))
-        st["sel"]["anonymous"] = True
+        for k, _, params in _ALL_RIGHTS:
+            st["sel"][k] = _has_all(st["bot_member"], params)
     elif action == "clear":
         st["sel"] = {}
     elif action == "go":
-        br = await _verify_now(ctx, qy, st)
-        if br is None:
+        bm = await _verify_now(ctx, qy, st)
+        if bm is None:
             return
-        chosen = [k for k, _ in st["rights_list"] if st["sel"].get(k)]
-        lack = [RL[k] for k in chosen if not br.get(k)]
-        if lack:
+        chosen_keys = [k for k, _, _ in _ALL_RIGHTS if st["sel"].get(k)]
+        # Build kwargs
+        kw = {}
+        missing = []
+        for k, label, params in _ALL_RIGHTS:
+            if not st["sel"].get(k):
+                continue
+            if not _has_all(bm, params):
+                missing.append(label)
+                continue
+            for p in params:
+                kw[p] = True
+        if missing:
             await qy.answer("I lack some selected powers.", show_alert=True)
-            await tag_missing(ctx, st["chat_id"], qy.from_user, lack)
+            await tag_missing(ctx, st["chat_id"], qy.from_user, missing)
             return
-        if not chosen:
+        if not chosen_keys:
             await qy.answer("Select at least one power.", show_alert=True)
             return
-        kw = {f"can_{k}": (k in chosen) for k, _ in st["rights_list"]}
+        # Always keep manage_chat on
+        kw["can_manage_chat"] = True
+        filtered = _filter_kwargs(kw)
         try:
-            await ctx.bot.promote_chat_member(st["chat_id"], st["target"], can_manage_chat=True, is_anonymous=bool(st["sel"].get("anonymous")), **kw)
+            await ctx.bot.promote_chat_member(st["chat_id"], st["target"], **filtered)
         except TelegramError as e:
-            await qy.answer("Failed, see message below.")
-            await say(ctx, st["chat_id"], f"{st['inv_m']}, " + T("promotion failed:") + f" {explain(e)}")
-            return
+            # Retry without newer unsupported params
+            fallback = {k: v for k, v in filtered.items()
+                        if k not in ("can_manage_tags", "can_send_welcome_messages",
+                                     "can_manage_live_streams",
+                                     "can_post_stories", "can_edit_stories", "can_delete_stories")}
+            try:
+                await ctx.bot.promote_chat_member(st["chat_id"], st["target"], **fallback)
+            except TelegramError as e2:
+                await qy.answer("Failed, see message below.")
+                await say(ctx, st["chat_id"], f"{st['inv_m']}, " + T("promotion failed:") + f" {explain(e2)}")
+                return
+
         note = ""
         if st["title"]:
             try:
@@ -441,11 +542,17 @@ async def promote_cb(update, ctx):
                 note = "\n" + T("title: ") + f"<b>{esc(st['title'])}</b>"
             except TelegramError as e:
                 note = "\n" + T("title not set:") + f" {explain(e)}"
-        powers = "\n".join(f"✅ {RL[k]}" for k in chosen)
-        if st["sel"].get("anonymous"):
-            powers += "\n✅ Anonymous"
+
+        # Build powers list
+        powers = []
+        for k, label, params in _ALL_RIGHTS:
+            if st["sel"].get(k):
+                powers.append(f"✅ {label}")
+        powers_text = "\n".join(powers) if powers else "—"
+
         PANELS.pop(key, None)
-        await qy.edit_message_text(q(T("<b>✅ promoted</b>\n\n{m}\n\n{p}{n}", m=st["tgt_m"], p=powers, n=note)))
+        await qy.edit_message_text(q(T("<b>✅ promoted</b>\n\n{m}\n\n{p}{n}",
+                                       m=st["tgt_m"], p=powers_text, n=note)))
         await qy.answer("Promoted ✅")
 
         # ── logchannel ──
@@ -455,9 +562,7 @@ async def promote_cb(update, ctx):
         except TelegramError:
             _target_name = "User"
         _chat_title = qy.message.chat.title or ""
-        _chosen_names = ", ".join(RL[k] for k in chosen)
-        if st["sel"].get("anonymous"):
-            _chosen_names += ", Anonymous"
+        _chosen_names = ", ".join(label for k, label, _ in _ALL_RIGHTS if st["sel"].get(k))
         await logchannel.log_action(
             ctx.bot, st["chat_id"], "PROMOTE",
             chat_title=_chat_title,
@@ -466,6 +571,8 @@ async def promote_cb(update, ctx):
             extra_lines=[f"<b>Powers:</b> {esc(_chosen_names)}"],
         )
         return
+
+    # Redraw panel
     try:
         await qy.edit_message_text(q(_panel_text(st)), reply_markup=_panel_kb(st))
     except BadRequest as e:
@@ -484,16 +591,32 @@ async def demote_cb(update, ctx):
         await qy.edit_message_text(q(T("demotion cancelled ✖")))
         await qy.answer()
         return
-    br = await _verify_now(ctx, qy, st)
-    if br is None:
+    bm = await _verify_now(ctx, qy, st)
+    if bm is None:
         return
-    kw = {f"can_{k}": False for k, _ in RIGHTS if k != "manage_topics" or st["forum"]}
+    # Turn everything off
+    kw = {}
+    for _, _, params in _ALL_RIGHTS:
+        for p in params:
+            if p == "is_anonymous":
+                continue
+            kw[p] = False
+    kw["can_manage_chat"] = False
+    kw["is_anonymous"] = False
+    filtered = _filter_kwargs(kw)
     try:
-        await ctx.bot.promote_chat_member(st["chat_id"], st["target"], can_manage_chat=False, is_anonymous=False, **kw)
+        await ctx.bot.promote_chat_member(st["chat_id"], st["target"], **filtered)
     except TelegramError as e:
-        await qy.answer("Failed, see message below.")
-        await say(ctx, st["chat_id"], f"{st['inv_m']}, " + T("demotion failed:") + f" {explain(e)}")
-        return
+        fallback = {k: v for k, v in filtered.items()
+                    if k not in ("can_manage_tags", "can_send_welcome_messages",
+                                 "can_manage_live_streams",
+                                 "can_post_stories", "can_edit_stories", "can_delete_stories")}
+        try:
+            await ctx.bot.promote_chat_member(st["chat_id"], st["target"], **fallback)
+        except TelegramError as e2:
+            await qy.answer("Failed, see message below.")
+            await say(ctx, st["chat_id"], f"{st['inv_m']}, " + T("demotion failed:") + f" {explain(e2)}")
+            return
     PANELS.pop(key, None)
     await qy.edit_message_text(q(T("<b>✅ demoted</b>\n\n{m} is no longer an admin.", m=st["tgt_m"])))
     await qy.answer("Demoted ✅")
@@ -511,7 +634,7 @@ async def demote_cb(update, ctx):
         admin_id=qy.from_user.id, admin_name=qy.from_user.full_name,
         user_id=st["target"], user_name=_target_name,
         reason="",
-        )
+    )
 
 
 def register(app):
@@ -521,4 +644,3 @@ def register(app):
     app.add_handler(CallbackQueryHandler(demote_cb, pattern=r"^dm:"))
     app.add_handler(CallbackQueryHandler(anon_verify_callback, pattern=r"^anon_"))
     
-                  
