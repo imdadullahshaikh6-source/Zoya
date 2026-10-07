@@ -1,6 +1,7 @@
 """Clean Service — granular auto-delete of system/service messages with interactive buttons."""
 import asyncio
 import logging
+import html
 
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.constants import ChatMemberStatus, ChatType
@@ -50,16 +51,16 @@ _TYPE_DESC = {
     "other": "boosts, payments, auto-delete, proximity, etc.",
 }
 
-# Simple text, no blockquote
+# ✅ FIX: &lt;type&gt; use kiya taaki Telegram HTML parse error na de
 HELP_TXT = (
     "🧼 Clean Service\n\n"
     "Automatically delete system/service messages from the chat.\n\n"
     "Commands:\n"
     "• /cleanservice on — enable ALL types\n"
     "• /cleanservice off — disable everything\n"
-    "• /cleanservice <type> — enable a single type\n"
-    "• /keepservice <type> — stop deleting a type\n"
-    "• /nocleanservice <type> — same as keepservice\n"
+    "• /cleanservice &lt;type&gt; — enable a single type\n"
+    "• /keepservice &lt;type&gt; — stop deleting a type\n"
+    "• /nocleanservice &lt;type&gt; — same as keepservice\n"
     "• /cleanservicetypes — list all available types\n\n"
     "Only full admins with 'Delete Messages' right can use this. "
     "Bot must also have delete rights."
@@ -189,7 +190,6 @@ def _classify(msg) -> set:
 
 
 def _types_text() -> str:
-    # Simple text list, no blockquote
     lines = ["🧼 Available types:", "• all — every service message"]
     for t in _ALL_TYPES:
         lines.append(f"• {t} — {_TYPE_DESC[t]}")
@@ -203,25 +203,20 @@ def _status_text(current: set) -> str:
         state = "🟢 ON — " + ", ".join(sorted(current))
     else:
         state = "🔴 OFF"
-    # Simple text, no blockquote
     return f"🧼 Clean Service is {state}."
 
 
 # ─────────────────────────── BUTTONS ───────────────────────────
 def _types_keyboard(current: set) -> InlineKeyboardMarkup:
-    """Create interactive inline buttons for toggling types."""
     buttons = []
     row = []
     
-    # Add 'ALL' button first
     all_on = current >= set(_ALL_TYPES)
     all_text = "🟢 ALL" if all_on else "🔴 ALL"
     buttons.append([InlineKeyboardButton(all_text, callback_data="cs_toggle:all")])
 
-    # Add individual type buttons
     for t in _ALL_TYPES:
         status = "🟢" if t in current else "🔴"
-        # Shorten videochat slightly for button width
         label = "video" if t == "videochat" else t
         row.append(InlineKeyboardButton(
             f"{status} {label.capitalize()}",
@@ -269,7 +264,9 @@ async def cleanservice_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         new_types = set(current)
         new_types.add(arg)
     else:
-        await say(ctx, chat.id, T(f"❓ unknown type {arg}.\n\n{_types_text()}"), reply_to=msg.message_id)
+        # ✅ FIX: escape user input to prevent HTML parsing errors
+        safe_arg = html.escape(arg)
+        await say(ctx, chat.id, T(f"❓ unknown type {safe_arg}.\n\n{_types_text()}"), reply_to=msg.message_id)
         return
 
     try:
@@ -298,7 +295,8 @@ async def keepservice_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         arg = args[0]
         if arg not in _ALL_TYPES:
-            await say(ctx, chat.id, T(f"❓ unknown type {arg}.\n\n{_types_text()}"), reply_to=msg.message_id)
+            safe_arg = html.escape(arg)
+            await say(ctx, chat.id, T(f"❓ unknown type {safe_arg}.\n\n{_types_text()}"), reply_to=msg.message_id)
             return
         new_types = set(current)
         new_types.discard(arg)
@@ -313,14 +311,12 @@ async def keepservice_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cleanservicetypes_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Now sends interactive inline buttons instead of text list."""
     msg, chat = update.effective_message, update.effective_chat
     if chat.type == ChatType.PRIVATE:
         return
 
     current = await _load(chat.id)
     
-    # Send the message with buttons
     await ctx.bot.send_message(
         chat.id,
         T("Tap a button to toggle that service message type:"),
@@ -330,9 +326,8 @@ async def cleanservicetypes_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def _cs_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Handle button clicks."""
     query = update.callback_query
-    await query.answer()  # Acknowledge immediately to remove loading state
+    await query.answer()
     
     data = query.data
     chat = update.effective_chat
@@ -348,7 +343,6 @@ async def _cs_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not data.startswith("cs_toggle:"):
         return
 
-    # Re-check admin permissions
     if not await _is_full_admin(ctx, chat.id, user.id):
         await query.answer("⚠️ Only full admins can use this!", show_alert=True)
         return
@@ -361,7 +355,6 @@ async def _cs_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     current = await _load(chat.id)
 
     if arg == "all":
-        # Toggle all on/off
         new_types = set() if current >= set(_ALL_TYPES) else set(_ALL_TYPES)
     elif arg in _ALL_TYPES:
         new_types = set(current)
@@ -378,7 +371,6 @@ async def _cs_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.answer("⚠️ DB error, try again.", show_alert=True)
         return
 
-    # Edit the message to update the keyboard buttons
     try:
         await query.edit_message_reply_markup(reply_markup=_types_keyboard(new_types))
     except TelegramError:
@@ -386,7 +378,6 @@ async def _cs_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def _service_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Deletes service messages ONLY for the types enabled in this chat."""
     msg = update.effective_message
     chat = update.effective_chat
     if not msg or not chat:
@@ -424,7 +415,6 @@ def register(app: Application):
     dual_command(app, "nocleanservice", keepservice_cmd)
     dual_command(app, "cleanservicetypes", cleanservicetypes_cmd)
 
-    # Add callback query handler for the inline buttons
     app.add_handler(CallbackQueryHandler(_cs_callback, pattern=r"^cs_"))
 
     app.add_handler(
