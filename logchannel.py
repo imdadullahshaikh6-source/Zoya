@@ -137,7 +137,6 @@ async def setlog_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # ── Case 1: run in a channel ──
     if chat.type == ChatType.CHANNEL:
-        # Skip user admin check because channel posts don't carry user info properly
         try:
             bm = await ctx.bot.get_chat_member(chat.id, ctx.bot.id)
         except TelegramError:
@@ -192,7 +191,6 @@ async def unsetlog_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if chat.type == ChatType.CHANNEL:
-        # In channels, just remove by channel ID
         n = await dbase.logchannel_unset_by_channel(chat.id)
         await ctx.bot.send_message(
             chat.id,
@@ -335,6 +333,7 @@ async def _chat_member_logger(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     actor = cmu.from_user
+    # Agar bot khud action kar raha hai, to uski alag se log karne ki zarurat nahi (moderation module handle karega)
     if actor and actor.id == ctx.bot.id:
         return
 
@@ -352,36 +351,58 @@ async def _chat_member_logger(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     old_s = old.status
     new_s = new.status
 
+    # ── BAN ──
     if new_s == ChatMemberStatus.BANNED and old_s != ChatMemberStatus.BANNED:
         lines = [f"<b>#BAN:</b>", _chat_line(chat)]
         if admin_id: lines.append(_user_line("Admin", admin_id, admin_name))
         lines.append(_user_line("User", user_id, user_name))
         lines.append("Reason:")
+    
+    # ── UNBAN ──
     elif old_s == ChatMemberStatus.BANNED and new_s != ChatMemberStatus.BANNED:
         lines = [f"<b>#UNBAN:</b>", _chat_line(chat)]
         if admin_id: lines.append(_user_line("Admin", admin_id, admin_name))
         lines.append(_user_line("User", user_id, user_name))
         lines.append("Reason:")
+    
+    # ── PROMOTE ──
     elif old_s in (ChatMemberStatus.MEMBER, ChatMemberStatus.RESTRICTED) and new_s == ChatMemberStatus.ADMINISTRATOR:
         lines = [f"<b>#PROMOTE:</b>", _chat_line(chat)]
         if admin_id: lines.append(_user_line("Admin", admin_id, admin_name))
         lines.append(_user_line("User", user_id, user_name))
         lines.append(f"{_esc(user_name)} was promoted to admin.")
+    
+    # ── DEMOTE ──
     elif old_s == ChatMemberStatus.ADMINISTRATOR and new_s in (ChatMemberStatus.MEMBER, ChatMemberStatus.RESTRICTED):
         lines = [f"<b>#DEMOTE:</b>", _chat_line(chat)]
         if admin_id: lines.append(_user_line("Admin", admin_id, admin_name))
         lines.append(_user_line("User", user_id, user_name))
         lines.append(f"{_esc(user_name)} was demoted.")
+    
+    # ── MUTE ──
     elif new_s == ChatMemberStatus.RESTRICTED and not getattr(new, "can_send_messages", True) and old_s != ChatMemberStatus.RESTRICTED:
         lines = [f"<b>#MUTE:</b>", _chat_line(chat)]
         if admin_id: lines.append(_user_line("Admin", admin_id, admin_name))
         lines.append(_user_line("User", user_id, user_name))
         lines.append("Reason:")
+    
+    # ── APPROVE / UNMUTE (Restricted -> Member) ──
     elif old_s == ChatMemberStatus.RESTRICTED and new_s == ChatMemberStatus.MEMBER:
-        lines = [f"<b>#UNMUTE:</b>", _chat_line(chat)]
-        if admin_id: lines.append(_user_line("Admin", admin_id, admin_name))
-        lines.append(_user_line("User", user_id, user_name))
-        lines.append("Reason:")
+        if cmu.invite_link:
+            # Join request approve hua hai
+            lines = [f"<b>#APPROVE:</b>", _chat_line(chat)]
+            if admin_id: lines.append(_user_line("Admin", admin_id, admin_name))
+            lines.append(_user_line("User", user_id, user_name))
+            if cmu.invite_link.creator:
+                lines.append(_user_line("Invitelink from", cmu.invite_link.creator.id, cmu.invite_link.creator.full_name))
+                lines.append(f"<b>Invitelink name:</b> {_esc(cmu.invite_link.name or 'None')}")
+            lines.append("User has been approved.")
+        else:
+            # Normal unmute
+            lines = [f"<b>#UNMUTE:</b>", _chat_line(chat)]
+            if admin_id: lines.append(_user_line("Admin", admin_id, admin_name))
+            lines.append(_user_line("User", user_id, user_name))
+            lines.append("Reason:")
 
     if lines:
         await send_log(ctx.bot, chat.id, "\n".join(lines))
@@ -502,4 +523,4 @@ def register(app: Application):
             _forward_detector,
         ),
         group=96,
-)
+        )
