@@ -1,11 +1,11 @@
-"""Clean Service — granular auto-delete of system/service messages in groups."""
+"""Clean Service — granular auto-delete of system/service messages with interactive buttons."""
 import asyncio
 import logging
 
-from telegram import Update
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.constants import ChatMemberStatus, ChatType
 from telegram.error import TelegramError
-from telegram.ext import Application, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 
 import database as dbase
 from common import T, dual_command, say
@@ -14,7 +14,6 @@ log = logging.getLogger("cleanservice")
 
 
 # ─────────────────────────── TYPE MAP ───────────────────────────
-# Each logical category → telegram Message attributes that identify it.
 _TYPE_MAP = {
     "join": (
         "new_chat_members", "group_chat_created",
@@ -51,32 +50,32 @@ _TYPE_DESC = {
     "other": "boosts, payments, auto-delete, proximity, etc.",
 }
 
+# Simple text, no blockquote
 HELP_TXT = (
-    "<b>🧼 𝘾𝙡𝙚𝙖𝙣 𝙎𝙚𝙧𝙫𝙞𝙘𝙚</b>\n\n"
+    "🧼 Clean Service\n\n"
     "Automatically delete system/service messages from the chat.\n\n"
-    "<b>Commands:</b>\n"
-    "• <code>/cleanservice on</code> — enable ALL types\n"
-    "• <code>/cleanservice off</code> — disable everything\n"
-    "• <code>/cleanservice &lt;type&gt;</code> — enable a single type\n"
-    "• <code>/keepservice &lt;type&gt;</code> — stop deleting a type\n"
-    "• <code>/nocleanservice &lt;type&gt;</code> — same as keepservice\n"
-    "• <code>/cleanservicetypes</code> — list all available types\n\n"
-    "<i>Only full admins with 'Delete Messages' right can use this. "
-    "Bot must also have delete rights.</i>"
+    "Commands:\n"
+    "• /cleanservice on — enable ALL types\n"
+    "• /cleanservice off — disable everything\n"
+    "• /cleanservice <type> — enable a single type\n"
+    "• /keepservice <type> — stop deleting a type\n"
+    "• /nocleanservice <type> — same as keepservice\n"
+    "• /cleanservicetypes — list all available types\n\n"
+    "Only full admins with 'Delete Messages' right can use this. "
+    "Bot must also have delete rights."
 )
 
 COMMANDS = [
     ("cleanservice", "Auto-delete system/service messages"),
     ("keepservice", "Stop auto-deleting a service-message type"),
     ("nocleanservice", "Same as /keepservice"),
-    ("cleanservicetypes", "List available service-message types"),
+    ("cleanservicetypes", "Show interactive type buttons"),
 ]
 
 
 # ─────────────────────────── STATE ───────────────────────────
-# chat_id -> set of enabled type names. Empty set == disabled entirely.
-_state: dict = {}
-_locks: dict = {}
+_state: dict = {}          # chat_id -> set of enabled type names
+_locks: dict = {}          # chat_id -> asyncio.Lock
 
 
 def _lock(chat_id: int) -> asyncio.Lock:
@@ -93,7 +92,6 @@ def _truthy(v) -> bool:
 
 
 def _norm_types(raw) -> set:
-    """Normalise DB-stored types (str or list) into a valid set."""
     if raw is None:
         return set()
     if isinstance(raw, str):
@@ -108,7 +106,6 @@ def _norm_types(raw) -> set:
 
 # ─────────────────────────── DB ───────────────────────────
 async def _load(chat_id: int) -> set:
-    """Memory-first read. Returns set of enabled types."""
     if chat_id in _state:
         return _state[chat_id]
     try:
@@ -118,10 +115,8 @@ async def _load(chat_id: int) -> set:
         return set()
     types = set()
     if cfg:
-        # New-style record: explicit types list
         if cfg.get("types") is not None:
             types = _norm_types(cfg.get("types"))
-        # Old-style record: bool -> means "all"
         elif _truthy(cfg.get("enabled")):
             types = set(_ALL_TYPES)
     _state.setdefault(chat_id, types)
@@ -129,28 +124,23 @@ async def _load(chat_id: int) -> set:
 
 
 async def _db_write(chat_id: int, types: set):
-    """Try to persist types, falling back to old bool-only setter."""
     payload = sorted(types)
     enabled = bool(types)
     setter = dbase.cleanservice_set
-    # Preferred: extended setter (chat_id, enabled, types=[...])
     try:
         await setter(chat_id, enabled, types=payload)
         return
     except TypeError:
         pass
-    # Positional variant
     try:
         await setter(chat_id, enabled, payload)
         return
     except TypeError:
         pass
-    # Last resort: legacy bool-only setter
     await setter(chat_id, enabled)
 
 
 async def _save(chat_id: int, types: set):
-    """Memory-first write with rollback on DB failure."""
     async with _lock(chat_id):
         previous = _state.get(chat_id)
         _state[chat_id] = set(types)
@@ -189,20 +179,20 @@ async def _bot_can_delete(ctx, chat_id: int) -> bool:
 
 # ─────────────────────────── HELPERS ───────────────────────────
 def _classify(msg) -> set:
-    """Return logical types that this service message belongs to."""
     kinds = set()
     for t, attrs in _TYPE_MAP.items():
         if any(getattr(msg, a, None) for a in attrs):
             kinds.add(t)
     if not kinds:
-        kinds.add("other")   # fallback: any unrecognised service message
+        kinds.add("other")
     return kinds
 
 
 def _types_text() -> str:
-    lines = ["<b>🧼 Available types:</b>", "• <code>all</code> — every service message"]
+    # Simple text list, no blockquote
+    lines = ["🧼 Available types:", "• all — every service message"]
     for t in _ALL_TYPES:
-        lines.append(f"• <code>{t}</code> — {_TYPE_DESC[t]}")
+        lines.append(f"• {t} — {_TYPE_DESC[t]}")
     return "\n".join(lines)
 
 
@@ -213,7 +203,39 @@ def _status_text(current: set) -> str:
         state = "🟢 ON — " + ", ".join(sorted(current))
     else:
         state = "🔴 OFF"
-    return f"<blockquote>🧼 Clean Service is <b>{state}</b>.</blockquote>"
+    # Simple text, no blockquote
+    return f"🧼 Clean Service is {state}."
+
+
+# ─────────────────────────── BUTTONS ───────────────────────────
+def _types_keyboard(current: set) -> InlineKeyboardMarkup:
+    """Create interactive inline buttons for toggling types."""
+    buttons = []
+    row = []
+    
+    # Add 'ALL' button first
+    all_on = current >= set(_ALL_TYPES)
+    all_text = "🟢 ALL" if all_on else "🔴 ALL"
+    buttons.append([InlineKeyboardButton(all_text, callback_data="cs_toggle:all")])
+
+    # Add individual type buttons
+    for t in _ALL_TYPES:
+        status = "🟢" if t in current else "🔴"
+        # Shorten videochat slightly for button width
+        label = "video" if t == "videochat" else t
+        row.append(InlineKeyboardButton(
+            f"{status} {label.capitalize()}",
+            callback_data=f"cs_toggle:{t}"
+        ))
+        if len(row) == 3:
+            buttons.append(row)
+            row = []
+    
+    if row:
+        buttons.append(row)
+
+    buttons.append([InlineKeyboardButton("❌ Close", callback_data="cs_close")])
+    return InlineKeyboardMarkup(buttons)
 
 
 # ─────────────────────────── HANDLERS ───────────────────────────
@@ -223,17 +245,16 @@ async def cleanservice_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if not await _is_full_admin(ctx, chat.id, user.id):
-        await say(ctx, chat.id, T("<blockquote>⚠️ only full-power admins can use this.</blockquote>"), reply_to=msg.message_id)
+        await say(ctx, chat.id, T("⚠️ only full-power admins can use this."), reply_to=msg.message_id)
         return
 
     if not await _bot_can_delete(ctx, chat.id):
-        await say(ctx, chat.id, T("<blockquote>⚠️ make me an admin with <b>Delete Messages</b> permission first.</blockquote>"), reply_to=msg.message_id)
+        await say(ctx, chat.id, T("⚠️ make me an admin with Delete Messages permission first."), reply_to=msg.message_id)
         return
 
     args = [a.lower() for a in (ctx.args or [])]
     current = await _load(chat.id)
 
-    # No args → status
     if not args:
         await say(ctx, chat.id, T(_status_text(current)), reply_to=msg.message_id)
         return
@@ -248,28 +269,25 @@ async def cleanservice_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         new_types = set(current)
         new_types.add(arg)
     else:
-        await say(ctx, chat.id, T(
-            f"<blockquote>❓ unknown type <code>{arg}</code>.\n\n{_types_text()}</blockquote>"
-        ), reply_to=msg.message_id)
+        await say(ctx, chat.id, T(f"❓ unknown type {arg}.\n\n{_types_text()}"), reply_to=msg.message_id)
         return
 
     try:
         await _save(chat.id, new_types)
     except Exception:
-        await say(ctx, chat.id, T("<blockquote>⚠️ couldn't save setting — try again.</blockquote>"), reply_to=msg.message_id)
+        await say(ctx, chat.id, T("⚠️ couldn't save setting — try again."), reply_to=msg.message_id)
         return
 
     await say(ctx, chat.id, T(_status_text(new_types)), reply_to=msg.message_id)
 
 
 async def keepservice_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Also used by /nocleanservice."""
     msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
     if chat.type == ChatType.PRIVATE:
         return
 
     if not await _is_full_admin(ctx, chat.id, user.id):
-        await say(ctx, chat.id, T("<blockquote>⚠️ only full-power admins can use this.</blockquote>"), reply_to=msg.message_id)
+        await say(ctx, chat.id, T("⚠️ only full-power admins can use this."), reply_to=msg.message_id)
         return
 
     args = [a.lower() for a in (ctx.args or [])]
@@ -280,9 +298,7 @@ async def keepservice_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         arg = args[0]
         if arg not in _ALL_TYPES:
-            await say(ctx, chat.id, T(
-                f"<blockquote>❓ unknown type <code>{arg}</code>.\n\n{_types_text()}</blockquote>"
-            ), reply_to=msg.message_id)
+            await say(ctx, chat.id, T(f"❓ unknown type {arg}.\n\n{_types_text()}"), reply_to=msg.message_id)
             return
         new_types = set(current)
         new_types.discard(arg)
@@ -290,17 +306,83 @@ async def keepservice_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         await _save(chat.id, new_types)
     except Exception:
-        await say(ctx, chat.id, T("<blockquote>⚠️ couldn't save setting — try again.</blockquote>"), reply_to=msg.message_id)
+        await say(ctx, chat.id, T("⚠️ couldn't save setting — try again."), reply_to=msg.message_id)
         return
 
     await say(ctx, chat.id, T(_status_text(new_types)), reply_to=msg.message_id)
 
 
 async def cleanservicetypes_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Now sends interactive inline buttons instead of text list."""
     msg, chat = update.effective_message, update.effective_chat
     if chat.type == ChatType.PRIVATE:
         return
-    await say(ctx, chat.id, T(f"<blockquote>{_types_text()}</blockquote>"), reply_to=msg.message_id)
+
+    current = await _load(chat.id)
+    
+    # Send the message with buttons
+    await ctx.bot.send_message(
+        chat.id,
+        T("Tap a button to toggle that service message type:"),
+        reply_markup=_types_keyboard(current),
+        reply_to_message_id=msg.message_id,
+    )
+
+
+async def _cs_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handle button clicks."""
+    query = update.callback_query
+    await query.answer()  # Acknowledge immediately to remove loading state
+    
+    data = query.data
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if data == "cs_close":
+        try:
+            await query.message.delete()
+        except TelegramError:
+            pass
+        return
+
+    if not data.startswith("cs_toggle:"):
+        return
+
+    # Re-check admin permissions
+    if not await _is_full_admin(ctx, chat.id, user.id):
+        await query.answer("⚠️ Only full admins can use this!", show_alert=True)
+        return
+
+    if not await _bot_can_delete(ctx, chat.id):
+        await query.answer("⚠️ I need Delete Messages permission!", show_alert=True)
+        return
+
+    arg = data.split(":")[1]
+    current = await _load(chat.id)
+
+    if arg == "all":
+        # Toggle all on/off
+        new_types = set() if current >= set(_ALL_TYPES) else set(_ALL_TYPES)
+    elif arg in _ALL_TYPES:
+        new_types = set(current)
+        if arg in new_types:
+            new_types.discard(arg)
+        else:
+            new_types.add(arg)
+    else:
+        return
+
+    try:
+        await _save(chat.id, new_types)
+    except Exception:
+        await query.answer("⚠️ DB error, try again.", show_alert=True)
+        return
+
+    # Edit the message to update the keyboard buttons
+    try:
+        await query.edit_message_reply_markup(reply_markup=_types_keyboard(new_types))
+    except TelegramError:
+        pass
 
 
 async def _service_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -320,7 +402,6 @@ async def _service_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not (kinds & enabled):
         return
 
-    # Network call → state may have changed meanwhile; re-check after.
     if not await _bot_can_delete(ctx, chat.id):
         return
 
@@ -343,7 +424,9 @@ def register(app: Application):
     dual_command(app, "nocleanservice", keepservice_cmd)
     dual_command(app, "cleanservicetypes", cleanservicetypes_cmd)
 
-    # Run after other service handlers but before cleancommand
+    # Add callback query handler for the inline buttons
+    app.add_handler(CallbackQueryHandler(_cs_callback, pattern=r"^cs_"))
+
     app.add_handler(
         MessageHandler(
             filters.StatusUpdate.ALL & filters.ChatType.GROUPS,
