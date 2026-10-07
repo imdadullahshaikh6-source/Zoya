@@ -42,7 +42,7 @@ HELP_TXT = (
     "• Group photo / title change\n"
     "• Join requests, Approvals\n"
     "• Joins, Leaves\n\n"
-    "<i>🔒 Owner only — only the group owner can set up or remove the log channel.</i>"
+    "<i>🔒 ONLY THE GROUP OWNER CAN USE THESE COMMANDS.</i>"
 )
 
 COMMANDS = [
@@ -183,7 +183,7 @@ async def setlog_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             chat.id,
             "<b>🔗 Log Channel Setup</b>\n\n"
             "Forward this message to the group where you want logs.\n\n"
-            "<i>Only the group owner can complete the setup.</i>",
+            "<i>🔒 Only the group owner can complete the setup.</i>",
             parse_mode=ParseMode.HTML,
         )
         _cleanup_pending()
@@ -191,10 +191,12 @@ async def setlog_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        # 🔒 Group me error message me Owner only mention kiya
         await say(
             ctx, chat.id,
             T("⚠️ Run <code>/setlog</code> in your <b>log channel</b> "
-              "(add me as admin there first), then forward my reply to this group."),
+              "(add me as admin there first), then forward my reply to this group.\n\n"
+              "🔒 <b>Only the group owner</b> can complete the setup."),
             reply_to=msg.message_id,
         )
         return
@@ -206,7 +208,6 @@ async def unsetlog_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
-        # 🔒 Owner-only check
         try:
             m = await ctx.bot.get_chat_member(chat.id, update.effective_user.id)
         except TelegramError:
@@ -538,4 +539,4 @@ def register(app: Application):
             _forward_detector,
         ),
         group=96,
-            )
+        )
