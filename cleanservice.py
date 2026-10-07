@@ -9,7 +9,7 @@ from telegram.error import TelegramError
 from telegram.ext import Application, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 
 import database as dbase
-from common import T, dual_command, say
+from common import B, T, dual_command, say
 
 log = logging.getLogger("cleanservice")
 
@@ -207,20 +207,21 @@ def _status_text(current: set) -> str:
 
 
 # ─────────────────────────── BUTTONS ───────────────────────────
-def _types_keyboard(current: set) -> InlineKeyboardMarkup:
+def _types_keyboard(current: set, include_back: bool = False) -> InlineKeyboardMarkup:
     buttons = []
     row = []
     
     all_on = current >= set(_ALL_TYPES)
-    all_text = "🟢 ALL" if all_on else "🔴 ALL"
-    buttons.append([InlineKeyboardButton(all_text, callback_data="cs_toggle:all")])
+    all_text = "🟢 𝘼𝙇𝙇" if all_on else "🔴 𝘼𝙇𝙇"
+    buttons.append([B(all_text, "cs_toggle:all", style="success" if all_on else "danger")])
 
     for t in _ALL_TYPES:
-        status = "🟢" if t in current else "🔴"
+        on = t in current
         label = "video" if t == "videochat" else t
-        row.append(InlineKeyboardButton(
-            f"{status} {label.capitalize()}",
-            callback_data=f"cs_toggle:{t}"
+        row.append(B(
+            f"{'🟢' if on else '🔴'} {label.capitalize()}",
+            f"cs_toggle:{t}",
+            style="success" if on else "danger",
         ))
         if len(row) == 3:
             buttons.append(row)
@@ -229,11 +230,25 @@ def _types_keyboard(current: set) -> InlineKeyboardMarkup:
     if row:
         buttons.append(row)
 
-    buttons.append([InlineKeyboardButton("❌ Close", callback_data="cs_close")])
+    if include_back:
+        # Help menu se aaya hai → Back button help section pe le jayega
+        buttons.append([
+            B("⬅ 𝘽𝙖𝙘𝙠", "help:cleanservice", style="primary"),
+            B("✖ 𝘾𝙡𝙤𝙨𝙚", "help:close", style="danger"),
+        ])
+    else:
+        buttons.append([B("✖ 𝘾𝙡𝙤𝙨𝙚", "cs_close", style="danger")])
+        
     return InlineKeyboardMarkup(buttons)
 
 
-# ─────────────────────────── HANDLERS ───────────────────────────
+async def get_help_menu_kb(chat_id: int) -> InlineKeyboardMarkup:
+    """Public helper — bot.py ke help menu se call hoga."""
+    current = await _load(chat_id)
+    return _types_keyboard(current, include_back=True)
+
+
+# ─────────────────────────── COMMAND HANDLERS ───────────────────────────
 async def cleanservice_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
     if chat.type == ChatType.PRIVATE:
@@ -264,7 +279,6 @@ async def cleanservice_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         new_types = set(current)
         new_types.add(arg)
     else:
-        # ✅ FIX: escape user input to prevent HTML parsing errors
         safe_arg = html.escape(arg)
         await say(ctx, chat.id, T(f"❓ unknown type {safe_arg}.\n\n{_types_text()}"), reply_to=msg.message_id)
         return
@@ -319,12 +333,13 @@ async def cleanservicetypes_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     
     await ctx.bot.send_message(
         chat.id,
-        T("Tap a button to toggle that service message type:"),
-        reply_markup=_types_keyboard(current),
+        T("THE AVAILABLE CLEANSERVICE TYPES ARE:\n\nTap a button to toggle that service message type:"),
+        reply_markup=_types_keyboard(current, include_back=True),
         reply_to_message_id=msg.message_id,
     )
 
 
+# ─────────────────────────── CALLBACK HANDLERS ───────────────────────────
 async def _cs_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -333,6 +348,7 @@ async def _cs_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
 
+    # Close button
     if data == "cs_close":
         try:
             await query.message.delete()
@@ -340,6 +356,7 @@ async def _cs_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
+    # Toggle buttons
     if not data.startswith("cs_toggle:"):
         return
 
@@ -372,11 +389,12 @@ async def _cs_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        await query.edit_message_reply_markup(reply_markup=_types_keyboard(new_types))
+        await query.edit_message_reply_markup(reply_markup=_types_keyboard(new_types, include_back=True))
     except TelegramError:
         pass
 
 
+# ─────────────────────────── WATCHER ───────────────────────────
 async def _service_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     chat = update.effective_chat
