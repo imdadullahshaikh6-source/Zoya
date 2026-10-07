@@ -51,7 +51,6 @@ _TYPE_DESC = {
     "other": "boosts, payments, auto-delete, proximity, etc.",
 }
 
-# ✅ FIX: &lt;type&gt; use kiya taaki Telegram HTML parse error na de
 HELP_TXT = (
     "🧼 Clean Service\n\n"
     "Automatically delete system/service messages from the chat.\n\n"
@@ -77,6 +76,7 @@ COMMANDS = [
 # ─────────────────────────── STATE ───────────────────────────
 _state: dict = {}          # chat_id -> set of enabled type names
 _locks: dict = {}          # chat_id -> asyncio.Lock
+_disabled: set = set()     # chat_id -> fully disabled (fast-path)
 
 
 def _lock(chat_id: int) -> asyncio.Lock:
@@ -107,8 +107,14 @@ def _norm_types(raw) -> set:
 
 # ─────────────────────────── DB ───────────────────────────
 async def _load(chat_id: int) -> set:
+    """Memory-first read. Returns a COPY so callers can't mutate the cache."""
     if chat_id in _state:
-        return _state[chat_id]
+        cached = _state[chat_id]
+        if not cached:
+            _disabled.add(chat_id)
+        else:
+            _disabled.discard(chat_id)
+        return set(cached)
     try:
         cfg = await dbase.cleanservice_get(chat_id)
     except Exception as e:
@@ -121,7 +127,35 @@ async def _load(chat_id: int) -> set:
         elif _truthy(cfg.get("enabled")):
             types = set(_ALL_TYPES)
     _state.setdefault(chat_id, types)
-    return _state[chat_id]
+    if not types:
+        _disabled.add(chat_id)
+    else:
+        _disabled.discard(chat_id)
+    return set(types)
+
+
+async def _load_fresh(chat_id: int) -> set:
+    """ALWAYS read from DB — used by the watcher for critical checks.
+    This bypasses the in-memory cache entirely so stale state can never
+    cause unintended deletions."""
+    try:
+        cfg = await dbase.cleanservice_get(chat_id)
+    except Exception as e:
+        log.warning("[cleanservice] db read failed for %s: %s (treating OFF)", chat_id, e)
+        return set()
+    types = set()
+    if cfg:
+        if cfg.get("types") is not None:
+            types = _norm_types(cfg.get("types"))
+        elif _truthy(cfg.get("enabled")):
+            types = set(_ALL_TYPES)
+    # refresh cache too
+    _state[chat_id] = set(types)
+    if not types:
+        _disabled.add(chat_id)
+    else:
+        _disabled.discard(chat_id)
+    return set(types)
 
 
 async def _db_write(chat_id: int, types: set):
@@ -131,20 +165,31 @@ async def _db_write(chat_id: int, types: set):
     try:
         await setter(chat_id, enabled, types=payload)
         return
-    except TypeError:
-        pass
+    except TypeError as e:
+        log.info("[cleanservice] DB setter doesn't accept 'types' kwarg: %s", e)
     try:
         await setter(chat_id, enabled, payload)
         return
-    except TypeError:
-        pass
+    except TypeError as e:
+        log.info("[cleanservice] DB setter doesn't accept positional types: %s", e)
+    # Legacy fallback
     await setter(chat_id, enabled)
+    log.warning(
+        "[cleanservice] ⚠️ used legacy bool-only setter for chat %s — "
+        "per-type settings will NOT persist across restarts!", chat_id
+    )
 
 
 async def _save(chat_id: int, types: set):
+    """Memory-first write with rollback on DB failure."""
     async with _lock(chat_id):
         previous = _state.get(chat_id)
+        previous_disabled = chat_id in _disabled
         _state[chat_id] = set(types)
+        if not types:
+            _disabled.add(chat_id)
+        else:
+            _disabled.discard(chat_id)
         try:
             await _db_write(chat_id, types)
         except Exception as e:
@@ -153,6 +198,10 @@ async def _save(chat_id: int, types: set):
                 _state.pop(chat_id, None)
             else:
                 _state[chat_id] = previous
+            if previous_disabled:
+                _disabled.add(chat_id)
+            else:
+                _disabled.discard(chat_id)
             raise
 
 
@@ -231,7 +280,6 @@ def _types_keyboard(current: set, include_back: bool = False) -> InlineKeyboardM
         buttons.append(row)
 
     if include_back:
-        # Help menu se aaya hai → Back button help section pe le jayega
         buttons.append([
             B("⬅ 𝘽𝙖𝙘𝙠", "help:cleanservice", style="primary"),
             B("✖ 𝘾𝙡𝙤𝙨𝙚", "help:close", style="danger"),
@@ -243,7 +291,6 @@ def _types_keyboard(current: set, include_back: bool = False) -> InlineKeyboardM
 
 
 async def get_help_menu_kb(chat_id: int) -> InlineKeyboardMarkup:
-    """Public helper — bot.py ke help menu se call hoga."""
     current = await _load(chat_id)
     return _types_keyboard(current, include_back=True)
 
@@ -348,7 +395,6 @@ async def _cs_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
 
-    # Close button
     if data == "cs_close":
         try:
             await query.message.delete()
@@ -356,7 +402,6 @@ async def _cs_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    # Toggle buttons
     if not data.startswith("cs_toggle:"):
         return
 
@@ -396,6 +441,8 @@ async def _cs_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ─────────────────────────── WATCHER ───────────────────────────
 async def _service_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Deletes service messages ONLY for the types enabled in this chat.
+    ALWAYS reads fresh from DB so stale cache can never cause wrong deletions."""
     msg = update.effective_message
     chat = update.effective_chat
     if not msg or not chat:
@@ -403,7 +450,12 @@ async def _service_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         return
 
-    enabled = await _load(chat.id)
+    # ⚡ Fast-path: if this chat is marked disabled, skip instantly
+    if chat.id in _disabled:
+        return
+
+    # 🔄 Always read fresh from DB (bypass cache)
+    enabled = await _load_fresh(chat.id)
     if not enabled:
         return
 
@@ -414,7 +466,10 @@ async def _service_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _bot_can_delete(ctx, chat.id):
         return
 
-    enabled = await _load(chat.id)
+    # 🔄 Re-check right before deleting (command may have changed state during the await)
+    if chat.id in _disabled:
+        return
+    enabled = await _load_fresh(chat.id)
     if not (kinds & enabled):
         return
 
