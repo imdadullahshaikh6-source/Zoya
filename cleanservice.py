@@ -16,18 +16,12 @@ log = logging.getLogger("cleanservice")
 
 # ─────────────────────────── TYPE MAP ───────────────────────────
 _TYPE_MAP = {
-    "join": (
-        "new_chat_members", "group_chat_created",
-        "supergroup_chat_created", "channel_chat_created",
+    "joinleave": (
+        "new_chat_members", "left_chat_member", "group_chat_created",
+        "supergroup_chat_created", "channel_chat_created"
     ),
-    "leave": ("left_chat_member",),
     "photo": ("new_chat_photo", "delete_chat_photo", "chat_background_set"),
     "pin": ("pinned_message",),
-    "title": (
-        "new_chat_title", "forum_topic_created", "forum_topic_closed",
-        "forum_topic_reopened", "forum_topic_edited",
-        "general_forum_topic_hidden", "general_forum_topic_unhidden",
-    ),
     "videochat": (
         "video_chat_scheduled", "video_chat_started", "video_chat_ended",
         "video_chat_participants_invited",
@@ -42,13 +36,11 @@ _TYPE_MAP = {
 _ALL_TYPES = tuple(_TYPE_MAP.keys())
 
 _TYPE_DESC = {
-    "join": "new member joined / chat created",
-    "leave": "member left or was removed",
+    "joinleave": "member joined or left the group",
     "photo": "chat photo or background changed",
     "pin": "a message was pinned",
-    "title": "chat / topic title changed",
     "videochat": "video chat started / ended / scheduled",
-    "other": "boosts, payments, auto-delete, proximity, etc.",
+    "other": "boosts, auto-delete, proximity, etc.",
 }
 
 HELP_TXT = (
@@ -135,9 +127,7 @@ async def _load(chat_id: int) -> set:
 
 
 async def _load_fresh(chat_id: int) -> set:
-    """ALWAYS read from DB — used by the watcher for critical checks.
-    This bypasses the in-memory cache entirely so stale state can never
-    cause unintended deletions."""
+    """ALWAYS read from DB — used by the watcher for critical checks."""
     try:
         cfg = await dbase.cleanservice_get(chat_id)
     except Exception as e:
@@ -149,7 +139,6 @@ async def _load_fresh(chat_id: int) -> set:
             types = _norm_types(cfg.get("types"))
         elif _truthy(cfg.get("enabled")):
             types = set(_ALL_TYPES)
-    # refresh cache too
     _state[chat_id] = set(types)
     if not types:
         _disabled.add(chat_id)
@@ -172,7 +161,6 @@ async def _db_write(chat_id: int, types: set):
         return
     except TypeError as e:
         log.info("[cleanservice] DB setter doesn't accept positional types: %s", e)
-    # Legacy fallback
     await setter(chat_id, enabled)
     log.warning(
         "[cleanservice] ⚠️ used legacy bool-only setter for chat %s — "
@@ -229,12 +217,12 @@ async def _bot_can_delete(ctx, chat_id: int) -> bool:
 
 # ─────────────────────────── HELPERS ───────────────────────────
 def _classify(msg) -> set:
+    """Classify message. Returns empty set if it's an unknown/unhandled service."""
     kinds = set()
     for t, attrs in _TYPE_MAP.items():
         if any(getattr(msg, a, None) for a in attrs):
             kinds.add(t)
-    if not kinds:
-        kinds.add("other")
+    # No fallback to "other" here — unknown services are ignored safely
     return kinds
 
 
@@ -264,11 +252,19 @@ def _types_keyboard(current: set, include_back: bool = False) -> InlineKeyboardM
     all_text = "🟢 𝘼𝙇𝙇" if all_on else "🔴 𝘼𝙇𝙇"
     buttons.append([B(all_text, "cs_toggle:all", style="success" if all_on else "danger")])
 
+    # Layout: joinleave | photo | pin  ->  videochat | other
     for t in _ALL_TYPES:
         on = t in current
-        label = "video" if t == "videochat" else t
+        # Custom label for combined join/leave
+        if t == "joinleave":
+            label = "Join/Leave"
+        elif t == "videochat":
+            label = "Video"
+        else:
+            label = t.capitalize()
+            
         row.append(B(
-            f"{'🟢' if on else '🔴'} {label.capitalize()}",
+            f"{'🟢' if on else '🔴'} {label}",
             f"cs_toggle:{t}",
             style="success" if on else "danger",
         ))
@@ -317,6 +313,10 @@ async def cleanservice_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     arg = args[0]
+    
+    # Map join/leave to combined joinleave
+    if arg in ("join", "leave"):
+        arg = "joinleave"
 
     if arg in ("on", "yes", "all"):
         new_types = set(_ALL_TYPES)
@@ -355,6 +355,10 @@ async def keepservice_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         new_types = set()
     else:
         arg = args[0]
+        # Map join/leave to combined joinleave
+        if arg in ("join", "leave"):
+            arg = "joinleave"
+            
         if arg not in _ALL_TYPES:
             safe_arg = html.escape(arg)
             await say(ctx, chat.id, T(f"❓ unknown type {safe_arg}.\n\n{_types_text()}"), reply_to=msg.message_id)
@@ -441,8 +445,7 @@ async def _cs_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ─────────────────────────── WATCHER ───────────────────────────
 async def _service_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Deletes service messages ONLY for the types enabled in this chat.
-    ALWAYS reads fresh from DB so stale cache can never cause wrong deletions."""
+    """Deletes service messages ONLY for the types enabled in this chat."""
     msg = update.effective_message
     chat = update.effective_chat
     if not msg or not chat:
@@ -450,23 +453,24 @@ async def _service_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         return
 
-    # ⚡ Fast-path: if this chat is marked disabled, skip instantly
     if chat.id in _disabled:
         return
 
-    # 🔄 Always read fresh from DB (bypass cache)
     enabled = await _load_fresh(chat.id)
     if not enabled:
         return
 
     kinds = _classify(msg)
+    if not kinds:
+        # Unknown service message — do NOT delete
+        return
+        
     if not (kinds & enabled):
         return
 
     if not await _bot_can_delete(ctx, chat.id):
         return
 
-    # 🔄 Re-check right before deleting (command may have changed state during the await)
     if chat.id in _disabled:
         return
     enabled = await _load_fresh(chat.id)
@@ -496,4 +500,4 @@ def register(app: Application):
             _service_watcher,
         ),
         group=97,
-    )
+            )
