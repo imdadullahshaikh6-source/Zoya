@@ -189,6 +189,8 @@ def section_page(key):
     rows = []
     if key == "locks":
         rows.append([B("𝙇𝙤𝙘𝙠𝙩𝙮𝙥𝙚𝙨", "help:locktypes", style="primary")])
+    elif key == "cleanservice":
+        rows.append([B("𝘾𝙡𝙚𝙖𝙣𝙨𝙚𝙧𝙫𝙞𝙘𝙚𝙩𝙮𝙥𝙚𝙨", "help:cleanservicetypes", style="primary")])
     rows.append([B("⬅ 𝘽𝙖𝙘𝙠", "help:main"), B("✖ 𝘾𝙡𝙤𝙨𝙚", "help:close", style="danger")])
     return sc(body), InlineKeyboardMarkup(rows)
 
@@ -310,6 +312,9 @@ async def help_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif page == "locktypes":
         text = sc("<b>The available locktypes are:</b>")
         kb = lock.get_locktypes_kb(back=True)
+    elif page == "cleanservicetypes":
+        text = sc("<b>The available cleanservice types are:</b>")
+        kb = await cleanservice.get_help_menu_kb(qy.message.chat_id)
     elif page in PAGES:
         text, kb = section_page(page)
     else:
