@@ -42,7 +42,7 @@ HELP_TXT = (
     "• Group photo / title change\n"
     "• Join requests, Approvals\n"
     "• Joins, Leaves\n\n"
-    "<i>Only admins can use these commands.</i>"
+    "<i>🔒 Owner only — only the group owner can set up or remove the log channel.</i>"
 )
 
 COMMANDS = [
@@ -80,15 +80,12 @@ def _chat_line(chat) -> str:
 
 
 def _msg_link(chat, message_id) -> str | None:
-    """Build a t.me message link for the given chat + message id.
-    Returns None if chat type can't produce a link (e.g. basic groups)."""
+    """Build a t.me message link for the given chat + message id."""
     if not chat or not message_id:
         return None
     try:
-        # Public supergroup / channel with username
         if getattr(chat, "username", None):
             return f"https://t.me/{chat.username}/{message_id}"
-        # Private supergroup: chat_id = -100XXXXXXXXXX
         cid = str(chat.id)
         if cid.startswith("-100"):
             short = cid[4:]
@@ -185,7 +182,8 @@ async def setlog_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         setup_msg = await ctx.bot.send_message(
             chat.id,
             "<b>🔗 Log Channel Setup</b>\n\n"
-            "Forward this message to the group where you want logs.",
+            "Forward this message to the group where you want logs.\n\n"
+            "<i>Only the group owner can complete the setup.</i>",
             parse_mode=ParseMode.HTML,
         )
         _cleanup_pending()
@@ -208,12 +206,13 @@ async def unsetlog_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        # 🔒 Owner-only check
         try:
             m = await ctx.bot.get_chat_member(chat.id, update.effective_user.id)
         except TelegramError:
             return
-        if m.status not in (ChatMemberStatus.OWNER, ChatMemberStatus.ADMINISTRATOR):
-            await say(ctx, chat.id, T("⚠️ Only admins can use this."), reply_to=msg.message_id)
+        if m.status != ChatMemberStatus.OWNER:
+            await say(ctx, chat.id, T("🔒 Only the group owner can remove the log channel."), reply_to=msg.message_id)
             return
 
         removed = await dbase.logchannel_unset(chat.id)
@@ -293,7 +292,6 @@ async def _service_logger(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not cfg or not cfg.get("channel_id"):
         return
 
-    # ── PIN: embed link of the pinned message inside the word "pinned" ──
     if msg.pinned_message:
         actor = update.effective_user
         pinned_id = msg.pinned_message.message_id
@@ -308,7 +306,6 @@ async def _service_logger(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await send_log(ctx.bot, chat.id, "\n".join(lines))
         return
 
-    # ── PHOTO / BACKGROUND ──
     if msg.new_chat_photo or msg.delete_chat_photo or msg.chat_background_set:
         actor = update.effective_user
         lines = [f"<b>#PHOTO:</b>", _chat_line(chat)]
@@ -323,7 +320,6 @@ async def _service_logger(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await send_log(ctx.bot, chat.id, "\n".join(lines))
         return
 
-    # ── TITLE ──
     if msg.new_chat_title:
         actor = update.effective_user
         lines = [
@@ -336,7 +332,6 @@ async def _service_logger(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await send_log(ctx.bot, chat.id, "\n".join(lines))
         return
 
-    # ── LEAVE ──
     if msg.left_chat_member:
         u = msg.left_chat_member
         lines = [
@@ -379,42 +374,36 @@ async def _chat_member_logger(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     old_s = old.status
     new_s = new.status
 
-    # ── BAN ──
     if new_s == ChatMemberStatus.BANNED and old_s != ChatMemberStatus.BANNED:
         lines = [f"<b>#BAN:</b>", _chat_line(chat)]
         if admin_id: lines.append(_user_line("Admin", admin_id, admin_name))
         lines.append(_user_line("User", user_id, user_name))
         lines.append("Reason:")
 
-    # ── UNBAN ──
     elif old_s == ChatMemberStatus.BANNED and new_s != ChatMemberStatus.BANNED:
         lines = [f"<b>#UNBAN:</b>", _chat_line(chat)]
         if admin_id: lines.append(_user_line("Admin", admin_id, admin_name))
         lines.append(_user_line("User", user_id, user_name))
         lines.append("Reason:")
 
-    # ── PROMOTE ──
     elif old_s in (ChatMemberStatus.MEMBER, ChatMemberStatus.RESTRICTED) and new_s == ChatMemberStatus.ADMINISTRATOR:
         lines = [f"<b>#PROMOTE:</b>", _chat_line(chat)]
         if admin_id: lines.append(_user_line("Admin", admin_id, admin_name))
         lines.append(_user_line("User", user_id, user_name))
         lines.append(f"{_esc(user_name)} was promoted to admin.")
 
-    # ── DEMOTE ──
     elif old_s == ChatMemberStatus.ADMINISTRATOR and new_s in (ChatMemberStatus.MEMBER, ChatMemberStatus.RESTRICTED):
         lines = [f"<b>#DEMOTE:</b>", _chat_line(chat)]
         if admin_id: lines.append(_user_line("Admin", admin_id, admin_name))
         lines.append(_user_line("User", user_id, user_name))
         lines.append(f"{_esc(user_name)} was demoted.")
 
-    # ── MUTE ──
     elif new_s == ChatMemberStatus.RESTRICTED and not getattr(new, "can_send_messages", True) and old_s != ChatMemberStatus.RESTRICTED:
         lines = [f"<b>#MUTE:</b>", _chat_line(chat)]
         if admin_id: lines.append(_user_line("Admin", admin_id, admin_name))
         lines.append(_user_line("User", user_id, user_name))
         lines.append("Reason:")
 
-    # ── WELCOME (Join / Approve) ──
     elif new_s == ChatMemberStatus.MEMBER and old_s in (ChatMemberStatus.LEFT, ChatMemberStatus.RESTRICTED):
         lines = [f"<b>#WELCOME:</b>", _chat_line(chat)]
         if admin_id: lines.append(_user_line("Admin", admin_id, admin_name))
@@ -475,12 +464,17 @@ async def _forward_detector(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if key not in _pending_setup:
         return
 
+    # 🔒 OWNER-ONLY CHECK
     try:
         m = await ctx.bot.get_chat_member(chat.id, user.id)
     except TelegramError:
         return
-    if m.status not in (ChatMemberStatus.OWNER, ChatMemberStatus.ADMINISTRATOR):
-        await say(ctx, chat.id, T("⚠️ Only admins can set up the log channel."), reply_to=msg.message_id)
+    if m.status != ChatMemberStatus.OWNER:
+        await say(
+            ctx, chat.id,
+            T("🔒 Only the <b>group owner</b> can set up the log channel."),
+            reply_to=msg.message_id,
+        )
         return
 
     channel_id = origin.chat.id
@@ -544,4 +538,4 @@ def register(app: Application):
             _forward_detector,
         ),
         group=96,
-                                   )
+            )
