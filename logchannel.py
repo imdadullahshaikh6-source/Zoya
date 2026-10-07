@@ -295,19 +295,6 @@ async def _service_logger(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await send_log(ctx.bot, chat.id, "\n".join(lines))
         return
 
-    if msg.new_chat_members:
-        for u in msg.new_chat_members:
-            if u.is_bot:
-                continue
-            lines = [
-                f"<b>#JOIN:</b>",
-                _chat_line(chat),
-                _user_line("User", u.id, u.full_name),
-                f"{_esc(u.full_name)} joined the chat.",
-            ]
-            await send_log(ctx.bot, chat.id, "\n".join(lines))
-        return
-
     if msg.left_chat_member:
         u = msg.left_chat_member
         lines = [
@@ -333,7 +320,6 @@ async def _chat_member_logger(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     actor = cmu.from_user
-    # Agar bot khud action kar raha hai, to uski alag se log karne ki zarurat nahi (moderation module handle karega)
     if actor and actor.id == ctx.bot.id:
         return
 
@@ -386,23 +372,19 @@ async def _chat_member_logger(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         lines.append(_user_line("User", user_id, user_name))
         lines.append("Reason:")
     
-    # ── APPROVE / UNMUTE (Restricted -> Member) ──
-    elif old_s == ChatMemberStatus.RESTRICTED and new_s == ChatMemberStatus.MEMBER:
+    # ── WELCOME (Join / Approve) ──
+    elif new_s == ChatMemberStatus.MEMBER and old_s in (ChatMemberStatus.LEFT, ChatMemberStatus.RESTRICTED):
+        lines = [f"<b>#WELCOME:</b>", _chat_line(chat)]
+        if admin_id: lines.append(_user_line("Admin", admin_id, admin_name))
+        lines.append(_user_line("User", user_id, user_name))
         if cmu.invite_link:
-            # Join request approve hua hai
-            lines = [f"<b>#APPROVE:</b>", _chat_line(chat)]
-            if admin_id: lines.append(_user_line("Admin", admin_id, admin_name))
-            lines.append(_user_line("User", user_id, user_name))
             if cmu.invite_link.creator:
                 lines.append(_user_line("Invitelink from", cmu.invite_link.creator.id, cmu.invite_link.creator.full_name))
-                lines.append(f"<b>Invitelink name:</b> {_esc(cmu.invite_link.name or 'None')}")
-            lines.append("User has been approved.")
+            lines.append(f"<b>Invitelink name:</b> {_esc(cmu.invite_link.name or 'None')}")
+        if admin_id:
+            lines.append(_user_line("Approved by", admin_id, admin_name))
         else:
-            # Normal unmute
-            lines = [f"<b>#UNMUTE:</b>", _chat_line(chat)]
-            if admin_id: lines.append(_user_line("Admin", admin_id, admin_name))
-            lines.append(_user_line("User", user_id, user_name))
-            lines.append("Reason:")
+            lines.append("User joined the chat.")
 
     if lines:
         await send_log(ctx.bot, chat.id, "\n".join(lines))
@@ -523,4 +505,4 @@ def register(app: Application):
             _forward_detector,
         ),
         group=96,
-        )
+     )
