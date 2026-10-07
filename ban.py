@@ -20,6 +20,8 @@ from telegram.error import TelegramError
 from telegram.ext import CallbackQueryHandler
 
 import database as dbase
+import logchannel
+from logchannel import _msg_link_for_chat_id
 from common import (
     ADMIN, B, OWNER, T, dual_command, esc, get_member, mention, q, require_admin,
     resolve_target, rights_of, say, tag_missing,
@@ -73,6 +75,20 @@ FULL_PERMS = ChatPermissions(
     can_pin_messages=False, can_manage_topics=False,
 )
 MUTE_PERMS = ChatPermissions(can_send_messages=False)
+
+
+# ───────── helpers for logchannel ─────────
+
+def _link_from_msg(update, chat):
+    """Build a message link from the replied-to message (if any)."""
+    try:
+        msg = update.effective_message
+        replied = msg.reply_to_message if msg else None
+        if not replied:
+            return ""
+        return _msg_link_for_chat_id(chat.id, replied.message_id, getattr(chat, "username", None)) or ""
+    except Exception:
+        return ""
 
 
 # ───────── anonymous helpers ─────────
@@ -131,6 +147,7 @@ async def _handle_anon_admin(update, ctx, action_type: str) -> bool:
         "target_name": target.first_name or "User",
         "reason": reason or "",
         "reply_msg_id": msg.reply_to_message.message_id if msg.reply_to_message else None,
+        "message_link": _link_from_msg(update, chat),
     }
     # lightweight cleanup so dict never explodes
     if len(_PENDING_ANON) > 200:
@@ -221,12 +238,21 @@ async def ban_cmd(update, ctx):
         u=mention(target), a=mention(user), r=esc(reason) if reason else "no reason given",
     )
     await ctx.bot.send_message(chat.id, q(text), reply_markup=_undo_kb("♻ Unban", f"mod:unban:{target.id}"))
+    # ── logchannel ──
+    await logchannel.log_action(
+        ctx.bot, chat.id, "BAN",
+        chat_title=chat.title,
+        admin_id=user.id, admin_name=user.full_name,
+        user_id=target.id, user_name=target.full_name,
+        reason=reason or "",
+        message_link=_link_from_msg(update, chat),
+    )
 
 
 async def unban_cmd(update, ctx):
     if await _handle_anon_admin(update, ctx, "unban"):
         return
-    msg, chat = update.effective_message, update.effective_chat
+    msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
     if not await _need_restrict(update, ctx):
         return
     target, _ = await _target_or_complain(update, ctx, "unban")
@@ -239,6 +265,15 @@ async def unban_cmd(update, ctx):
         return
     await dbase.mod_clear(chat.id, target.id)
     await say(ctx, chat.id, T("✅ {m} has been unbanned.", m=mention(target)), reply_to=msg.message_id)
+    # ── logchannel ──
+    await logchannel.log_action(
+        ctx.bot, chat.id, "UNBAN",
+        chat_title=chat.title,
+        admin_id=user.id, admin_name=user.full_name,
+        user_id=target.id, user_name=target.full_name,
+        reason="",
+        message_link=_link_from_msg(update, chat),
+    )
 
 
 # ───────── KICK ─────────
@@ -262,6 +297,15 @@ async def kick_cmd(update, ctx):
         u=mention(target), a=mention(user), r=esc(reason) if reason else "no reason given",
     )
     await ctx.bot.send_message(chat.id, q(text))
+    # ── logchannel ──
+    await logchannel.log_action(
+        ctx.bot, chat.id, "KICK",
+        chat_title=chat.title,
+        admin_id=user.id, admin_name=user.full_name,
+        user_id=target.id, user_name=target.full_name,
+        reason=reason or "",
+        message_link=_link_from_msg(update, chat),
+    )
 
 
 # ───────── MUTE ─────────
@@ -285,12 +329,21 @@ async def mute_cmd(update, ctx):
         u=mention(target), a=mention(user), r=esc(reason) if reason else "no reason given",
     )
     await ctx.bot.send_message(chat.id, q(text), reply_markup=_undo_kb("🔊 Unmute", f"mod:unmute:{target.id}"))
+    # ── logchannel ──
+    await logchannel.log_action(
+        ctx.bot, chat.id, "MUTE",
+        chat_title=chat.title,
+        admin_id=user.id, admin_name=user.full_name,
+        user_id=target.id, user_name=target.full_name,
+        reason=reason or "",
+        message_link=_link_from_msg(update, chat),
+    )
 
 
 async def unmute_cmd(update, ctx):
     if await _handle_anon_admin(update, ctx, "unmute"):
         return
-    msg, chat = update.effective_message, update.effective_chat
+    msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
     if not await _need_restrict(update, ctx):
         return
     target, _ = await _target_or_complain(update, ctx, "unmute")
@@ -303,6 +356,15 @@ async def unmute_cmd(update, ctx):
         return
     await dbase.mod_clear(chat.id, target.id)
     await say(ctx, chat.id, T("✅ {m} has been unmuted.", m=mention(target)), reply_to=msg.message_id)
+    # ── logchannel ──
+    await logchannel.log_action(
+        ctx.bot, chat.id, "UNMUTE",
+        chat_title=chat.title,
+        admin_id=user.id, admin_name=user.full_name,
+        user_id=target.id, user_name=target.full_name,
+        reason="",
+        message_link=_link_from_msg(update, chat),
+    )
 
 
 # ───────── WARN ─────────
@@ -334,12 +396,22 @@ async def warn_cmd(update, ctx):
         else:
             text += "\n\n" + T("⚠ warn limit reached, but i don't have the Ban Users power to mute.")
     await ctx.bot.send_message(chat.id, q(text), reply_markup=kb)
+    # ── logchannel ──
+    await logchannel.log_action(
+        ctx.bot, chat.id, "WARN",
+        chat_title=chat.title,
+        admin_id=user.id, admin_name=user.full_name,
+        user_id=target.id, user_name=target.full_name,
+        reason=reason or "no reason given",
+        message_link=_link_from_msg(update, chat),
+        extra_lines=[f"<b>Warns:</b> {count}/{WARN_LIMIT}"],
+    )
 
 
 async def unwarn_cmd(update, ctx):
     if await _handle_anon_admin(update, ctx, "unwarn"):
         return
-    msg, chat = update.effective_message, update.effective_chat
+    msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
     if not await require_admin(update, ctx, "restrict_members"):
         return
     target, _ = await _target_or_complain(update, ctx, "unwarn")
@@ -347,6 +419,15 @@ async def unwarn_cmd(update, ctx):
         return
     await dbase.warn_clear(chat.id, target.id)
     await say(ctx, chat.id, T("✅ warns cleared for {m}.", m=mention(target)), reply_to=msg.message_id)
+    # ── logchannel ──
+    await logchannel.log_action(
+        ctx.bot, chat.id, "UNWARN",
+        chat_title=chat.title,
+        admin_id=user.id, admin_name=user.full_name,
+        user_id=target.id, user_name=target.full_name,
+        reason="",
+        message_link=_link_from_msg(update, chat),
+    )
 
 
 # ───────── DELETE + ACTION ─────────
@@ -375,6 +456,8 @@ async def sban_cmd(update, ctx):
     target, reason = await _target_or_complain(update, ctx, "sban")
     if not target:
         return
+    # grab link before deleting
+    link = _link_from_msg(update, chat)
     # Delete replied message first
     await _delete_replied(update)
     try:
@@ -383,8 +466,16 @@ async def sban_cmd(update, ctx):
         await say(ctx, chat.id, T("ban failed:") + f" {esc(e)}", reply_to=msg.message_id)
         return
     await dbase.mod_set(chat.id, target.id, "ban", user.id, reason or "silent ban")
+    # ── logchannel ──
+    await logchannel.log_action(
+        ctx.bot, chat.id, "BAN",
+        chat_title=chat.title,
+        admin_id=user.id, admin_name=user.full_name,
+        user_id=target.id, user_name=target.full_name,
+        reason=reason or "silent ban",
+        message_link=link,
+    )
     # Silent — no event message.
-    # Also delete the command message to keep it clean.
     try:
         await msg.delete()
     except TelegramError:
@@ -400,6 +491,7 @@ async def smute_cmd(update, ctx):
     target, reason = await _target_or_complain(update, ctx, "smute")
     if not target:
         return
+    link = _link_from_msg(update, chat)
     # Delete replied message first
     await _delete_replied(update)
     try:
@@ -408,6 +500,15 @@ async def smute_cmd(update, ctx):
         await say(ctx, chat.id, T("mute failed:") + f" {esc(e)}", reply_to=msg.message_id)
         return
     await dbase.mod_set(chat.id, target.id, "mute", user.id, reason or "silent mute")
+    # ── logchannel ──
+    await logchannel.log_action(
+        ctx.bot, chat.id, "MUTE",
+        chat_title=chat.title,
+        admin_id=user.id, admin_name=user.full_name,
+        user_id=target.id, user_name=target.full_name,
+        reason=reason or "silent mute",
+        message_link=link,
+    )
     # Silent — no event message.
     try:
         await msg.delete()
@@ -429,18 +530,43 @@ async def mod_cb(update, ctx):
         await qy.answer("I don't have the Ban Users power.", show_alert=True)
         return
     target_mention = f'<a href="tg://user?id={uid}">this user</a>'
+    actor = qy.from_user
     try:
         if action == "unban":
             await ctx.bot.unban_chat_member(chat.id, uid, only_if_banned=True)
             await dbase.mod_clear(chat.id, uid)
-            new_text = T("<b>✅ unbanned</b>\n\n{m} was unbanned by {a}.", m=target_mention, a=mention(qy.from_user))
+            new_text = T("<b>✅ unbanned</b>\n\n{m} was unbanned by {a}.", m=target_mention, a=mention(actor))
+            # ── logchannel ──
+            await logchannel.log_action(
+                ctx.bot, chat.id, "UNBAN",
+                chat_title=chat.title,
+                admin_id=actor.id, admin_name=actor.full_name,
+                user_id=uid, user_name="User",
+                reason="",
+            )
         elif action == "unmute":
             await ctx.bot.restrict_chat_member(chat.id, uid, permissions=FULL_PERMS)
             await dbase.mod_clear(chat.id, uid)
-            new_text = T("<b>✅ unmuted</b>\n\n{m} was unmuted by {a}.", m=target_mention, a=mention(qy.from_user))
+            new_text = T("<b>✅ unmuted</b>\n\n{m} was unmuted by {a}.", m=target_mention, a=mention(actor))
+            # ── logchannel ──
+            await logchannel.log_action(
+                ctx.bot, chat.id, "UNMUTE",
+                chat_title=chat.title,
+                admin_id=actor.id, admin_name=actor.full_name,
+                user_id=uid, user_name="User",
+                reason="",
+            )
         elif action == "unwarn":
             await dbase.warn_clear(chat.id, uid)
-            new_text = T("<b>✅ warns cleared</b>\n\n{m}'s warns were cleared by {a}.", m=target_mention, a=mention(qy.from_user))
+            new_text = T("<b>✅ warns cleared</b>\n\n{m}'s warns were cleared by {a}.", m=target_mention, a=mention(actor))
+            # ── logchannel ──
+            await logchannel.log_action(
+                ctx.bot, chat.id, "UNWARN",
+                chat_title=chat.title,
+                admin_id=actor.id, admin_name=actor.full_name,
+                user_id=uid, user_name="User",
+                reason="",
+            )
         else:
             await qy.answer()
             return
@@ -475,6 +601,7 @@ async def anon_mod_callback(update, ctx):
     target_name = pending["target_name"]
     reason = pending["reason"]
     reply_msg_id = pending.get("reply_msg_id")
+    msg_link = pending.get("message_link", "")
     approver = qy.from_user
 
     # ── Cross-verify approver's rights ──
@@ -509,6 +636,13 @@ async def anon_mod_callback(update, ctx):
     target_mention = f'<a href="tg://user?id={target_id}">{esc(target_name)}</a>'
     approver_mention = mention(approver)
 
+    # For logchannel
+    try:
+        chat_obj = await ctx.bot.get_chat(chat_id)
+        chat_title_log = chat_obj.title or ""
+    except TelegramError:
+        chat_title_log = ""
+
     try:
         # ── Silent actions first (delete replied, act, no event) ──
         if action_type in ("sban", "smute"):
@@ -520,9 +654,25 @@ async def anon_mod_callback(update, ctx):
             if action_type == "sban":
                 await ctx.bot.ban_chat_member(chat_id, target_id)
                 await dbase.mod_set(chat_id, target_id, "ban", approver.id, reason or "silent ban")
+                await logchannel.log_action(
+                    ctx.bot, chat_id, "BAN",
+                    chat_title=chat_title_log,
+                    admin_id=approver.id, admin_name=approver.full_name,
+                    user_id=target_id, user_name=target_name,
+                    reason=reason or "silent ban",
+                    message_link=msg_link,
+                )
             else:
                 await ctx.bot.restrict_chat_member(chat_id, target_id, permissions=MUTE_PERMS)
                 await dbase.mod_set(chat_id, target_id, "mute", approver.id, reason or "silent mute")
+                await logchannel.log_action(
+                    ctx.bot, chat_id, "MUTE",
+                    chat_title=chat_title_log,
+                    admin_id=approver.id, admin_name=approver.full_name,
+                    user_id=target_id, user_name=target_name,
+                    reason=reason or "silent mute",
+                    message_link=msg_link,
+                )
             # Delete the verification message entirely (no trace)
             try:
                 await qy.message.delete()
@@ -537,12 +687,28 @@ async def anon_mod_callback(update, ctx):
             new_text = T("<b>🚫 BAN (anon approved)</b>\n\nuser: {u}\nby: {a}\nreason: {r}",
                          u=target_mention, a=approver_mention,
                          r=esc(reason) if reason else "no reason given")
+            await logchannel.log_action(
+                ctx.bot, chat_id, "BAN",
+                chat_title=chat_title_log,
+                admin_id=approver.id, admin_name=approver.full_name,
+                user_id=target_id, user_name=target_name,
+                reason=reason or "",
+                message_link=msg_link,
+            )
 
         elif action_type == "unban":
             await ctx.bot.unban_chat_member(chat_id, target_id, only_if_banned=True)
             await dbase.mod_clear(chat_id, target_id)
             new_text = T("<b>✅ UNBANNED</b>\n\n{m} was unbanned by {a}.",
                          m=target_mention, a=approver_mention)
+            await logchannel.log_action(
+                ctx.bot, chat_id, "UNBAN",
+                chat_title=chat_title_log,
+                admin_id=approver.id, admin_name=approver.full_name,
+                user_id=target_id, user_name=target_name,
+                reason="",
+                message_link=msg_link,
+            )
 
         elif action_type == "kick":
             await ctx.bot.ban_chat_member(chat_id, target_id)
@@ -550,6 +716,14 @@ async def anon_mod_callback(update, ctx):
             new_text = T("<b>👢 KICKED (anon approved)</b>\n\nuser: {u}\nby: {a}\nreason: {r}",
                          u=target_mention, a=approver_mention,
                          r=esc(reason) if reason else "no reason given")
+            await logchannel.log_action(
+                ctx.bot, chat_id, "KICK",
+                chat_title=chat_title_log,
+                admin_id=approver.id, admin_name=approver.full_name,
+                user_id=target_id, user_name=target_name,
+                reason=reason or "",
+                message_link=msg_link,
+            )
 
         elif action_type == "mute":
             await ctx.bot.restrict_chat_member(chat_id, target_id, permissions=MUTE_PERMS)
@@ -557,12 +731,28 @@ async def anon_mod_callback(update, ctx):
             new_text = T("<b>🔇 MUTE (anon approved)</b>\n\nuser: {u}\nby: {a}\nreason: {r}",
                          u=target_mention, a=approver_mention,
                          r=esc(reason) if reason else "no reason given")
+            await logchannel.log_action(
+                ctx.bot, chat_id, "MUTE",
+                chat_title=chat_title_log,
+                admin_id=approver.id, admin_name=approver.full_name,
+                user_id=target_id, user_name=target_name,
+                reason=reason or "",
+                message_link=msg_link,
+            )
 
         elif action_type == "unmute":
             await ctx.bot.restrict_chat_member(chat_id, target_id, permissions=FULL_PERMS)
             await dbase.mod_clear(chat_id, target_id)
             new_text = T("<b>✅ UNMUTED</b>\n\n{m} was unmuted by {a}.",
                          m=target_mention, a=approver_mention)
+            await logchannel.log_action(
+                ctx.bot, chat_id, "UNMUTE",
+                chat_title=chat_title_log,
+                admin_id=approver.id, admin_name=approver.full_name,
+                user_id=target_id, user_name=target_name,
+                reason="",
+                message_link=msg_link,
+            )
 
         elif action_type == "warn":
             count = await dbase.warn_add(chat_id, target_id, approver.id, reason)
@@ -577,11 +767,28 @@ async def anon_mod_callback(update, ctx):
                     new_text += "\n\n" + T("🔇 warn limit reached — user has been muted.")
                 except TelegramError as e:
                     new_text += "\n\n" + T("⚠ warn limit reached but mute failed:") + f" {esc(e)}"
+            await logchannel.log_action(
+                ctx.bot, chat_id, "WARN",
+                chat_title=chat_title_log,
+                admin_id=approver.id, admin_name=approver.full_name,
+                user_id=target_id, user_name=target_name,
+                reason=reason or "no reason given",
+                message_link=msg_link,
+                extra_lines=[f"<b>Warns:</b> {count}/{WARN_LIMIT}"],
+            )
 
         elif action_type == "unwarn":
             await dbase.warn_clear(chat_id, target_id)
             new_text = T("<b>✅ WARNS CLEARED</b>\n\n{m}'s warns were cleared by {a}.",
                          m=target_mention, a=approver_mention)
+            await logchannel.log_action(
+                ctx.bot, chat_id, "UNWARN",
+                chat_title=chat_title_log,
+                admin_id=approver.id, admin_name=approver.full_name,
+                user_id=target_id, user_name=target_name,
+                reason="",
+                message_link=msg_link,
+            )
 
         else:
             await qy.edit_message_text("Unknown action.")
@@ -613,3 +820,4 @@ def register(app):
     app.add_handler(CallbackQueryHandler(mod_cb, pattern=r"^mod:"))
     # new anonymous verify buttons
     app.add_handler(CallbackQueryHandler(anon_mod_callback, pattern=r"^anonmod:"))
+            
