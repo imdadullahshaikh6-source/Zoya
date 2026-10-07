@@ -20,7 +20,6 @@ import admin
 import afk
 import ban
 import cleancommand
-import cleanservice      # ✅ NEW
 import database as dbase
 import filters as bot_filters
 import fun
@@ -107,7 +106,7 @@ PURGE_TXT = (
     "<i>Note: You need 'Delete Messages' admin right, and the bot must be an admin with delete rights.</i>"
 )
 
-# ✅ PAGES: All categories including new ones
+# ✅ PAGES: All categories (cleanservice removed)
 PAGES = {
     "greet": ("🎉 𝙂𝙧𝙚𝙚𝙩𝙞𝙣𝙜𝙨", welcome.HELP_TXT),
     "admin": ("👮 𝘼𝙙𝙢𝙞𝙣", admin.HELP_TXT),
@@ -118,7 +117,6 @@ PAGES = {
     "guardian": ("🛡 𝙂𝙪𝙖𝙧𝙙𝙞𝙖𝙣", GUARDIAN_TXT),
     "pin": ("📌 𝙋𝙞𝙣", pin.HELP_TXT),
     "cleancommand": ("🧹 𝘾𝙡𝙚𝙖𝙣 𝘾𝙤𝙢𝙢𝙖𝙣𝙙", cleancommand.HELP_TXT),
-    "cleanservice": ("🧼 𝘾𝙡𝙚𝙖𝙣 𝙎𝙚𝙧𝙫𝙞𝙘𝙚", cleanservice.HELP_TXT),
     "locks": ("🔒 𝙇𝙤𝙘𝙠𝙨", LOCKS_TXT),
     "purge": ("🧹 𝙋𝙪𝙧𝙜𝙚", PURGE_TXT),
 }
@@ -135,7 +133,6 @@ ALIASES = {
     "editdelay": "guardian", "mediadelay": "guardian",
     "pin": "pin", "unpin": "pin",
     "clean": "cleancommand", "cleancommand": "cleancommand",
-    "cleanservice": "cleanservice", "keepservice": "cleanservice",
     "locks": "locks", "locktypes": "locks",
     "purge": "purge", "spurge": "purge", "del": "purge",
 }
@@ -165,14 +162,14 @@ def home_page(user, ctx):
 
 def main_page():
     text = sc("<b>✦ command</b>\n\nchoose a category to see all details.")
-    # ✅ Full layout with required colors and order (exactly as user requested)
+    # ✅ Full layout (cleanservice removed)
     layout = [
         [("greet", "success"), ("admin", "primary")],
         [("afk", "success"), ("mod", "primary")],
         [("extra", "success"), ("filters", "primary")],
         [("guardian", "success"), ("pin", "primary")],
-        [("cleancommand", "success"), ("cleanservice", "primary")],
-        [("locks", "success"), ("purge", "primary")],
+        [("cleancommand", "success"), ("purge", "primary")],
+        [("locks", "primary")],
     ]
     rows = []
     for row in layout:
@@ -189,8 +186,6 @@ def section_page(key):
     rows = []
     if key == "locks":
         rows.append([B("𝙇𝙤𝙘𝙠𝙩𝙮𝙥𝙚𝙨", "help:locktypes", style="primary")])
-    elif key == "cleanservice":
-        rows.append([B("𝘾𝙡𝙚𝙖𝙣𝙨𝙚𝙧𝙫𝙞𝙘𝙚𝙩𝙮𝙥𝙚𝙨", "help:cleanservicetypes", style="primary")])
     rows.append([B("⬅ 𝘽𝙖𝙘𝙠", "help:main"), B("✖ 𝘾𝙡𝙤𝙨𝙚", "help:close", style="danger")])
     return sc(body), InlineKeyboardMarkup(rows)
 
@@ -312,9 +307,6 @@ async def help_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif page == "locktypes":
         text = sc("<b>The available locktypes are:</b>")
         kb = lock.get_locktypes_kb(back=True)
-    elif page == "cleanservicetypes":
-        text = sc("<b>The available cleanservice types are:</b>")
-        kb = await cleanservice.get_help_menu_kb(qy.message.chat_id)
     elif page in PAGES:
         text, kb = section_page(page)
     else:
@@ -349,7 +341,7 @@ async def post_init(app: Application):
     app.bot_data["me"] = await app.bot.get_me()
     cmds = [("start", "Start the bot"), ("help", "Show commands")]
     for mod in (welcome, admin, afk, ban, sticker, fun, bot_filters, ping,
-                guardian, cleancommand, cleanservice, pin, lock, purge):
+                guardian, cleancommand, pin, lock, purge):
         cmds += mod.COMMANDS
     await app.bot.set_my_commands(cmds)
     log.info("Started as @%s", app.bot_data["me"].username)
@@ -391,7 +383,6 @@ def main():
     ping.register(app)
     guardian.register(app)
     cleancommand.register(app)
-    cleanservice.register(app)   # ✅ NEW
     pin.register(app)
     mantion.register(app)
     lock.register(app)
