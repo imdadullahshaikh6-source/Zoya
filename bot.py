@@ -25,6 +25,7 @@ import filters as bot_filters
 import fun
 import guardian
 import lock
+import logchannel        # ✅ NEW
 import logs
 import pin
 import ping
@@ -34,7 +35,7 @@ import welcome
 import mantion
 from common import B, T, log, mention, say, sc
 
-# ✅ LOGGING FIX: INFO se WARNING kar diya aur httpx/telegram ka spam band kiya
+# ✅ LOGGING FIX
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(name)s | %(message)s", level=logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
@@ -47,7 +48,6 @@ OWNER_USERNAME = "Ownerbackk"
 OWNER_URL = f"https://t.me/{OWNER_USERNAME}"
 CHANNEL_URL = os.getenv("CHANNEL_URL", "")
 
-# ✅ FORCE UPDATE: os.getenv hata diya taaki .env ka purana link override na kare
 START_IMG = "https://i.ibb.co/Vct9gs09/image.jpg"
 
 START_TXT = (
@@ -59,6 +59,7 @@ START_TXT = (
     "➤ afk tracking\n"
     "➤ guardian — anti-edit & anti-media defender\n"
     "➤ locks — auto-delete spam type messages\n"
+    "➤ log channel — activity logs\n"
     "➤ clean command & pin tools\n"
     "➤ every command works with / or . in groups\n\n"
     "tap <b>command</b> below to see everything i can do."
@@ -106,7 +107,7 @@ PURGE_TXT = (
     "<i>Note: You need 'Delete Messages' admin right, and the bot must be an admin with delete rights.</i>"
 )
 
-# ✅ PAGES: All categories (cleanservice removed)
+# ✅ PAGES
 PAGES = {
     "greet": ("🎉 𝙂𝙧𝙚𝙚𝙩𝙞𝙣𝙜𝙨", welcome.HELP_TXT),
     "admin": ("👮 𝘼𝙙𝙢𝙞𝙣", admin.HELP_TXT),
@@ -117,6 +118,7 @@ PAGES = {
     "guardian": ("🛡 𝙂𝙪𝙖𝙧𝙙𝙞𝙖𝙣", GUARDIAN_TXT),
     "pin": ("📌 𝙋𝙞𝙣", pin.HELP_TXT),
     "cleancommand": ("🧹 𝘾𝙡𝙚𝙖𝙣 𝘾𝙤𝙢𝙢𝙖𝙣𝙙", cleancommand.HELP_TXT),
+    "logchannel": ("📋 𝙇𝙤𝙜 𝘾𝙝𝙖𝙣𝙣𝙚𝙡", logchannel.HELP_TXT),
     "locks": ("🔒 𝙇𝙤𝙘𝙠𝙨", LOCKS_TXT),
     "purge": ("🧹 𝙋𝙪𝙧𝙜𝙚", PURGE_TXT),
 }
@@ -133,6 +135,7 @@ ALIASES = {
     "editdelay": "guardian", "mediadelay": "guardian",
     "pin": "pin", "unpin": "pin",
     "clean": "cleancommand", "cleancommand": "cleancommand",
+    "logchannel": "logchannel", "setlog": "logchannel", "unsetlog": "logchannel",
     "locks": "locks", "locktypes": "locks",
     "purge": "purge", "spurge": "purge", "del": "purge",
 }
@@ -162,14 +165,13 @@ def home_page(user, ctx):
 
 def main_page():
     text = sc("<b>✦ command</b>\n\nchoose a category to see all details.")
-    # ✅ Full layout (cleanservice removed)
     layout = [
         [("greet", "success"), ("admin", "primary")],
         [("afk", "success"), ("mod", "primary")],
         [("extra", "success"), ("filters", "primary")],
         [("guardian", "success"), ("pin", "primary")],
         [("cleancommand", "success"), ("purge", "primary")],
-        [("locks", "primary")],
+        [("logchannel", "success"), ("locks", "primary")],
     ]
     rows = []
     for row in layout:
@@ -221,32 +223,22 @@ async def start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     arg = (ctx.args[0].lower() if ctx.args else "")
     key = ALIASES.get(arg)
-    
-    # ✅ DEEP LINK: Agar koi specific section ka link hai toh seedha wahan bhejo (animation skip)
+
     if key:
         text, kb = section_page(key)
         await ctx.bot.send_message(chat.id, f"<blockquote expandable>{text}</blockquote>", parse_mode=ParseMode.HTML, reply_markup=kb)
         return
 
-    # ✅ NEW: Custom Emoji Animation Sequence (Only for plain /start)
     emoji_ids = [
-        "6170217276621465566",
-        "5839324431972831360",
-        "5839258615893987760",
-        "5839197580113744758",
-        "5841653515428041932",
-        "5411439857002113489"
+        "6170217276621465566", "5839324431972831360", "5839258615893987760",
+        "5839197580113744758", "5841653515428041932", "5411439857002113489"
     ]
-    
     try:
-        # 1. Send the first emoji
         anim_msg = await ctx.bot.send_message(
             chat_id=chat.id,
             text=f'<tg-emoji emoji-id="{emoji_ids[0]}">💎</tg-emoji>',
             parse_mode=ParseMode.HTML
         )
-        
-        # 2. Loop through the rest of the emojis
         for emoji_id in emoji_ids[1:]:
             await asyncio.sleep(0.3)
             try:
@@ -257,14 +249,11 @@ async def start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     parse_mode=ParseMode.HTML
                 )
             except TelegramError:
-                pass # Ignore edit errors if any
-        
-        # 3. Delete the animation message
+                pass
         await anim_msg.delete()
     except TelegramError as e:
         log.warning("Emoji animation failed: %s", e)
 
-    # 4. Send the main photo with caption and buttons
     text, kb = home_page(user, ctx)
     try:
         await ctx.bot.send_photo(chat.id, START_IMG, caption=f"<blockquote expandable>{text}</blockquote>", parse_mode=ParseMode.HTML, reply_markup=kb)
@@ -341,7 +330,7 @@ async def post_init(app: Application):
     app.bot_data["me"] = await app.bot.get_me()
     cmds = [("start", "Start the bot"), ("help", "Show commands")]
     for mod in (welcome, admin, afk, ban, sticker, fun, bot_filters, ping,
-                guardian, cleancommand, pin, lock, purge):
+                guardian, cleancommand, logchannel, pin, lock, purge):
         cmds += mod.COMMANDS
     await app.bot.set_my_commands(cmds)
     log.info("Started as @%s", app.bot_data["me"].username)
@@ -383,6 +372,7 @@ def main():
     ping.register(app)
     guardian.register(app)
     cleancommand.register(app)
+    logchannel.register(app)     # ✅ NEW
     pin.register(app)
     mantion.register(app)
     lock.register(app)
