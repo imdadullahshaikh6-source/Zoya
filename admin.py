@@ -6,6 +6,7 @@ from telegram.constants import ChatMemberStatus, ChatType, ParseMode
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import CallbackQueryHandler
 
+import logchannel
 from common import (
     ADMIN, B, OWNER, RIGHTS, RL, T, dual_command, esc, explain, get_member,
     mention, q, require_admin, resolve_target, rights_of, say, tag_missing,
@@ -273,7 +274,7 @@ async def anon_verify_callback(update, ctx):
         sel = {k: (k in ("delete_messages", "invite_users", "pin_messages")) and br[k] for k, _ in rights_list}
         
     panel_st = dict(
-        mode=st["mode"], chat_id=chat.id, invoker=user.id, target=target.user.id, # ✅ FIX YAHAN HAI (target.user.id)
+        mode=st["mode"], chat_id=chat.id, invoker=user.id, target=target.user.id,
         tgt_m=mention(target.user), inv_m=mention(user), title=st["title"],
         rights_list=rights_list, bot=br, sel=sel, forum=bool(chat.is_forum),
         missing=[l for k, l in rights_list if not br[k]],
@@ -344,6 +345,24 @@ async def promote_cb(update, ctx):
         PANELS.pop(key, None)
         await qy.edit_message_text(q(T("<b>✅ promoted</b>\n\n{m}\n\n{p}{n}", m=st["tgt_m"], p=powers, n=note)))
         await qy.answer("Promoted ✅")
+
+        # ── logchannel ──
+        try:
+            _tm = await ctx.bot.get_chat_member(st["chat_id"], st["target"])
+            _target_name = _tm.user.full_name
+        except TelegramError:
+            _target_name = "User"
+        _chat_title = qy.message.chat.title or ""
+        _chosen_names = ", ".join(RL[k] for k in chosen)
+        if st["sel"].get("anonymous"):
+            _chosen_names += ", Anonymous"
+        await logchannel.log_action(
+            ctx.bot, st["chat_id"], "PROMOTE",
+            chat_title=_chat_title,
+            admin_id=qy.from_user.id, admin_name=qy.from_user.full_name,
+            user_id=st["target"], user_name=_target_name,
+            extra_lines=[f"<b>Powers:</b> {esc(_chosen_names)}"],
+        )
         return
     try:
         await qy.edit_message_text(q(_panel_text(st)), reply_markup=_panel_kb(st))
@@ -376,6 +395,21 @@ async def demote_cb(update, ctx):
     PANELS.pop(key, None)
     await qy.edit_message_text(q(T("<b>✅ demoted</b>\n\n{m} is no longer an admin.", m=st["tgt_m"])))
     await qy.answer("Demoted ✅")
+
+    # ── logchannel ──
+    try:
+        _tm = await ctx.bot.get_chat_member(st["chat_id"], st["target"])
+        _target_name = _tm.user.full_name
+    except TelegramError:
+        _target_name = "User"
+    _chat_title = qy.message.chat.title or ""
+    await logchannel.log_action(
+        ctx.bot, st["chat_id"], "DEMOTE",
+        chat_title=_chat_title,
+        admin_id=qy.from_user.id, admin_name=qy.from_user.full_name,
+        user_id=st["target"], user_name=_target_name,
+        reason="",
+    )
 
 
 def register(app):
