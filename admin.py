@@ -32,6 +32,26 @@ COMMANDS = [("promote", "Promote a user"), ("demote", "Demote an admin")]
 PANELS: "OrderedDict[str, dict]" = OrderedDict()
 ANON_PENDING = {}  # Anonymous verification pending actions
 
+# How many permission buttons per page
+PER_PAGE = 4
+
+
+# ───────────────────── FANCY FONT CONVERTER ─────────────────────
+_FANCY_MAP = {}
+for _n, _f in zip("abcdefghijklmnopqrstuvwxyz",
+                  "𝙖𝙗𝙘𝙙𝙚𝙛𝙜𝙝𝙞𝙟𝙠𝙡𝙢𝙣𝙤𝙥𝙦𝙧𝙨𝙩𝙪𝙫𝙬𝙭𝙮𝙯"):
+    _FANCY_MAP[_n] = _f
+for _n, _f in zip("ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+                  "𝘼𝘽𝘾𝘿𝙀𝙁𝙂𝙃𝙄𝙅𝙆𝙇𝙈𝙉𝙊𝙋𝙌𝙍𝙎𝙏𝙐𝙑𝙒𝙓𝙔𝙕"):
+    _FANCY_MAP[_n] = _f
+
+
+def _fancy(s: str) -> str:
+    """Convert string to bold-italic sans-serif unicode (𝙘𝙝𝙖𝙣𝙜𝙚 𝙞𝙣𝙛𝙤 style)."""
+    if not s:
+        return ""
+    return "".join(_FANCY_MAP.get(c, c) for c in s)
+
 
 def _put(key, st):
     PANELS[key] = st
@@ -72,8 +92,7 @@ async def _precheck(update, ctx, mode: str):
         if not target:
             await say(ctx, chat.id, T("reply to a user, or use /{c} @username | user id", c=mode), reply_to=msg.message_id)
             return None
-        
-        # Save the pending action
+
         action_id = f"anon_{mode}_{chat.id}_{msg.message_id}"
         ANON_PENDING[action_id] = {
             "mode": mode,
@@ -83,7 +102,7 @@ async def _precheck(update, ctx, mode: str):
             "title": title[:16] if title else "",
             "invoker_msg_id": msg.message_id
         }
-        
+
         kb = InlineKeyboardMarkup([[B("𝙥𝙧𝙤𝙫𝙚 𝙊𝙬𝙣𝙚𝙧/𝙖𝙙𝙢𝙞𝙣", action_id, style="success")]])
         await ctx.bot.send_message(
             chat.id,
@@ -132,29 +151,78 @@ async def _precheck(update, ctx, mode: str):
     return dict(chat=chat, user=user, target=target, title=title[:16], tm=tm, br=br, msg=msg)
 
 
+# ───────────────────── PANEL BUILDERS ─────────────────────
+
+def _all_items(st):
+    """Return list of (key, label) including anonymous."""
+    items = list(st["rights_list"])
+    items.append(("anonymous", "Anonymous"))
+    return items
+
+
 def _panel_text(st) -> str:
-    lines = [T("<b>✦ promote panel</b>"), "", T("user: ") + st["tgt_m"], T("select the powers, then press promote.")]
+    items = _all_items(st)
+    total_pages = max(1, (len(items) + PER_PAGE - 1) // PER_PAGE)
+    page = st.get("page", 0)
+    selected = sum(1 for k, _ in items if st["sel"].get(k))
+
+    lines = [
+        T("<b>✦ 𝙋𝙧𝙤𝙢𝙤𝙩𝙚 𝙎𝙚𝙩𝙪𝙥</b>"),
+        "",
+        "👤 " + T("User: ") + st["tgt_m"],
+    ]
     if st["title"]:
-        lines.append(T("title: ") + f"<b>{esc(st['title'])}</b>")
+        lines.append("🏷 " + T("Title: ") + f"<b>{esc(st['title'])}</b>")
+    lines.append(f"📄 {_fancy('Page')}: <b>{page + 1}/{total_pages}</b>")
+    lines.append(f"✅ {_fancy('Selected Rights')}: <b>{selected}</b>")
     if st["missing"]:
-        lines += ["", T("{m}, i don't have: {l}. those buttons are locked 🔒", m=st["inv_m"], l="<b>" + esc(", ".join(st["missing"])) + "</b>")]
+        lines += ["", T("{m}, i don't have: {l}. those buttons are locked 🔒",
+                        m=st["inv_m"],
+                        l="<b>" + esc(", ".join(st["missing"])) + "</b>")]
     return "\n".join(lines)
 
 
 def _panel_kb(st):
+    items = _all_items(st)
+    total_pages = max(1, (len(items) + PER_PAGE - 1) // PER_PAGE)
+    page = st.get("page", 0)
+    start = page * PER_PAGE
+    end = start + PER_PAGE
+    page_items = items[start:end]
+
     btns = []
-    for k, label in st["rights_list"]:
-        if not st["bot"].get(k):
-            btns.append(B(f"🔒 {label}", f"pr:na:{k}"))
-        elif st["sel"].get(k):
-            btns.append(B(f"✅ {label}", f"pr:t:{k}", style="success"))
-        else:
-            btns.append(B(f"❌ {label}", f"pr:t:{k}", style="danger"))
-    anon = st["sel"].get("anonymous")
-    btns.append(B(f"{'✅' if anon else '❌'} Anonymous", "pr:t:anonymous", style="success" if anon else "danger"))
+    for k, label in page_items:
+        on = bool(st["sel"].get(k))
+        mark = "🟢" if on else "🔴"
+        btns.append(B(
+            f"{mark} {_fancy(label)}",
+            f"pr:t:{k}",
+            style="success" if on else "danger",
+        ))
     rows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
-    rows.append([B("⚡ Full Power", "pr:full", style="primary"), B("🧹 Clear All", "pr:clear")])
-    rows.append([B("✅ Promote", "pr:go", style="success"), B("✖ Cancel", "pr:x", style="danger")])
+
+    # Nav row: Back / Next (blue)
+    nav = []
+    if page > 0:
+        nav.append(B("⬅️ " + _fancy("Back"), "pr:prev", style="primary"))
+    else:
+        nav.append(B("⬅️ " + _fancy("Back"), "pr:noop", style="primary"))
+    if page < total_pages - 1:
+        nav.append(B(_fancy("Next") + " ➡️", "pr:next", style="primary"))
+    else:
+        nav.append(B(_fancy("Next") + " ➡️", "pr:noop", style="primary"))
+    rows.append(nav)
+
+    # Full power + Clear all
+    rows.append([
+        B("⚡ " + _fancy("Full Power"), "pr:full", style="primary"),
+        B("🧹 " + _fancy("Clear All"), "pr:clear", style="danger"),
+    ])
+    # Confirm + Cancel
+    rows.append([
+        B("✨ ✅ " + _fancy("Confirm"), "pr:go", style="success"),
+        B("✖ " + _fancy("Cancel"), "pr:x", style="danger"),
+    ])
     return InlineKeyboardMarkup(rows)
 
 
@@ -177,6 +245,7 @@ async def promote_cmd(update, ctx):
         tgt_m=mention(target), inv_m=mention(user), title=p["title"],
         rights_list=rights_list, bot=br, sel=sel, forum=bool(chat.is_forum),
         missing=[l for k, l in rights_list if not br[k]],
+        page=0,
     )
     sent = await ctx.bot.send_message(
         chat.id, q(_panel_text(st)), reply_markup=_panel_kb(st),
@@ -194,7 +263,10 @@ async def demote_cmd(update, ctx):
     chat, user, target = p["chat"], p["user"], p["target"]
     st = dict(mode="demote", chat_id=chat.id, invoker=user.id, target=target.id,
               tgt_m=mention(target), inv_m=mention(user), forum=bool(chat.is_forum))
-    kb = InlineKeyboardMarkup([[B("✅ Yes, Demote", "dm:go", style="danger"), B("✖ Cancel", "dm:x", style="success")]])
+    kb = InlineKeyboardMarkup([[
+        B("✅ " + _fancy("Yes, Demote"), "dm:go", style="danger"),
+        B("✖ " + _fancy("Cancel"), "dm:x", style="success"),
+    ]])
     sent = await ctx.bot.send_message(
         chat.id, q(T("<b>⚠ demote</b>\n\nremove all admin powers of {m}?", m=st["tgt_m"])), reply_markup=kb,
         reply_parameters=ReplyParameters(message_id=p["msg"].message_id, allow_sending_without_reply=True),
@@ -235,7 +307,7 @@ async def _verify_now(ctx, qy, st):
 async def anon_verify_callback(update, ctx):
     query = update.callback_query
     await query.answer()
-    
+
     data = query.data
     if data not in ANON_PENDING:
         await query.edit_message_text("This verification link is no longer valid.")
@@ -249,7 +321,6 @@ async def anon_verify_callback(update, ctx):
         await query.answer("❌ Only the real group owner can approve this!", show_alert=True)
         return
 
-    # Check if bot has rights
     bm = await get_member(ctx, chat_id, ctx.bot.id)
     br = rights_of(bm)
     if not br["promote_members"]:
@@ -261,10 +332,9 @@ async def anon_verify_callback(update, ctx):
         await query.edit_message_text(T("That user is not in this group."))
         return
 
-    # Now open the panel
     chat = await ctx.bot.get_chat(chat_id)
     user = query.from_user
-    
+
     rights_list = [(k, l) for k, l in RIGHTS if k != "manage_topics" or chat.is_forum]
     if target.status == ADMIN:
         cur = rights_of(target)
@@ -272,14 +342,15 @@ async def anon_verify_callback(update, ctx):
         sel["anonymous"] = bool(target.is_anonymous)
     else:
         sel = {k: (k in ("delete_messages", "invite_users", "pin_messages")) and br[k] for k, _ in rights_list}
-        
+
     panel_st = dict(
         mode=st["mode"], chat_id=chat.id, invoker=user.id, target=target.user.id,
         tgt_m=mention(target.user), inv_m=mention(user), title=st["title"],
         rights_list=rights_list, bot=br, sel=sel, forum=bool(chat.is_forum),
         missing=[l for k, l in rights_list if not br[k]],
+        page=0,
     )
-    
+
     await query.edit_message_text(q(_panel_text(panel_st)), reply_markup=_panel_kb(panel_st), parse_mode=ParseMode.HTML)
     _put(f"{chat.id}:{query.message.message_id}", panel_st)
     ANON_PENDING.pop(data, None)
@@ -292,7 +363,37 @@ async def promote_cb(update, ctx):
     if not st:
         return
     parts = qy.data.split(":")
-    action, arg = parts[1], (parts[2] if len(parts) > 2 else None)
+    action = parts[1]
+    arg = parts[2] if len(parts) > 2 else None
+
+    # ── Nav: noop ──
+    if action == "noop":
+        await qy.answer()
+        return
+
+    # ── Nav: prev ──
+    if action == "prev":
+        st["page"] = max(0, st.get("page", 0) - 1)
+        try:
+            await qy.edit_message_text(q(_panel_text(st)), reply_markup=_panel_kb(st))
+        except BadRequest as e:
+            if "not modified" not in str(e).lower():
+                raise
+        await qy.answer()
+        return
+
+    # ── Nav: next ──
+    if action == "next":
+        items = _all_items(st)
+        total_pages = max(1, (len(items) + PER_PAGE - 1) // PER_PAGE)
+        st["page"] = min(total_pages - 1, st.get("page", 0) + 1)
+        try:
+            await qy.edit_message_text(q(_panel_text(st)), reply_markup=_panel_kb(st))
+        except BadRequest as e:
+            if "not modified" not in str(e).lower():
+                raise
+        await qy.answer()
+        return
 
     if action == "na":
         await qy.answer("❌ I don't have this power. Give it to me first.", show_alert=True)
@@ -310,6 +411,7 @@ async def promote_cb(update, ctx):
     elif action == "full":
         for k, _ in st["rights_list"]:
             st["sel"][k] = bool(st["bot"].get(k))
+        st["sel"]["anonymous"] = True
     elif action == "clear":
         st["sel"] = {}
     elif action == "go":
@@ -409,7 +511,7 @@ async def demote_cb(update, ctx):
         admin_id=qy.from_user.id, admin_name=qy.from_user.full_name,
         user_id=st["target"], user_name=_target_name,
         reason="",
-    )
+        )
 
 
 def register(app):
@@ -418,3 +520,5 @@ def register(app):
     app.add_handler(CallbackQueryHandler(promote_cb, pattern=r"^pr:"))
     app.add_handler(CallbackQueryHandler(demote_cb, pattern=r"^dm:"))
     app.add_handler(CallbackQueryHandler(anon_verify_callback, pattern=r"^anon_"))
+    
+                  
