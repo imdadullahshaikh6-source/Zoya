@@ -542,6 +542,12 @@ async def _locks_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if user.is_bot:
         return
 
+    # ✅ NEW: Service messages ko delete hone se rokne ke liye safety check
+    if (msg.video_chat_started or msg.video_chat_ended or 
+        msg.video_chat_participants_invited or msg.new_chat_members or 
+        msg.left_chat_member or msg.pinned_message):
+        return
+
     data = await dbase.locks_get(chat.id)
     if not data.get("locks"):
         return
