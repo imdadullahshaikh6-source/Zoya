@@ -777,6 +777,14 @@ async def kang_cmd(update, ctx):
                 await ctx.bot.add_sticker_to_set(user.id, rec["name"], sticker=sticker_obj)
                 name, count = rec["name"], rec.get("count", 0) + 1
                 await dbase.kang_set(user.id, name, count, part=rec.get("part", 1))
+                
+                # ✨ REFRESH MAGIC: Thumbnail update karne se client refresh ho jata hai
+                try:
+                    await ctx.bot.set_sticker_set_thumbnail(user.id, name, thumbnail=sticker_obj.sticker)
+                    log.info("[sticker] pack refreshed via thumbnail: %s", name)
+                except Exception as e:
+                    log.warning("[sticker] thumbnail refresh failed (existing): %s", e)
+                    
             except TelegramError as e:
                 s = str(e).lower()
                 if "invalid" in s or "too much" in s or "too many" in s:
@@ -784,12 +792,27 @@ async def kang_cmd(update, ctx):
                     name = await _create(part)
                     count = 1
                     await dbase.kang_set(user.id, name, count, part=part)
+                    
+                    # ✨ REFRESH MAGIC for new part
+                    try:
+                        await ctx.bot.set_sticker_set_thumbnail(user.id, name, thumbnail=sticker_obj.sticker)
+                        log.info("[sticker] new pack part refreshed: %s", name)
+                    except Exception as e:
+                        log.warning("[sticker] thumbnail refresh failed (new part): %s", e)
                 else:
                     raise
         else:
             name = await _create(1)
             count = 1
             await dbase.kang_set(user.id, name, count, part=1)
+            
+            # ✨ REFRESH MAGIC for brand new pack
+            try:
+                await ctx.bot.set_sticker_set_thumbnail(user.id, name, thumbnail=sticker_obj.sticker)
+                log.info("[sticker] brand new pack refreshed: %s", name)
+            except Exception as e:
+                log.warning("[sticker] thumbnail refresh failed (new pack): %s", e)
+                
     except TelegramError as e:
         await say(ctx, chat.id, T("kang failed:") + f" {esc(e)}", reply_to=msg.message_id)
         return
@@ -811,4 +834,3 @@ def register(app):
         ),
         group=-100,
     )
-
