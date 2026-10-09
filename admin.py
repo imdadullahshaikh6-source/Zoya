@@ -219,8 +219,11 @@ def _build_rich_panel(st) -> dict:
     total_pages = len(PAGES)
     current_page_rights = PAGES[page]
 
-    # ── Header (Blockquote) ──
-    header_text = f"Select Admin Rights for {st.get('tgt_name', 'User')}\nPage {page + 1}/{total_pages}"
+    # ── Header (Blockquote) with Fancy Font ──
+    # Apply fancy font to static text only, keep user name as is.
+    fancy_select = _fancy("Select Admin Rights for")
+    fancy_page = _fancy("Page")
+    header_text = f"{fancy_select} {st.get('tgt_name', 'User')}\n{fancy_page} {page + 1}/{total_pages}"
     
     blocks = [
         {
