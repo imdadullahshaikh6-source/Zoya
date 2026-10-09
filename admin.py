@@ -1,7 +1,6 @@
 """Admin plugin: /promote and /demote with a live power-selection panel (Rich Messages UI)."""
 from collections import OrderedDict
 import inspect
-import json
 
 from telegram import InlineKeyboardMarkup, ReplyParameters, Bot, Update
 from telegram.constants import ChatMemberStatus, ChatType, ParseMode
@@ -225,33 +224,27 @@ def _build_items(st):
 def _build_rich_panel(st) -> dict:
     """
     Build the InputRichMessage payload for the promote panel.
-    Returns a dict suitable for Bot API 10.3 sendRichMessage / editMessageText.
     """
     items = _build_items(st)
     total_pages = max(1, (len(items) + PER_PAGE - 1) // PER_PAGE)
     page = st.get("page", 0)
-    selected = sum(1 for k, _, _, _ in items if st["sel"].get(k))
 
-    # ── Header block (block quotation) ──
-    header_lines = [
-        T("<b>✦ 𝙋𝙧𝙤𝙢𝙤𝙩𝙚 𝙎𝙚𝙩𝙪𝙥</b>"),
-        "",
-        "👤 " + T("User: ") + st["tgt_m"],
+    # ── Header block (block quotation) using RichText structure ──
+    # Fixed Bug 2: Using proper RichText arrays instead of raw HTML strings.
+    header_text = [
+        {"type": "bold", "text": f"Select Admin Rights for {st.get('tgt_name', 'User')}"},
+        {"type": "text", "text": f"\nPage {page + 1}/{total_pages}"}
     ]
-    if st["title"]:
-        header_lines.append("🏷 " + T("Title: ") + f"<b>{esc(st['title'])}</b>")
-    header_lines.append(f"📄 {_fancy('Page')}: <b>{page + 1}/{total_pages}</b>")
-    header_lines.append(f"✅ {_fancy('Selected Rights')}: <b>{selected}</b>")
-
-    missing_labels = [label for _, label, _, bot_has in items if not bot_has]
-    if missing_labels:
-        header_lines += ["", T("{m}, i don't have: {l}. those buttons are locked 🔒",
-                                m=st["inv_m"], l="<b>" + esc(", ".join(missing_labels)) + "</b>")]
 
     blocks = [
         {
             "type": "blockquote",
-            "blocks": [{"type": "paragraph", "text": "\n".join(header_lines)}],
+            "blocks": [
+                {
+                    "type": "paragraph",
+                    "text": header_text
+                }
+            ]
         }
     ]
 
@@ -264,14 +257,12 @@ def _build_rich_panel(st) -> dict:
     for key, label, params, bot_has in page_items:
         on = bool(st["sel"].get(key))
         if not bot_has:
-            # Locked button: red style, keep lock emoji
             btn = {
                 "text": f"🔒 {_fancy(label)}",
                 "callback_data": f"pr:na:{key}",
                 "style": "danger",
             }
         else:
-            # Active button: green if on, red if off
             btn = {
                 "text": _fancy(label),
                 "callback_data": f"pr:t:{key}",
@@ -293,29 +284,15 @@ def _build_rich_panel(st) -> dict:
     # ── Navigation row (Back / Next) ──
     nav_buttons = []
     if page > 0:
-        nav_buttons.append({
-            "text": "⬅️ " + _fancy("Back"),
-            "callback_data": "pr:prev",
-            "style": "primary",
-        })
+        nav_buttons.append({"text": "⬅️ " + _fancy("Back"), "callback_data": "pr:prev", "style": "primary"})
     else:
-        nav_buttons.append({
-            "text": "⬅️ " + _fancy("Back"),
-            "callback_data": "pr:noop",
-            "style": "primary",
-        })
+        nav_buttons.append({"text": "⬅️ " + _fancy("Back"), "callback_data": "pr:noop", "style": "primary"})
+    
     if page < total_pages - 1:
-        nav_buttons.append({
-            "text": _fancy("Next") + " ➡️",
-            "callback_data": "pr:next",
-            "style": "primary",
-        })
+        nav_buttons.append({"text": _fancy("Next") + " ➡️", "callback_data": "pr:next", "style": "primary"})
     else:
-        nav_buttons.append({
-            "text": _fancy("Next") + " ➡️",
-            "callback_data": "pr:noop",
-            "style": "primary",
-        })
+        nav_buttons.append({"text": _fancy("Next") + " ➡️", "callback_data": "pr:noop", "style": "primary"})
+    
     blocks.append({"type": "buttons", "buttons": nav_buttons})
 
     # ── Full + Clear row ──
@@ -393,13 +370,19 @@ async def promote_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     st = dict(
         mode="promote", chat_id=chat.id, invoker=user.id, target=target.id,
-        tgt_m=mention(target), inv_m=mention(user), title=p["title"],
+        tgt_m=mention(target), tgt_name=target.full_name, inv_m=mention(user), title=p["title"],
         bot_member=bm, sel=sel, forum=bool(chat.is_forum), page=0,
     )
 
     rich_msg = _build_rich_panel(st)
     sent = await _send_rich_message(ctx.bot, chat.id, rich_msg, reply_to_message_id=p["msg"].message_id)
-    _put(f"{chat.id}:{sent.message_id}", st)
+    
+    # ── FIX BUG 1: Safely extract message_id from dict response ──
+    msg_id = sent.get("message_id") if isinstance(sent, dict) else getattr(sent, "message_id", None)
+    if msg_id:
+        _put(f"{chat.id}:{msg_id}", st)
+    else:
+        await say(ctx, chat.id, "Failed to send rich message panel. Please try again.")
 
 
 async def demote_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -410,14 +393,14 @@ async def demote_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     chat, user, target = p["chat"], p["user"], p["target"]
     st = dict(mode="demote", chat_id=chat.id, invoker=user.id, target=target.id,
-              tgt_m=mention(target), inv_m=mention(user), forum=bool(chat.is_forum))
+              tgt_m=mention(target), tgt_name=target.full_name, inv_m=mention(user), forum=bool(chat.is_forum))
 
     # Simple rich message for demote confirmation
     rich_msg = {
         "blocks": [
             {
                 "type": "blockquote",
-                "blocks": [{"type": "paragraph", "text": T("<b>⚠ demote</b>\n\nremove all admin powers of {m}?", m=st["tgt_m"])}],
+                "blocks": [{"type": "paragraph", "text": [{"type": "text", "text": f"Remove all admin powers of {target.full_name}?"}]}],
             },
             {
                 "type": "buttons",
@@ -429,7 +412,11 @@ async def demote_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ]
     }
     sent = await _send_rich_message(ctx.bot, chat.id, rich_msg, reply_to_message_id=p["msg"].message_id)
-    _put(f"{chat.id}:{sent.message_id}", st)
+    
+    # ── FIX BUG 1: Safely extract message_id from dict response ──
+    msg_id = sent.get("message_id") if isinstance(sent, dict) else getattr(sent, "message_id", None)
+    if msg_id:
+        _put(f"{chat.id}:{msg_id}", st)
 
 
 async def _load(update, mode):
@@ -505,7 +492,7 @@ async def anon_verify_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     panel_st = dict(
         mode=st["mode"], chat_id=chat.id, invoker=user.id, target=target.user.id,
-        tgt_m=mention(target.user), inv_m=mention(user), title=st["title"],
+        tgt_m=mention(target.user), tgt_name=target.user.full_name, inv_m=mention(user), title=st["title"],
         bot_member=bm, sel=sel, forum=bool(chat.is_forum), page=0,
     )
 
