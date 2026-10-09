@@ -114,8 +114,11 @@ def get_locktypes_kb(back: bool = False):
 
 # ───────────────────── NEW RICH MESSAGE BUILDER ─────────────────────
 
-def build_locktypes_rich_panel() -> dict:
-    """Build the InputRichMessage payload for the /locktypes command."""
+def build_locktypes_rich_panel(show_back: bool = False) -> dict:
+    """
+    Build the InputRichMessage payload for the /locktypes command.
+    :param show_back: Whether to include the Back button (True for DM menu, False for command).
+    """
     blocks = [
         {
             "type": "blockquote",
@@ -143,14 +146,13 @@ def build_locktypes_rich_panel() -> dict:
     if btn_row:
         blocks.append({"type": "buttons", "buttons": btn_row})
 
-    # Divider before Back button
-    blocks.append({"type": "divider"})
-
-    # Back button
-    blocks.append({
-        "type": "buttons",
-        "buttons": [{"text": "⬅ 𝘽𝙖𝙘𝙠", "callback_data": "help:locks", "style": "danger"}]
-    })
+    # ── Only add Back button if show_back is True ──
+    if show_back:
+        blocks.append({"type": "divider"})
+        blocks.append({
+            "type": "buttons",
+            "buttons": [{"text": "⬅ 𝘽𝙖𝙘𝙠", "callback_data": "help:locks", "style": "danger"}]
+        })
 
     return {"blocks": blocks}
 
@@ -534,8 +536,8 @@ async def locktypes_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if chat.type == ChatType.PRIVATE:
         return
     
-    # ── UPDATED: Send Rich Message instead of standard keyboard ──
-    rich_msg = build_locktypes_rich_panel()
+    # ── COMMAND: No Back button ──
+    rich_msg = build_locktypes_rich_panel(show_back=False)
     await _send_rich_message(ctx.bot, chat.id, rich_msg, reply_to_message_id=msg.message_id)
 
 
