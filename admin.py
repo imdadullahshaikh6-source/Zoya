@@ -1,11 +1,12 @@
-"""Admin plugin: /promote and /demote with a live power-selection panel."""
+"""Admin plugin: /promote and /demote with a live power-selection panel (Rich Messages UI)."""
 from collections import OrderedDict
 import inspect
+import json
 
-from telegram import InlineKeyboardMarkup, ReplyParameters, Bot
+from telegram import InlineKeyboardMarkup, ReplyParameters, Bot, Update
 from telegram.constants import ChatMemberStatus, ChatType, ParseMode
 from telegram.error import BadRequest, TelegramError
-from telegram.ext import CallbackQueryHandler
+from telegram.ext import CallbackQueryHandler, ContextTypes
 
 import logchannel
 from common import (
@@ -22,7 +23,7 @@ ANON_ADMIN_ID = 1087968824
 HELP_TXT = (
     "<b>✦ admin — promote &amp; demote</b>\n\n"
     "/promote (or .promote) — reply / @username / id (+ optional custom title). "
-    "a panel opens with paginated buttons: tap 🟢/🔴 to toggle each power, "
+    "a panel opens with paginated buttons: tap to toggle each power, "
     "⬅️/➡️ to change pages, ✨ Confirm to promote.\n"
     "/demote (or .demote) — removes all admin powers after confirmation\n\n"
     "every action is verified: you need add admins, and i must have it too. "
@@ -70,7 +71,6 @@ def _valid_promote_params():
     try:
         sig = inspect.signature(Bot.promote_chat_member)
         params = set(sig.parameters.keys())
-        # If method uses **kwargs (VAR_KEYWORD), assume all params are passable
         for p in sig.parameters.values():
             if p.kind == inspect.Parameter.VAR_KEYWORD:
                 return None  # None = don't filter
@@ -222,78 +222,155 @@ def _build_items(st):
     return items
 
 
-def _panel_text(st) -> str:
+def _build_rich_panel(st) -> dict:
+    """
+    Build the InputRichMessage payload for the promote panel.
+    Returns a dict suitable for Bot API 10.3 sendRichMessage / editMessageText.
+    """
     items = _build_items(st)
     total_pages = max(1, (len(items) + PER_PAGE - 1) // PER_PAGE)
     page = st.get("page", 0)
     selected = sum(1 for k, _, _, _ in items if st["sel"].get(k))
 
-    lines = [
+    # ── Header block (block quotation) ──
+    header_lines = [
         T("<b>✦ 𝙋𝙧𝙤𝙢𝙤𝙩𝙚 𝙎𝙚𝙩𝙪𝙥</b>"),
         "",
         "👤 " + T("User: ") + st["tgt_m"],
     ]
     if st["title"]:
-        lines.append("🏷 " + T("Title: ") + f"<b>{esc(st['title'])}</b>")
-    lines.append(f"📄 {_fancy('Page')}: <b>{page + 1}/{total_pages}</b>")
-    lines.append(f"✅ {_fancy('Selected Rights')}: <b>{selected}</b>")
+        header_lines.append("🏷 " + T("Title: ") + f"<b>{esc(st['title'])}</b>")
+    header_lines.append(f"📄 {_fancy('Page')}: <b>{page + 1}/{total_pages}</b>")
+    header_lines.append(f"✅ {_fancy('Selected Rights')}: <b>{selected}</b>")
+
     missing_labels = [label for _, label, _, bot_has in items if not bot_has]
     if missing_labels:
-        lines += ["", T("{m}, i don't have: {l}. those buttons are locked 🔒",
-                        m=st["inv_m"], l="<b>" + esc(", ".join(missing_labels)) + "</b>")]
-    return "\n".join(lines)
+        header_lines += ["", T("{m}, i don't have: {l}. those buttons are locked 🔒",
+                                m=st["inv_m"], l="<b>" + esc(", ".join(missing_labels)) + "</b>")]
 
+    blocks = [
+        {
+            "type": "blockquote",
+            "blocks": [{"type": "paragraph", "text": "\n".join(header_lines)}],
+        }
+    ]
 
-def _panel_kb(st):
-    items = _build_items(st)
-    total_pages = max(1, (len(items) + PER_PAGE - 1) // PER_PAGE)
-    page = st.get("page", 0)
+    # ── Permission buttons (paginated) ──
     start = page * PER_PAGE
     end = start + PER_PAGE
     page_items = items[start:end]
 
-    btns = []
+    button_rows = []
     for key, label, params, bot_has in page_items:
         on = bool(st["sel"].get(key))
         if not bot_has:
-            btns.append(B(f"🔒 {_fancy(label)}", f"pr:na:{key}", style="danger"))
-            continue
-        mark = "🟢" if on else "🔴"
-        btns.append(B(
-            f"{mark} {_fancy(label)}",
-            f"pr:t:{key}",
-            style="success" if on else "danger",
-        ))
-    rows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
+            # Locked button: red style, keep lock emoji
+            btn = {
+                "text": f"🔒 {_fancy(label)}",
+                "callback_data": f"pr:na:{key}",
+                "style": "danger",
+            }
+        else:
+            # Active button: green if on, red if off
+            btn = {
+                "text": _fancy(label),
+                "callback_data": f"pr:t:{key}",
+                "style": "success" if on else "danger",
+            }
+        button_rows.append(btn)
 
-    # Nav row (blue)
-    nav = []
+    # Chunk into rows of 2
+    for i in range(0, len(button_rows), 2):
+        row = button_rows[i:i + 2]
+        blocks.append({
+            "type": "buttons",
+            "buttons": row,
+        })
+
+    # ── Divider before navigation ──
+    blocks.append({"type": "divider"})
+
+    # ── Navigation row (Back / Next) ──
+    nav_buttons = []
     if page > 0:
-        nav.append(B("⬅️ " + _fancy("Back"), "pr:prev", style="primary"))
+        nav_buttons.append({
+            "text": "⬅️ " + _fancy("Back"),
+            "callback_data": "pr:prev",
+            "style": "primary",
+        })
     else:
-        nav.append(B("⬅️ " + _fancy("Back"), "pr:noop", style="primary"))
+        nav_buttons.append({
+            "text": "⬅️ " + _fancy("Back"),
+            "callback_data": "pr:noop",
+            "style": "primary",
+        })
     if page < total_pages - 1:
-        nav.append(B(_fancy("Next") + " ➡️", "pr:next", style="primary"))
+        nav_buttons.append({
+            "text": _fancy("Next") + " ➡️",
+            "callback_data": "pr:next",
+            "style": "primary",
+        })
     else:
-        nav.append(B(_fancy("Next") + " ➡️", "pr:noop", style="primary"))
-    rows.append(nav)
+        nav_buttons.append({
+            "text": _fancy("Next") + " ➡️",
+            "callback_data": "pr:noop",
+            "style": "primary",
+        })
+    blocks.append({"type": "buttons", "buttons": nav_buttons})
 
-    # Full + Clear
-    rows.append([
-        B("⚡ " + _fancy("Full Power"), "pr:full", style="primary"),
-        B("🧹 " + _fancy("Clear All"), "pr:clear", style="danger"),
-    ])
-    # Confirm + Cancel
-    rows.append([
-        B("✨ ✅ " + _fancy("Confirm"), "pr:go", style="success"),
-        B("✖ " + _fancy("Cancel"), "pr:x", style="danger"),
-    ])
-    return InlineKeyboardMarkup(rows)
+    # ── Full + Clear row ──
+    blocks.append({
+        "type": "buttons",
+        "buttons": [
+            {"text": "⚡ " + _fancy("Full Power"), "callback_data": "pr:full", "style": "primary"},
+            {"text": "🧹 " + _fancy("Clear All"), "callback_data": "pr:clear", "style": "danger"},
+        ],
+    })
+
+    # ── Divider before Confirm/Cancel ──
+    blocks.append({"type": "divider"})
+
+    # ── Confirm + Cancel row ──
+    blocks.append({
+        "type": "buttons",
+        "buttons": [
+            {"text": "✨ ✅ " + _fancy("Confirm"), "callback_data": "pr:go", "style": "success"},
+            {"text": "✖ " + _fancy("Cancel"), "callback_data": "pr:x", "style": "danger"},
+        ],
+    })
+
+    return {"blocks": blocks}
+
+
+async def _send_rich_message(bot, chat_id, rich_message, reply_to_message_id=None):
+    """
+    Send a Rich Message using raw Bot API 10.3 method.
+    PTB 22.8 does not yet have native send_rich_message, so we use do_api_request.
+    """
+    kwargs = {
+        "chat_id": chat_id,
+        "rich_message": rich_message,
+    }
+    if reply_to_message_id:
+        kwargs["reply_parameters"] = {"message_id": reply_to_message_id, "allow_sending_without_reply": True}
+    return await bot.do_api_request("sendRichMessage", api_kwargs=kwargs)
+
+
+async def _edit_rich_message(bot, chat_id, message_id, rich_message):
+    """
+    Edit a message to become a Rich Message using raw Bot API 10.3 method.
+    """
+    kwargs = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "rich_message": rich_message,
+    }
+    return await bot.do_api_request("editMessageText", api_kwargs=kwargs)
 
 
 # ───────────────────── PROMOTE / DEMOTE COMMANDS ─────────────────────
 
-async def promote_cmd(update, ctx):
+async def promote_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
     p = await _precheck(update, ctx, "promote")
@@ -309,7 +386,6 @@ async def promote_cmd(update, ctx):
             bot_h = _has_all(bm, params)
             sel[key] = cur and bot_h
     else:
-        # default: some basics if bot has them
         defaults = ("delete_messages", "invite_users", "pin_messages")
         for key, _, params in _ALL_RIGHTS:
             bot_h = _has_all(bm, params)
@@ -320,14 +396,13 @@ async def promote_cmd(update, ctx):
         tgt_m=mention(target), inv_m=mention(user), title=p["title"],
         bot_member=bm, sel=sel, forum=bool(chat.is_forum), page=0,
     )
-    sent = await ctx.bot.send_message(
-        chat.id, q(_panel_text(st)), reply_markup=_panel_kb(st),
-        reply_parameters=ReplyParameters(message_id=p["msg"].message_id, allow_sending_without_reply=True),
-    )
+
+    rich_msg = _build_rich_panel(st)
+    sent = await _send_rich_message(ctx.bot, chat.id, rich_msg, reply_to_message_id=p["msg"].message_id)
     _put(f"{chat.id}:{sent.message_id}", st)
 
 
-async def demote_cmd(update, ctx):
+async def demote_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
     p = await _precheck(update, ctx, "demote")
@@ -336,14 +411,24 @@ async def demote_cmd(update, ctx):
     chat, user, target = p["chat"], p["user"], p["target"]
     st = dict(mode="demote", chat_id=chat.id, invoker=user.id, target=target.id,
               tgt_m=mention(target), inv_m=mention(user), forum=bool(chat.is_forum))
-    kb = InlineKeyboardMarkup([[
-        B("✅ " + _fancy("Yes, Demote"), "dm:go", style="danger"),
-        B("✖ " + _fancy("Cancel"), "dm:x", style="success"),
-    ]])
-    sent = await ctx.bot.send_message(
-        chat.id, q(T("<b>⚠ demote</b>\n\nremove all admin powers of {m}?", m=st["tgt_m"])), reply_markup=kb,
-        reply_parameters=ReplyParameters(message_id=p["msg"].message_id, allow_sending_without_reply=True),
-    )
+
+    # Simple rich message for demote confirmation
+    rich_msg = {
+        "blocks": [
+            {
+                "type": "blockquote",
+                "blocks": [{"type": "paragraph", "text": T("<b>⚠ demote</b>\n\nremove all admin powers of {m}?", m=st["tgt_m"])}],
+            },
+            {
+                "type": "buttons",
+                "buttons": [
+                    {"text": "✅ " + _fancy("Yes, Demote"), "callback_data": "dm:go", "style": "danger"},
+                    {"text": "✖ " + _fancy("Cancel"), "callback_data": "dm:x", "style": "success"},
+                ],
+            },
+        ]
+    }
+    sent = await _send_rich_message(ctx.bot, chat.id, rich_msg, reply_to_message_id=p["msg"].message_id)
     _put(f"{chat.id}:{sent.message_id}", st)
 
 
@@ -378,7 +463,7 @@ async def _verify_now(ctx, qy, st):
 
 # ───────────── Anonymous Verification ─────────────
 
-async def anon_verify_callback(update, ctx):
+async def anon_verify_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
@@ -424,14 +509,15 @@ async def anon_verify_callback(update, ctx):
         bot_member=bm, sel=sel, forum=bool(chat.is_forum), page=0,
     )
 
-    await query.edit_message_text(q(_panel_text(panel_st)), reply_markup=_panel_kb(panel_st), parse_mode=ParseMode.HTML)
+    rich_msg = _build_rich_panel(panel_st)
+    await _edit_rich_message(ctx.bot, chat.id, query.message.message_id, rich_msg)
     _put(f"{chat.id}:{query.message.message_id}", panel_st)
     ANON_PENDING.pop(data, None)
 
 
 # ───────────── Regular Callbacks ─────────────
 
-async def promote_cb(update, ctx):
+async def promote_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     qy, st, key = await _load(update, "promote")
     if not st:
         return
@@ -445,8 +531,9 @@ async def promote_cb(update, ctx):
 
     if action == "prev":
         st["page"] = max(0, st.get("page", 0) - 1)
+        rich_msg = _build_rich_panel(st)
         try:
-            await qy.edit_message_text(q(_panel_text(st)), reply_markup=_panel_kb(st))
+            await _edit_rich_message(ctx.bot, st["chat_id"], qy.message.message_id, rich_msg)
         except BadRequest as e:
             if "not modified" not in str(e).lower():
                 raise
@@ -457,8 +544,9 @@ async def promote_cb(update, ctx):
         items = _build_items(st)
         total_pages = max(1, (len(items) + PER_PAGE - 1) // PER_PAGE)
         st["page"] = min(total_pages - 1, st.get("page", 0) + 1)
+        rich_msg = _build_rich_panel(st)
         try:
-            await qy.edit_message_text(q(_panel_text(st)), reply_markup=_panel_kb(st))
+            await _edit_rich_message(ctx.bot, st["chat_id"], qy.message.message_id, rich_msg)
         except BadRequest as e:
             if "not modified" not in str(e).lower():
                 raise
@@ -474,7 +562,6 @@ async def promote_cb(update, ctx):
         await qy.answer()
         return
     if action == "t":
-        # Find the params for this key
         params = None
         bot_has = False
         for k, _, p in _ALL_RIGHTS:
@@ -499,7 +586,6 @@ async def promote_cb(update, ctx):
         if bm is None:
             return
         chosen_keys = [k for k, _, _ in _ALL_RIGHTS if st["sel"].get(k)]
-        # Build kwargs
         kw = {}
         missing = []
         for k, label, params in _ALL_RIGHTS:
@@ -517,13 +603,11 @@ async def promote_cb(update, ctx):
         if not chosen_keys:
             await qy.answer("Select at least one power.", show_alert=True)
             return
-        # Always keep manage_chat on
         kw["can_manage_chat"] = True
         filtered = _filter_kwargs(kw)
         try:
             await ctx.bot.promote_chat_member(st["chat_id"], st["target"], **filtered)
         except TelegramError as e:
-            # Retry without newer unsupported params
             fallback = {k: v for k, v in filtered.items()
                         if k not in ("can_manage_tags", "can_send_welcome_messages",
                                      "can_manage_live_streams",
@@ -543,7 +627,6 @@ async def promote_cb(update, ctx):
             except TelegramError as e:
                 note = "\n" + T("title not set:") + f" {explain(e)}"
 
-        # Build powers list
         powers = []
         for k, label, params in _ALL_RIGHTS:
             if st["sel"].get(k):
@@ -573,15 +656,16 @@ async def promote_cb(update, ctx):
         return
 
     # Redraw panel
+    rich_msg = _build_rich_panel(st)
     try:
-        await qy.edit_message_text(q(_panel_text(st)), reply_markup=_panel_kb(st))
+        await _edit_rich_message(ctx.bot, st["chat_id"], qy.message.message_id, rich_msg)
     except BadRequest as e:
         if "not modified" not in str(e).lower():
             raise
     await qy.answer()
 
 
-async def demote_cb(update, ctx):
+async def demote_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     qy, st, key = await _load(update, "demote")
     if not st:
         return
@@ -594,7 +678,6 @@ async def demote_cb(update, ctx):
     bm = await _verify_now(ctx, qy, st)
     if bm is None:
         return
-    # Turn everything off
     kw = {}
     for _, _, params in _ALL_RIGHTS:
         for p in params:
