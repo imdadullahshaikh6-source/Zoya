@@ -95,13 +95,15 @@ def _filter_kwargs(kw):
     return {k: v for k, v in kw.items() if k in _VALID_PARAMS}
 
 
-# ───────────────────── FANCY FONT ─────────────────────
+# ───────────────────── FANCY FONT (Bold Italic - Duke Style) ─────────────────────
 _FANCY_MAP = {}
+# Lowercase Bold Italic
 for _n, _f in zip("abcdefghijklmnopqrstuvwxyz",
-                  "𝙖𝙗𝙘𝙙𝙚𝙛𝙜𝙝𝙞𝙟𝙠𝙡𝙢𝙣𝙤𝙥𝙦𝙧𝙨𝙩𝙪𝙫𝙬𝙭𝙮𝙯"):
+                  "𝒂𝒃𝒄𝒅𝒆𝒇𝒈𝒉𝒊𝒋𝒌𝒍𝒎𝒏𝒐𝒑𝒒𝒓𝒔𝒕𝒖𝒗𝒘𝒙𝒚𝒛"):
     _FANCY_MAP[_n] = _f
+# Uppercase Bold Italic
 for _n, _f in zip("ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-                  "𝘼𝘽𝘾𝘿𝙀𝙁𝙂𝙃𝙄𝙅𝙆𝙇𝙈𝙉𝙊𝙋𝙌𝙍𝙎𝙏𝙐𝙑𝙒𝙓𝙔𝙕"):
+                  "𝑨𝑩𝑪𝑫𝑬𝑭𝑮𝑯𝑰𝑱𝑲𝑳𝑴𝑵𝑶𝑷𝑸𝑹𝑺𝑻𝑼𝑽𝑾𝑿𝒀𝒁"):
     _FANCY_MAP[_n] = _f
 
 
@@ -232,23 +234,22 @@ def _build_rich_panel(st) -> dict:
         }
     ]
 
-    # ── Permissions (2x2 Grid) ──
+    # ── Permissions (2x2 Grid) with Fancy Font ──
     btn_row = []
     for key, label, params in current_page_rights:
         on = bool(st["sel"].get(key))
         bot_has = _has_all(st["bot_member"], params)
+        fancy_label = _fancy(label) # Apply fancy font here
 
         if not bot_has:
-            # Locked button: Red color, no emoji
             btn = {
-                "text": label,
+                "text": fancy_label,
                 "callback_data": f"pr:na:{key}",
                 "style": "danger"
             }
         else:
-            # Toggleable button: Green if ON, Red if OFF
             btn = {
-                "text": label,
+                "text": fancy_label,
                 "callback_data": f"pr:t:{key}",
                 "style": "success" if on else "danger"
             }
@@ -265,29 +266,29 @@ def _build_rich_panel(st) -> dict:
     # ── Divider before Nav ──
     blocks.append({"type": "divider"})
 
-    # ── Navigation (Back / Next) ──
+    # ── Navigation (Back / Next) with Fancy Font ──
     nav_btns = []
     if page > 0:
-        nav_btns.append({"text": "Back", "callback_data": "pr:prev", "style": "primary"})
+        nav_btns.append({"text": _fancy("Previous"), "callback_data": "pr:prev", "style": "primary"})
     else:
-        nav_btns.append({"text": "Back", "callback_data": "pr:noop", "style": "primary"})
+        nav_btns.append({"text": _fancy("Previous"), "callback_data": "pr:noop", "style": "primary"})
 
     if page < total_pages - 1:
-        nav_btns.append({"text": "Next", "callback_data": "pr:next", "style": "primary"})
+        nav_btns.append({"text": _fancy("Next"), "callback_data": "pr:next", "style": "primary"})
     else:
-        nav_btns.append({"text": "Next", "callback_data": "pr:noop", "style": "primary"})
+        nav_btns.append({"text": _fancy("Next"), "callback_data": "pr:noop", "style": "primary"})
 
     blocks.append({"type": "buttons", "buttons": nav_btns})
 
     # ── Divider before Confirm/Cancel ──
     blocks.append({"type": "divider"})
 
-    # ── Confirm / Cancel ──
+    # ── Confirm / Cancel with Fancy Font ──
     blocks.append({
         "type": "buttons",
         "buttons": [
-            {"text": "Confirm", "callback_data": "pr:go", "style": "success"},
-            {"text": "Cancel", "callback_data": "pr:x", "style": "danger"},
+            {"text": _fancy("Confirm"), "callback_data": "pr:go", "style": "success"},
+            {"text": _fancy("Cancel"), "callback_data": "pr:x", "style": "danger"},
         ]
     })
 
@@ -387,8 +388,8 @@ async def demote_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             {
                 "type": "buttons",
                 "buttons": [
-                    {"text": "Yes, Demote", "callback_data": "dm:go", "style": "danger"},
-                    {"text": "Cancel", "callback_data": "dm:x", "style": "success"},
+                    {"text": _fancy("Yes, Demote"), "callback_data": "dm:go", "style": "danger"},
+                    {"text": _fancy("Cancel"), "callback_data": "dm:x", "style": "success"},
                 ],
             },
         ]
@@ -693,3 +694,4 @@ def register(app):
     app.add_handler(CallbackQueryHandler(promote_cb, pattern=r"^pr:"))
     app.add_handler(CallbackQueryHandler(demote_cb, pattern=r"^dm:"))
     app.add_handler(CallbackQueryHandler(anon_verify_callback, pattern=r"^anon_"))
+    
