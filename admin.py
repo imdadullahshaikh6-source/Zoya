@@ -230,11 +230,13 @@ def _build_rich_panel(st) -> dict:
     page = st.get("page", 0)
 
     # ── Header block (block quotation) using RichText structure ──
-    # Fixed Bug 2: Using proper RichText arrays instead of raw HTML strings.
-    header_text = [
-        {"type": "bold", "text": f"Select Admin Rights for {st.get('tgt_name', 'User')}"},
-        {"type": "text", "text": f"\nPage {page + 1}/{total_pages}"}
-    ]
+    header_text = {
+        "type": "text",
+        "text": (
+            f"Select Admin Rights for {st.get('tgt_name', 'User')}\n"
+            f"Page {page + 1}/{total_pages}"
+        )
+    }
 
     blocks = [
         {
@@ -258,13 +260,13 @@ def _build_rich_panel(st) -> dict:
         on = bool(st["sel"].get(key))
         if not bot_has:
             btn = {
-                "text": f"🔒 {_fancy(label)}",
+                "text": {"type": "text", "text": f"🔒 {_fancy(label)}"},
                 "callback_data": f"pr:na:{key}",
                 "style": "danger",
             }
         else:
             btn = {
-                "text": _fancy(label),
+                "text": {"type": "text", "text": _fancy(label)},
                 "callback_data": f"pr:t:{key}",
                 "style": "success" if on else "danger",
             }
@@ -284,14 +286,30 @@ def _build_rich_panel(st) -> dict:
     # ── Navigation row (Back / Next) ──
     nav_buttons = []
     if page > 0:
-        nav_buttons.append({"text": "⬅️ " + _fancy("Back"), "callback_data": "pr:prev", "style": "primary"})
+        nav_buttons.append({
+            "text": {"type": "text", "text": "⬅️ " + _fancy("Back")},
+            "callback_data": "pr:prev",
+            "style": "primary",
+        })
     else:
-        nav_buttons.append({"text": "⬅️ " + _fancy("Back"), "callback_data": "pr:noop", "style": "primary"})
+        nav_buttons.append({
+            "text": {"type": "text", "text": "⬅️ " + _fancy("Back")},
+            "callback_data": "pr:noop",
+            "style": "primary",
+        })
     
     if page < total_pages - 1:
-        nav_buttons.append({"text": _fancy("Next") + " ➡️", "callback_data": "pr:next", "style": "primary"})
+        nav_buttons.append({
+            "text": {"type": "text", "text": _fancy("Next") + " ➡️"},
+            "callback_data": "pr:next",
+            "style": "primary",
+        })
     else:
-        nav_buttons.append({"text": _fancy("Next") + " ➡️", "callback_data": "pr:noop", "style": "primary"})
+        nav_buttons.append({
+            "text": {"type": "text", "text": _fancy("Next") + " ➡️"},
+            "callback_data": "pr:noop",
+            "style": "primary",
+        })
     
     blocks.append({"type": "buttons", "buttons": nav_buttons})
 
@@ -299,8 +317,16 @@ def _build_rich_panel(st) -> dict:
     blocks.append({
         "type": "buttons",
         "buttons": [
-            {"text": "⚡ " + _fancy("Full Power"), "callback_data": "pr:full", "style": "primary"},
-            {"text": "🧹 " + _fancy("Clear All"), "callback_data": "pr:clear", "style": "danger"},
+            {
+                "text": {"type": "text", "text": "⚡ " + _fancy("Full Power")},
+                "callback_data": "pr:full",
+                "style": "primary",
+            },
+            {
+                "text": {"type": "text", "text": "🧹 " + _fancy("Clear All")},
+                "callback_data": "pr:clear",
+                "style": "danger",
+            },
         ],
     })
 
@@ -311,8 +337,16 @@ def _build_rich_panel(st) -> dict:
     blocks.append({
         "type": "buttons",
         "buttons": [
-            {"text": "✨ ✅ " + _fancy("Confirm"), "callback_data": "pr:go", "style": "success"},
-            {"text": "✖ " + _fancy("Cancel"), "callback_data": "pr:x", "style": "danger"},
+            {
+                "text": {"type": "text", "text": "✨ ✅ " + _fancy("Confirm")},
+                "callback_data": "pr:go",
+                "style": "success",
+            },
+            {
+                "text": {"type": "text", "text": "✖ " + _fancy("Cancel")},
+                "callback_data": "pr:x",
+                "style": "danger",
+            },
         ],
     })
 
@@ -322,15 +356,18 @@ def _build_rich_panel(st) -> dict:
 async def _send_rich_message(bot, chat_id, rich_message, reply_to_message_id=None):
     """
     Send a Rich Message using raw Bot API 10.3 method.
-    PTB 22.8 does not yet have native send_rich_message, so we use do_api_request.
+    Method name must be snake_case for PTB's do_api_request.
     """
     kwargs = {
         "chat_id": chat_id,
         "rich_message": rich_message,
     }
     if reply_to_message_id:
-        kwargs["reply_parameters"] = {"message_id": reply_to_message_id, "allow_sending_without_reply": True}
-    return await bot.do_api_request("sendRichMessage", api_kwargs=kwargs)
+        kwargs["reply_parameters"] = {
+            "message_id": reply_to_message_id,
+            "allow_sending_without_reply": True
+        }
+    return await bot.do_api_request("send_rich_message", api_kwargs=kwargs)
 
 
 async def _edit_rich_message(bot, chat_id, message_id, rich_message):
@@ -342,7 +379,7 @@ async def _edit_rich_message(bot, chat_id, message_id, rich_message):
         "message_id": message_id,
         "rich_message": rich_message,
     }
-    return await bot.do_api_request("editMessageText", api_kwargs=kwargs)
+    return await bot.do_api_request("edit_message_text", api_kwargs=kwargs)
 
 
 # ───────────────────── PROMOTE / DEMOTE COMMANDS ─────────────────────
@@ -400,13 +437,26 @@ async def demote_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "blocks": [
             {
                 "type": "blockquote",
-                "blocks": [{"type": "paragraph", "text": [{"type": "text", "text": f"Remove all admin powers of {target.full_name}?"}]}],
+                "blocks": [
+                    {
+                        "type": "paragraph",
+                        "text": {"type": "text", "text": f"Remove all admin powers of {target.full_name}?"}
+                    }
+                ],
             },
             {
                 "type": "buttons",
                 "buttons": [
-                    {"text": "✅ " + _fancy("Yes, Demote"), "callback_data": "dm:go", "style": "danger"},
-                    {"text": "✖ " + _fancy("Cancel"), "callback_data": "dm:x", "style": "success"},
+                    {
+                        "text": {"type": "text", "text": "✅ " + _fancy("Yes, Demote")},
+                        "callback_data": "dm:go",
+                        "style": "danger"
+                    },
+                    {
+                        "text": {"type": "text", "text": "✖ " + _fancy("Cancel")},
+                        "callback_data": "dm:x",
+                        "style": "success"
+                    },
                 ],
             },
         ]
@@ -713,4 +763,4 @@ def register(app):
     app.add_handler(CallbackQueryHandler(promote_cb, pattern=r"^pr:"))
     app.add_handler(CallbackQueryHandler(demote_cb, pattern=r"^dm:"))
     app.add_handler(CallbackQueryHandler(anon_verify_callback, pattern=r"^anon_"))
-    
+            
