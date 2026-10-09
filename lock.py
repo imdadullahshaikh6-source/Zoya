@@ -94,6 +94,7 @@ def _cache_admin(chat_id: int, user_id: int, is_admin: bool):
 
 
 def get_locktypes_kb(back: bool = False):
+    """Fallback standard keyboard, kept for backward compatibility."""
     buttons = []
     row = []
     for lt in LOCKTYPES:
@@ -110,6 +111,65 @@ def get_locktypes_kb(back: bool = False):
         buttons.append([B("⬅ 𝘽𝙖𝙘𝙠", "help:locks", style="danger")])
     return InlineKeyboardMarkup(buttons)
 
+
+# ───────────────────── NEW RICH MESSAGE BUILDER ─────────────────────
+
+def build_locktypes_rich_panel() -> dict:
+    """Build the InputRichMessage payload for the /locktypes command."""
+    blocks = [
+        {
+            "type": "blockquote",
+            "blocks": [{"type": "paragraph", "text": "The available locktypes are:"}]
+        }
+    ]
+
+    btn_row = []
+    for lt in LOCKTYPES:
+        # Apply the same fancy font logic as before
+        display_name = "".join(
+            [chr(ord(c) - 97 + 0x1D68A) if 'a' <= c <= 'z' else c for c in lt]
+        )
+        btn_row.append({
+            "text": display_name,
+            "callback_data": f"lockinfo:{lt}",
+            "style": "primary"
+        })
+
+        # 3 buttons per row, exactly like the original layout
+        if len(btn_row) == 3:
+            blocks.append({"type": "buttons", "buttons": btn_row})
+            btn_row = []
+
+    if btn_row:
+        blocks.append({"type": "buttons", "buttons": btn_row})
+
+    # Divider before Back button
+    blocks.append({"type": "divider"})
+
+    # Back button
+    blocks.append({
+        "type": "buttons",
+        "buttons": [{"text": "⬅ 𝘽𝙖𝙘𝙠", "callback_data": "help:locks", "style": "danger"}]
+    })
+
+    return {"blocks": blocks}
+
+
+async def _send_rich_message(bot, chat_id, rich_message, reply_to_message_id=None):
+    """Helper to send raw Bot API 10.3 Rich Message."""
+    kwargs = {
+        "chat_id": chat_id,
+        "rich_message": rich_message,
+    }
+    if reply_to_message_id:
+        kwargs["reply_parameters"] = {
+            "message_id": reply_to_message_id,
+            "allow_sending_without_reply": True
+        }
+    return await bot.do_api_request("send_rich_message", api_kwargs=kwargs)
+
+
+# ───────────────────── EXISTING LOGIC ─────────────────────
 
 def _has_media(msg) -> bool:
     return bool(msg.photo or msg.video or msg.audio or msg.voice or
@@ -180,11 +240,9 @@ def _get_msg_types(msg) -> set:
     types = set()
     has_media = _has_media(msg)
 
-    # Pure text only (not caption)
     if msg.text and not has_media:
         types.add("text")
 
-    # Basic media
     if msg.photo:
         types.add("photo")
     if msg.video:
@@ -206,8 +264,6 @@ def _get_msg_types(msg) -> set:
     if msg.reply_markup:
         types.add("button")
 
-    # ✅ FIX: PTB animation ke saath document bhi set karta hai.
-    # Isliye GIFs ke liye sirf "gif" add karo, "document" nahi.
     if msg.animation:
         types.add("gif")
     elif msg.document:
@@ -477,7 +533,10 @@ async def locktypes_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg, chat = update.effective_message, update.effective_chat
     if chat.type == ChatType.PRIVATE:
         return
-    await say(ctx, chat.id, "The available locktypes are:", kb=get_locktypes_kb(), reply_to=msg.message_id)
+    
+    # ── UPDATED: Send Rich Message instead of standard keyboard ──
+    rich_msg = build_locktypes_rich_panel()
+    await _send_rich_message(ctx.bot, chat.id, rich_msg, reply_to_message_id=msg.message_id)
 
 
 async def lock_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -542,7 +601,6 @@ async def _locks_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if user.is_bot:
         return
 
-    # ✅ NEW: Service messages ko delete hone se rokne ke liye safety check
     if (msg.video_chat_started or msg.video_chat_ended or 
         msg.video_chat_participants_invited or msg.new_chat_members or 
         msg.left_chat_member or msg.pinned_message):
