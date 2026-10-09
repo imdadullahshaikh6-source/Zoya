@@ -224,19 +224,15 @@ def _build_items(st):
 def _build_rich_panel(st) -> dict:
     """
     Build the InputRichMessage payload for the promote panel.
+    Uses plain strings for text fields to avoid 'unsupported rich text type' error.
     """
     items = _build_items(st)
     total_pages = max(1, (len(items) + PER_PAGE - 1) // PER_PAGE)
     page = st.get("page", 0)
 
-    # ── Header block (block quotation) using RichText structure ──
-    header_text = {
-        "type": "text",
-        "text": (
-            f"Select Admin Rights for {st.get('tgt_name', 'User')}\n"
-            f"Page {page + 1}/{total_pages}"
-        )
-    }
+    # ── Header block (blockquote) ──
+    # Plain string for text, no RichText object.
+    header_text = f"Select Admin Rights for {st.get('tgt_name', 'User')}\nPage {page + 1}/{total_pages}"
 
     blocks = [
         {
@@ -260,19 +256,17 @@ def _build_rich_panel(st) -> dict:
         on = bool(st["sel"].get(key))
         if not bot_has:
             btn = {
-                "text": {"type": "text", "text": f"🔒 {_fancy(label)}"},
+                "text": f"🔒 {_fancy(label)}",
                 "callback_data": f"pr:na:{key}",
-                "style": "danger",
             }
         else:
             btn = {
-                "text": {"type": "text", "text": _fancy(label)},
+                "text": _fancy(label),
                 "callback_data": f"pr:t:{key}",
-                "style": "success" if on else "danger",
             }
         button_rows.append(btn)
 
-    # Chunk into rows of 2
+    # Chunk into rows of 2 and add as buttons blocks
     for i in range(0, len(button_rows), 2):
         row = button_rows[i:i + 2]
         blocks.append({
@@ -287,30 +281,26 @@ def _build_rich_panel(st) -> dict:
     nav_buttons = []
     if page > 0:
         nav_buttons.append({
-            "text": {"type": "text", "text": "⬅️ " + _fancy("Back")},
+            "text": "⬅️ " + _fancy("Back"),
             "callback_data": "pr:prev",
-            "style": "primary",
         })
     else:
         nav_buttons.append({
-            "text": {"type": "text", "text": "⬅️ " + _fancy("Back")},
+            "text": "⬅️ " + _fancy("Back"),
             "callback_data": "pr:noop",
-            "style": "primary",
         })
-    
+
     if page < total_pages - 1:
         nav_buttons.append({
-            "text": {"type": "text", "text": _fancy("Next") + " ➡️"},
+            "text": _fancy("Next") + " ➡️",
             "callback_data": "pr:next",
-            "style": "primary",
         })
     else:
         nav_buttons.append({
-            "text": {"type": "text", "text": _fancy("Next") + " ➡️"},
+            "text": _fancy("Next") + " ➡️",
             "callback_data": "pr:noop",
-            "style": "primary",
         })
-    
+
     blocks.append({"type": "buttons", "buttons": nav_buttons})
 
     # ── Full + Clear row ──
@@ -318,14 +308,12 @@ def _build_rich_panel(st) -> dict:
         "type": "buttons",
         "buttons": [
             {
-                "text": {"type": "text", "text": "⚡ " + _fancy("Full Power")},
+                "text": "⚡ " + _fancy("Full Power"),
                 "callback_data": "pr:full",
-                "style": "primary",
             },
             {
-                "text": {"type": "text", "text": "🧹 " + _fancy("Clear All")},
+                "text": "🧹 " + _fancy("Clear All"),
                 "callback_data": "pr:clear",
-                "style": "danger",
             },
         ],
     })
@@ -338,14 +326,12 @@ def _build_rich_panel(st) -> dict:
         "type": "buttons",
         "buttons": [
             {
-                "text": {"type": "text", "text": "✨ ✅ " + _fancy("Confirm")},
+                "text": "✨ ✅ " + _fancy("Confirm"),
                 "callback_data": "pr:go",
-                "style": "success",
             },
             {
-                "text": {"type": "text", "text": "✖ " + _fancy("Cancel")},
+                "text": "✖ " + _fancy("Cancel"),
                 "callback_data": "pr:x",
-                "style": "danger",
             },
         ],
     })
@@ -356,7 +342,6 @@ def _build_rich_panel(st) -> dict:
 async def _send_rich_message(bot, chat_id, rich_message, reply_to_message_id=None):
     """
     Send a Rich Message using raw Bot API 10.3 method.
-    Method name must be snake_case for PTB's do_api_request.
     """
     kwargs = {
         "chat_id": chat_id,
@@ -413,7 +398,7 @@ async def promote_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     rich_msg = _build_rich_panel(st)
     sent = await _send_rich_message(ctx.bot, chat.id, rich_msg, reply_to_message_id=p["msg"].message_id)
-    
+
     # ── FIX BUG 1: Safely extract message_id from dict response ──
     msg_id = sent.get("message_id") if isinstance(sent, dict) else getattr(sent, "message_id", None)
     if msg_id:
@@ -440,7 +425,7 @@ async def demote_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 "blocks": [
                     {
                         "type": "paragraph",
-                        "text": {"type": "text", "text": f"Remove all admin powers of {target.full_name}?"}
+                        "text": f"Remove all admin powers of {target.full_name}?"
                     }
                 ],
             },
@@ -448,21 +433,19 @@ async def demote_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 "type": "buttons",
                 "buttons": [
                     {
-                        "text": {"type": "text", "text": "✅ " + _fancy("Yes, Demote")},
+                        "text": "✅ " + _fancy("Yes, Demote"),
                         "callback_data": "dm:go",
-                        "style": "danger"
                     },
                     {
-                        "text": {"type": "text", "text": "✖ " + _fancy("Cancel")},
+                        "text": "✖ " + _fancy("Cancel"),
                         "callback_data": "dm:x",
-                        "style": "success"
                     },
                 ],
             },
         ]
     }
     sent = await _send_rich_message(ctx.bot, chat.id, rich_msg, reply_to_message_id=p["msg"].message_id)
-    
+
     # ── FIX BUG 1: Safely extract message_id from dict response ──
     msg_id = sent.get("message_id") if isinstance(sent, dict) else getattr(sent, "message_id", None)
     if msg_id:
@@ -763,4 +746,4 @@ def register(app):
     app.add_handler(CallbackQueryHandler(promote_cb, pattern=r"^pr:"))
     app.add_handler(CallbackQueryHandler(demote_cb, pattern=r"^dm:"))
     app.add_handler(CallbackQueryHandler(anon_verify_callback, pattern=r"^anon_"))
-            
+    
