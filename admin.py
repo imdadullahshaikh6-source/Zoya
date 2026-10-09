@@ -34,27 +34,34 @@ COMMANDS = [("promote", "Promote a user"), ("demote", "Demote an admin")]
 PANELS: "OrderedDict[str, dict]" = OrderedDict()
 ANON_PENDING = {}
 
-# ── Permission buttons per page ──
-PER_PAGE = 4
-
-
-# ───────────────────── EXTENDED RIGHTS ─────────────────────
-# (key, fancy_label, [api_param_names])
-_ALL_RIGHTS = [
-    ("change_info", "Change Group Info", ["can_change_info"]),
-    ("delete_messages", "Delete Messages", ["can_delete_messages"]),
-    ("restrict_members", "Ban Users", ["can_restrict_members"]),
-    ("invite_users", "Add Users", ["can_invite_users"]),
-    ("pin_messages", "Pin Messages", ["can_pin_messages"]),
-    ("manage_tags", "Edit Member Tags", ["can_manage_tags"]),
-    ("stories", "Manage Stories", ["can_post_stories", "can_edit_stories", "can_delete_stories"]),
-    ("send_welcome", "Send Welcome Messages", ["can_send_welcome_messages"]),
-    ("manage_live_streams", "Manage Live Streams", ["can_manage_live_streams"]),
-    ("promote_members", "Add New Admins", ["can_promote_members"]),
-    ("manage_video_chats", "Manage Video Chats", ["can_manage_video_chats"]),
-    ("manage_topics", "Manage Topics", ["can_manage_topics"]),
-    ("anonymous", "Remain Anonymous", ["is_anonymous"]),
+# ───────────────────── PAGE DEFINITIONS ─────────────────────
+# Har page me exact 4 buttons (2x2 grid me dikhenge)
+PAGES = [
+    # Page 1
+    [
+        ("change_info", "Change Info", ["can_change_info"]),
+        ("delete_messages", "Delete Msgs", ["can_delete_messages"]),
+        ("invite_users", "Invite Users", ["can_invite_users"]),
+        ("restrict_members", "Ban Users", ["can_restrict_members"]),
+    ],
+    # Page 2
+    [
+        ("pin_messages", "Pin Msgs", ["can_pin_messages"]),
+        ("manage_chat", "Manage Chat", ["can_manage_chat"]),
+        ("manage_video_chats", "Video Chats", ["can_manage_video_chats"]),
+        ("manage_topics", "Topics", ["can_manage_topics"]),
+    ],
+    # Page 3
+    [
+        ("stories", "Stories", ["can_post_stories", "can_edit_stories", "can_delete_stories"]),
+        ("manage_tags", "Member Tags", ["can_manage_tags"]),
+        ("send_welcome", "Welcome", ["can_send_welcome_messages"]),
+        ("promote_members", "Add Admins", ["can_promote_members"]),
+    ],
 ]
+
+# Flatten all rights for permission checking and initial state
+_ALL_RIGHTS = [item for page in PAGES for item in page]
 
 
 def _has_all(member, params):
@@ -200,40 +207,19 @@ async def _precheck(update, ctx, mode: str):
     return dict(chat=chat, user=user, target=target, title=title[:16], tm=tm, br=br, msg=msg, bot_member=bm)
 
 
-# ───────────────────── PANEL ITEMS ─────────────────────
-
-def _build_items(st):
-    """Return list of (key, fancy_label, params, bot_has) for all items."""
-    items = []
-    forum = st.get("forum", False)
-    bm = st["bot_member"]
-
-    for key, label, params in _ALL_RIGHTS:
-        # topics only for forum
-        if key == "manage_topics" and not forum:
-            continue
-        # video chats irrelevant for forums
-        if key == "manage_video_chats" and forum:
-            # still show, since forum supergroups can have video chats
-            pass
-        bot_has = _has_all(bm, params)
-        items.append((key, label, params, bot_has))
-    return items
-
+# ───────────────────── RICH PANEL BUILDER ─────────────────────
 
 def _build_rich_panel(st) -> dict:
     """
     Build the InputRichMessage payload for the promote panel.
-    Uses plain strings for text fields to avoid 'unsupported rich text type' error.
     """
-    items = _build_items(st)
-    total_pages = max(1, (len(items) + PER_PAGE - 1) // PER_PAGE)
     page = st.get("page", 0)
+    total_pages = len(PAGES)
+    current_page_rights = PAGES[page]
 
-    # ── Header block (blockquote) ──
-    # Plain string for text, no RichText object.
+    # ── Header (Blockquote) ──
     header_text = f"Select Admin Rights for {st.get('tgt_name', 'User')}\nPage {page + 1}/{total_pages}"
-
+    
     blocks = [
         {
             "type": "blockquote",
@@ -246,94 +232,63 @@ def _build_rich_panel(st) -> dict:
         }
     ]
 
-    # ── Permission buttons (paginated) ──
-    start = page * PER_PAGE
-    end = start + PER_PAGE
-    page_items = items[start:end]
-
-    button_rows = []
-    for key, label, params, bot_has in page_items:
+    # ── Permissions (2x2 Grid) ──
+    btn_row = []
+    for key, label, params in current_page_rights:
         on = bool(st["sel"].get(key))
+        bot_has = _has_all(st["bot_member"], params)
+
         if not bot_has:
+            # Locked button: Red color, no emoji
             btn = {
-                "text": f"🔒 {_fancy(label)}",
+                "text": label,
                 "callback_data": f"pr:na:{key}",
+                "style": "danger"
             }
         else:
+            # Toggleable button: Green if ON, Red if OFF
             btn = {
-                "text": _fancy(label),
+                "text": label,
                 "callback_data": f"pr:t:{key}",
+                "style": "success" if on else "danger"
             }
-        button_rows.append(btn)
+        btn_row.append(btn)
 
-    # Chunk into rows of 2 and add as buttons blocks
-    for i in range(0, len(button_rows), 2):
-        row = button_rows[i:i + 2]
-        blocks.append({
-            "type": "buttons",
-            "buttons": row,
-        })
+        # After 2 buttons, add row and reset
+        if len(btn_row) == 2:
+            blocks.append({
+                "type": "buttons",
+                "buttons": btn_row
+            })
+            btn_row = []
 
-    # ── Divider before navigation ──
+    # ── Divider before Nav ──
     blocks.append({"type": "divider"})
 
-    # ── Navigation row (Back / Next) ──
-    nav_buttons = []
+    # ── Navigation (Back / Next) ──
+    nav_btns = []
     if page > 0:
-        nav_buttons.append({
-            "text": "⬅️ " + _fancy("Back"),
-            "callback_data": "pr:prev",
-        })
+        nav_btns.append({"text": "Back", "callback_data": "pr:prev", "style": "primary"})
     else:
-        nav_buttons.append({
-            "text": "⬅️ " + _fancy("Back"),
-            "callback_data": "pr:noop",
-        })
+        nav_btns.append({"text": "Back", "callback_data": "pr:noop", "style": "primary"})
 
     if page < total_pages - 1:
-        nav_buttons.append({
-            "text": _fancy("Next") + " ➡️",
-            "callback_data": "pr:next",
-        })
+        nav_btns.append({"text": "Next", "callback_data": "pr:next", "style": "primary"})
     else:
-        nav_buttons.append({
-            "text": _fancy("Next") + " ➡️",
-            "callback_data": "pr:noop",
-        })
+        nav_btns.append({"text": "Next", "callback_data": "pr:noop", "style": "primary"})
 
-    blocks.append({"type": "buttons", "buttons": nav_buttons})
-
-    # ── Full + Clear row ──
-    blocks.append({
-        "type": "buttons",
-        "buttons": [
-            {
-                "text": "⚡ " + _fancy("Full Power"),
-                "callback_data": "pr:full",
-            },
-            {
-                "text": "🧹 " + _fancy("Clear All"),
-                "callback_data": "pr:clear",
-            },
-        ],
-    })
+    blocks.append({"type": "buttons", "buttons": nav_btns})
 
     # ── Divider before Confirm/Cancel ──
     blocks.append({"type": "divider"})
 
-    # ── Confirm + Cancel row ──
+    # ── Confirm / Cancel ──
     blocks.append({
         "type": "buttons",
         "buttons": [
-            {
-                "text": "✨ ✅ " + _fancy("Confirm"),
-                "callback_data": "pr:go",
-            },
-            {
-                "text": "✖ " + _fancy("Cancel"),
-                "callback_data": "pr:x",
-            },
-        ],
+            {"text": "Confirm", "callback_data": "pr:go", "style": "success"},
+            {"text": "Cancel", "callback_data": "pr:x", "style": "danger"},
+        ]
     })
 
     return {"blocks": blocks}
@@ -432,14 +387,8 @@ async def demote_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             {
                 "type": "buttons",
                 "buttons": [
-                    {
-                        "text": "✅ " + _fancy("Yes, Demote"),
-                        "callback_data": "dm:go",
-                    },
-                    {
-                        "text": "✖ " + _fancy("Cancel"),
-                        "callback_data": "dm:x",
-                    },
+                    {"text": "Yes, Demote", "callback_data": "dm:go", "style": "danger"},
+                    {"text": "Cancel", "callback_data": "dm:x", "style": "success"},
                 ],
             },
         ]
@@ -561,8 +510,7 @@ async def promote_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if action == "next":
-        items = _build_items(st)
-        total_pages = max(1, (len(items) + PER_PAGE - 1) // PER_PAGE)
+        total_pages = len(PAGES)
         st["page"] = min(total_pages - 1, st.get("page", 0) + 1)
         rich_msg = _build_rich_panel(st)
         try:
@@ -584,10 +532,14 @@ async def promote_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if action == "t":
         params = None
         bot_has = False
-        for k, _, p in _ALL_RIGHTS:
-            if k == arg:
-                params = p
-                bot_has = _has_all(st["bot_member"], p)
+        # Search across all pages for the key
+        for page_rights in PAGES:
+            for k, _, p in page_rights:
+                if k == arg:
+                    params = p
+                    bot_has = _has_all(st["bot_member"], p)
+                    break
+            if params:
                 break
         if params is None:
             await qy.answer()
@@ -596,11 +548,6 @@ async def promote_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await qy.answer("❌ I don't have this power.", show_alert=True)
             return
         st["sel"][arg] = not st["sel"].get(arg)
-    elif action == "full":
-        for k, _, params in _ALL_RIGHTS:
-            st["sel"][k] = _has_all(st["bot_member"], params)
-    elif action == "clear":
-        st["sel"] = {}
     elif action == "go":
         bm = await _verify_now(ctx, qy, st)
         if bm is None:
@@ -746,4 +693,3 @@ def register(app):
     app.add_handler(CallbackQueryHandler(promote_cb, pattern=r"^pr:"))
     app.add_handler(CallbackQueryHandler(demote_cb, pattern=r"^dm:"))
     app.add_handler(CallbackQueryHandler(anon_verify_callback, pattern=r"^anon_"))
-    
