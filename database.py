@@ -227,19 +227,36 @@ async def guardian_get(chat_id: int) -> dict | None:
         except (TypeError, ValueError): return None
     doc = await _db.guardian.find_one({"chat_id": chat_id})
     if not doc: return None
+    # 🔥 FIX: har delay field ko int me convert karo, missing ko 0 karo
     for k in ("delay_seconds", "edit_delay_seconds", "media_delay_seconds"):
         if k in doc and doc[k] is not None:
             try: doc[k] = int(doc[k])
             except (TypeError, ValueError): doc[k] = 0
+    # enabled ko bool me convert karo
     raw = doc.get("enabled")
-    if isinstance(raw, str): doc["enabled"] = raw.strip().lower() in ("1", "true", "t", "on", "yes", "y")
-    elif raw is None: doc["enabled"] = False
-    else: doc["enabled"] = bool(raw)
+    if isinstance(raw, str):
+        doc["enabled"] = raw.strip().lower() in ("1", "true", "t", "on", "yes", "y")
+    elif raw is None:
+        doc["enabled"] = False
+    else:
+        doc["enabled"] = bool(raw)
+    # 🔥 FIX: permitted_users hamesha list honi chahiye
+    if not isinstance(doc.get("permitted_users"), list):
+        doc["permitted_users"] = []
     return doc
 
 
 async def guardian_set(chat_id: int, delay_seconds: int | None = None, enabled: bool | None = None,
                        edit_delay_seconds: int | None = None, media_delay_seconds: int | None = None):
+    """
+    Partial update — sirf wahi fields update hoti hain jo pass ki jayen.
+    Baaki fields DB me jaise hain waise rehte hain. ✅
+
+    Example:
+        guardian_set(123, edit_delay_seconds=60)    # sirf edit, media untouched
+        guardian_set(123, media_delay_seconds=180)  # sirf media, edit untouched
+        guardian_set(123, enabled=False)            # sirf enabled
+    """
     if not isinstance(chat_id, int):
         try: chat_id = int(chat_id)
         except (TypeError, ValueError): return
