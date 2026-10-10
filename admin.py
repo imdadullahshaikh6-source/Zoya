@@ -2,7 +2,7 @@
 from collections import OrderedDict
 import inspect
 
-from telegram import InlineKeyboardMarkup, ReplyParameters, Bot, Update
+from telegram import ChatPermissions, InlineKeyboardMarkup, ReplyParameters, Bot, Update
 from telegram.constants import ChatMemberStatus, ChatType, ParseMode
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import CallbackQueryHandler, ContextTypes
@@ -36,18 +36,21 @@ ANON_PENDING = {}
 
 # ───────────────────── PAGE DEFINITIONS ─────────────────────
 PAGES = [
+    # Page 1
     [
         ("change_info", "Change Info", ["can_change_info"]),
         ("delete_messages", "Delete Msgs", ["can_delete_messages"]),
         ("invite_users", "Invite Users", ["can_invite_users"]),
         ("restrict_members", "Ban Users", ["can_restrict_members"]),
     ],
+    # Page 2
     [
         ("pin_messages", "Pin Msgs", ["can_pin_messages"]),
         ("manage_chat", "Manage Chat", ["can_manage_chat"]),
         ("manage_video_chats", "Video Chats", ["can_manage_video_chats"]),
         ("manage_topics", "Topics", ["can_manage_topics"]),
     ],
+    # Page 3
     [
         ("stories", "Stories", ["can_post_stories", "can_edit_stories", "can_delete_stories"]),
         ("manage_tags", "Member Tags", ["can_manage_tags"]),
@@ -60,6 +63,7 @@ _ALL_RIGHTS = [item for page in PAGES for item in page]
 
 
 def _has_all(member, params):
+    """True only if member has ALL the api params set."""
     try:
         return all(bool(getattr(member, p, False)) for p in params)
     except Exception:
@@ -209,7 +213,7 @@ def _build_rich_panel(st) -> dict:
     fancy_select = _fancy("Select Admin Rights for")
     fancy_page = _fancy("Page")
     header_text = f"{fancy_select} {st.get('tgt_name', 'User')}\n{fancy_page} {page + 1}/{total_pages}"
-    
+
     blocks = [
         {
             "type": "blockquote",
@@ -221,7 +225,7 @@ def _build_rich_panel(st) -> dict:
     for key, label, params in current_page_rights:
         on = bool(st["sel"].get(key))
         bot_has = _has_all(st["bot_member"], params)
-        
+
         if not bot_has and any(p in ("can_manage_tags", "can_send_welcome_messages") for p in params):
             bot_has = True
 
@@ -262,6 +266,25 @@ def _build_rich_panel(st) -> dict:
     })
 
     return {"blocks": blocks}
+
+
+def _build_demote_panel(target_name: str) -> dict:
+    """Confirmation panel for /demote (shared by normal + anonymous-admin flow)."""
+    return {
+        "blocks": [
+            {
+                "type": "blockquote",
+                "blocks": [{"type": "paragraph", "text": f"Remove all admin powers of {target_name}?"}],
+            },
+            {
+                "type": "buttons",
+                "buttons": [
+                    {"text": _fancy("Yes, Demote"), "callback_data": "dm:go", "style": "danger"},
+                    {"text": _fancy("Cancel"), "callback_data": "dm:x", "style": "success"},
+                ],
+            },
+        ]
+    }
 
 
 async def _send_rich_message(bot, chat_id, rich_message, reply_to_message_id=None):
@@ -311,20 +334,18 @@ async def demote_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not update.message: return
     p = await _precheck(update, ctx, "demote")
     if not p: return
-    chat, user, target = p["chat"], p["user"], p["target"]
-    st = dict(mode="demote", chat_id=chat.id, invoker=user.id, target=target.id,
-              tgt_m=mention(target), tgt_name=target.full_name, inv_m=mention(user), forum=bool(chat.is_forum))
+    chat, user, target, tm = p["chat"], p["user"], p["target"], p["tm"]
 
-    rich_msg = {
-        "blocks": [
-            {"type": "blockquote", "blocks": [{"type": "paragraph", "text": f"Remove all admin powers of {target.full_name}?"}]},
-            {"type": "buttons", "buttons": [
-                {"text": _fancy("Yes, Demote"), "callback_data": "dm:go", "style": "danger"},
-                {"text": _fancy("Cancel"), "callback_data": "dm:x", "style": "success"},
-            ]},
-        ]
-    }
-    sent = await _send_rich_message(ctx.bot, chat.id, rich_msg, reply_to_message_id=p["msg"].message_id)
+    # 👇 yahan tgt_is_bot save kar rahe hain — bypass ke liye zaruri hai
+    st = dict(
+        mode="demote", chat_id=chat.id, invoker=user.id, target=target.id,
+        tgt_m=mention(target), tgt_name=target.full_name, inv_m=mention(user),
+        forum=bool(chat.is_forum),
+        tgt_is_bot=bool(getattr(tm.user, "is_bot", False)),
+    )
+
+    sent = await _send_rich_message(ctx.bot, chat.id, _build_demote_panel(target.full_name),
+                                     reply_to_message_id=p["msg"].message_id)
     msg_id = sent.get("message_id") if isinstance(sent, dict) else getattr(sent, "message_id", None)
     if msg_id: _put(f"{chat.id}:{msg_id}", st)
 
@@ -388,6 +409,28 @@ async def anon_verify_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     chat = await ctx.bot.get_chat(chat_id)
     user = query.from_user
+
+    # ── DEMOTE branch (alag handle karo) ──
+    if st["mode"] == "demote":
+        if target.status == OWNER:
+            await query.edit_message_text(T("that user is the group owner. nothing can be changed."))
+            return
+        if target.status != ADMIN:
+            await query.edit_message_text(T("that user is not an admin."))
+            return
+        demote_st = dict(
+            mode="demote", chat_id=chat.id, invoker=user.id, target=target.user.id,
+            tgt_m=mention(target.user), tgt_name=target.user.full_name, inv_m=mention(user),
+            forum=bool(chat.is_forum),
+            tgt_is_bot=bool(getattr(target.user, "is_bot", False)),
+        )
+        await _edit_rich_message(ctx.bot, chat.id, query.message.message_id,
+                                 _build_demote_panel(demote_st["tgt_name"]))
+        _put(f"{chat.id}:{query.message.message_id}", demote_st)
+        ANON_PENDING.pop(data, None)
+        return
+
+    # ── PROMOTE branch ──
     sel = {}
     if target.status == ADMIN:
         for key, _, params in _ALL_RIGHTS:
@@ -467,10 +510,11 @@ async def promote_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await qy.answer("❌ I don't have this power.", show_alert=True)
                 return
         st["sel"][arg] = not st["sel"].get(arg)
+
     elif action == "go":
         bm = await _verify_now(ctx, qy, st)
         if bm is None: return
-        
+
         kw = {}
         missing = []
         for k, label, params in _ALL_RIGHTS:
@@ -485,21 +529,19 @@ async def promote_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await qy.answer("I lack some selected powers.", show_alert=True)
             await tag_missing(ctx, st["chat_id"], qy.from_user, missing)
             return
-        
+
         kw["can_manage_chat"] = True
-        
-        # 🔴 FIX: Use RAW API to bypass library filtering
-        payload = {
-            "chat_id": st["chat_id"],
-            "user_id": st["target"],
-        }
+
+        # RAW API — library filtering bypass karta hai
+        payload = {"chat_id": st["chat_id"], "user_id": st["target"]}
         payload.update(kw)
-        
+
         skipped_powers = []
         try:
             await ctx.bot.do_api_request("promoteChatMember", api_kwargs=payload)
-        except TelegramError as e:
-            stripped = ["can_manage_tags", "can_send_welcome_messages", "can_manage_live_streams", "can_post_stories", "can_edit_stories", "can_delete_stories"]
+        except TelegramError:
+            stripped = ["can_manage_tags", "can_send_welcome_messages", "can_manage_live_streams",
+                        "can_post_stories", "can_edit_stories", "can_delete_stories"]
             fallback_payload = {k: v for k, v in payload.items() if k not in stripped}
             try:
                 await ctx.bot.do_api_request("promoteChatMember", api_kwargs=fallback_payload)
@@ -555,6 +597,40 @@ async def promote_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await qy.answer()
 
 
+# ───────────── DEMOTE BYPASS HELPERS ─────────────
+
+_OPTIONAL_PROMOTE_KEYS = (
+    "can_manage_tags", "can_send_welcome_messages", "can_manage_live_streams",
+    "can_post_stories", "can_edit_stories", "can_delete_stories",
+)
+
+
+async def _demote_via_restrict(ctx, chat_id: int, target_id: int) -> None:
+    """
+    🔥 BOT BYPASS 🔥
+    Telegram bots ke admin rights edit nahi karne deta (BOT_CHANNELS_NA error).
+    Trick:
+      1. restrict_chat_member(can_send_messages=False) → admin status drop ho jata hai
+      2. restrict_chat_member(all_permissions()) → restrictions hatti, banda normal member ban jata hai
+    """
+    # Step 1: restrict → admin status hat jata hai
+    await ctx.bot.restrict_chat_member(
+        chat_id, target_id,
+        permissions=ChatPermissions(can_send_messages=False),
+    )
+    # Step 2: turant unrestrict (all_permissions = "no restrictions" in Bot API)
+    try:
+        await ctx.bot.restrict_chat_member(
+            chat_id, target_id,
+            permissions=ChatPermissions.all_permissions(),
+        )
+    except TelegramError as e:
+        raise RuntimeError(
+            f"admin powers removed but lifting restriction failed ({e}). "
+            "Please unrestrict the user manually."
+        ) from e
+
+
 async def demote_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     qy, st, key = await _load(update, "demote")
     if not st: return
@@ -564,50 +640,80 @@ async def demote_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await qy.edit_message_text(q(T("demotion cancelled ✖")))
         await qy.answer()
         return
+
     bm = await _verify_now(ctx, qy, st)
     if bm is None: return
-    
+
+    chat_id = st["chat_id"]
+    target_id = st["target"]
+    is_bot = bool(st.get("tgt_is_bot"))
+
+    async def _fail(detail: str):
+        await qy.answer("Failed, see message below.")
+        await say(ctx, chat_id, f"{st['inv_m']}, " + T("demotion failed:") + f" {detail}")
+
+    # ── STEP 1: normal demote via RAW promoteChatMember (saari powers false) ──
     kw = {}
     for _, _, params in _ALL_RIGHTS:
         for p in params:
-            if p == "is_anonymous": continue
+            if p == "is_anonymous":
+                continue
             kw[p] = False
     kw["can_manage_chat"] = False
     kw["is_anonymous"] = False
-    
-    # 🔴 FIX: Use RAW API for demotion too
-    payload = {
-        "chat_id": st["chat_id"],
-        "user_id": st["target"],
-    }
+
+    payload = {"chat_id": chat_id, "user_id": target_id}
     payload.update(kw)
-    
+
     try:
         await ctx.bot.do_api_request("promoteChatMember", api_kwargs=payload)
     except TelegramError as e:
-        stripped = ["can_manage_tags", "can_send_welcome_messages", "can_manage_live_streams", "can_post_stories", "can_edit_stories", "can_delete_stories"]
-        fallback_payload = {k: v for k, v in payload.items() if k not in stripped}
+        # purane servers ke liye optional keys strip karke retry
+        fallback_payload = {k: v for k, v in payload.items() if k not in _OPTIONAL_PROMOTE_KEYS}
         try:
             await ctx.bot.do_api_request("promoteChatMember", api_kwargs=fallback_payload)
         except TelegramError as e2:
-            await qy.answer("Failed, see message below.")
-            await say(ctx, st["chat_id"], f"{st['inv_m']}, " + T("demotion failed:") + f" {explain(e2)}")
-            return
-            
+            print(f"[admin] demote failed chat={chat_id} target={target_id} is_bot={is_bot}: "
+                  f"{type(e2).__name__}: {e2}")
+
+            # ── STEP 2: BYPASS — agar bot hai to restrict/unrestrict use karo ──
+            if not is_bot:
+                await _fail(explain(e2))
+                return
+
+            print(f"[admin] demote: trying restrict fallback for bot target={target_id}")
+            try:
+                await _demote_via_restrict(ctx, chat_id, target_id)
+            except RuntimeError as e3:
+                print(f"[admin] demote fallback incomplete: {e3}")
+                await _fail(esc(str(e3)))
+                return
+            except TelegramError as e3:
+                print(f"[admin] demote fallback failed: {type(e3).__name__}: {e3}")
+                await _fail(explain(e3))
+                return
+
+    # ── STEP 3: verify (API ne ok bola to bhi check karo) ──
+    tm = None
+    try:
+        tm = await ctx.bot.get_chat_member(chat_id, target_id)
+    except TelegramError:
+        pass
+    if tm is not None and tm.status == ADMIN:
+        print(f"[admin] demote: request accepted but target={target_id} still admin")
+        await _fail(T("telegram accepted the request but the user is still an admin."))
+        return
+
     PANELS.pop(key, None)
     await qy.edit_message_text(q(T("<b>✅ demoted</b>\n\n{m} is no longer an admin.", m=st["tgt_m"])))
     await qy.answer("Demoted ✅")
 
-    try:
-        _tm = await ctx.bot.get_chat_member(st["chat_id"], st["target"])
-        _target_name = _tm.user.full_name
-    except TelegramError:
-        _target_name = "User"
+    _target_name = tm.user.full_name if tm is not None else "User"
     await logchannel.log_action(
-        ctx.bot, st["chat_id"], "DEMOTE",
+        ctx.bot, chat_id, "DEMOTE",
         chat_title=qy.message.chat.title or "",
         admin_id=qy.from_user.id, admin_name=qy.from_user.full_name,
-        user_id=st["target"], user_name=_target_name,
+        user_id=target_id, user_name=_target_name,
         reason="",
     )
 
@@ -618,4 +724,4 @@ def register(app):
     app.add_handler(CallbackQueryHandler(promote_cb, pattern=r"^pr:"))
     app.add_handler(CallbackQueryHandler(demote_cb, pattern=r"^dm:"))
     app.add_handler(CallbackQueryHandler(anon_verify_callback, pattern=r"^anon_"))
-    
+        
