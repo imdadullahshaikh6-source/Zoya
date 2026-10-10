@@ -2,7 +2,7 @@
 from collections import OrderedDict
 import inspect
 
-from telegram import InlineKeyboardMarkup, ReplyParameters, Bot, Update
+from telegram import ChatPermissions, InlineKeyboardMarkup, ReplyParameters, Bot, Update
 from telegram.constants import ChatMemberStatus, ChatType, ParseMode
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import CallbackQueryHandler, ContextTypes
@@ -298,6 +298,30 @@ def _build_rich_panel(st) -> dict:
     return {"blocks": blocks}
 
 
+def _build_demote_panel(target_name: str) -> dict:
+    """Confirmation panel for /demote (shared by the normal and the anonymous-admin flow)."""
+    return {
+        "blocks": [
+            {
+                "type": "blockquote",
+                "blocks": [
+                    {
+                        "type": "paragraph",
+                        "text": f"Remove all admin powers of {target_name}?"
+                    }
+                ],
+            },
+            {
+                "type": "buttons",
+                "buttons": [
+                    {"text": _fancy("Yes, Demote"), "callback_data": "dm:go", "style": "danger"},
+                    {"text": _fancy("Cancel"), "callback_data": "dm:x", "style": "success"},
+                ],
+            },
+        ]
+    }
+
+
 async def _send_rich_message(bot, chat_id, rich_message, reply_to_message_id=None):
     """
     Send a Rich Message using raw Bot API 10.3 method.
@@ -372,32 +396,13 @@ async def demote_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     p = await _precheck(update, ctx, "demote")
     if not p:
         return
-    chat, user, target = p["chat"], p["user"], p["target"]
+    chat, user, target, tm = p["chat"], p["user"], p["target"], p["tm"]
     st = dict(mode="demote", chat_id=chat.id, invoker=user.id, target=target.id,
-              tgt_m=mention(target), tgt_name=target.full_name, inv_m=mention(user), forum=bool(chat.is_forum))
+              tgt_m=mention(target), tgt_name=target.full_name, inv_m=mention(user), forum=bool(chat.is_forum),
+              tgt_is_bot=bool(getattr(tm.user, "is_bot", False)))
 
-    # Simple rich message for demote confirmation
-    rich_msg = {
-        "blocks": [
-            {
-                "type": "blockquote",
-                "blocks": [
-                    {
-                        "type": "paragraph",
-                        "text": f"Remove all admin powers of {target.full_name}?"
-                    }
-                ],
-            },
-            {
-                "type": "buttons",
-                "buttons": [
-                    {"text": _fancy("Yes, Demote"), "callback_data": "dm:go", "style": "danger"},
-                    {"text": _fancy("Cancel"), "callback_data": "dm:x", "style": "success"},
-                ],
-            },
-        ]
-    }
-    sent = await _send_rich_message(ctx.bot, chat.id, rich_msg, reply_to_message_id=p["msg"].message_id)
+    sent = await _send_rich_message(ctx.bot, chat.id, _build_demote_panel(target.full_name),
+                                    reply_to_message_id=p["msg"].message_id)
 
     # ── FIX BUG 1: Safely extract message_id from dict response ──
     msg_id = sent.get("message_id") if isinstance(sent, dict) else getattr(sent, "message_id", None)
@@ -466,6 +471,24 @@ async def anon_verify_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     chat = await ctx.bot.get_chat(chat_id)
     user = query.from_user
+
+    if st["mode"] == "demote":
+        if target.status == OWNER:
+            await query.edit_message_text(T("that user is the group owner. nothing can be changed."))
+            return
+        if target.status != ADMIN:
+            await query.edit_message_text(T("that user is not an admin."))
+            return
+        demote_st = dict(
+            mode="demote", chat_id=chat.id, invoker=user.id, target=target.user.id,
+            tgt_m=mention(target.user), tgt_name=target.user.full_name, inv_m=mention(user),
+            forum=bool(chat.is_forum), tgt_is_bot=bool(getattr(target.user, "is_bot", False)),
+        )
+        await _edit_rich_message(ctx.bot, chat.id, query.message.message_id,
+                                 _build_demote_panel(demote_st["tgt_name"]))
+        _put(f"{chat.id}:{query.message.message_id}", demote_st)
+        ANON_PENDING.pop(data, None)
+        return
 
     sel = {}
     if target.status == ADMIN:
@@ -636,6 +659,42 @@ async def promote_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await qy.answer()
 
 
+# Bot API keys that older library versions / servers may not accept (stripped on the retry)
+_OPTIONAL_PROMOTE_KEYS = ("can_manage_tags", "can_send_welcome_messages", "can_manage_live_streams",
+                          "can_post_stories", "can_edit_stories", "can_delete_stories")
+
+
+async def _demote_via_promote(ctx, chat_id: int, target_id: int) -> None:
+    """Normal demotion: promote_chat_member with every power switched off. Raises TelegramError."""
+    kw = {}
+    for _, _, params in _ALL_RIGHTS:
+        for p in params:
+            if p == "is_anonymous":
+                continue
+            kw[p] = False
+    kw["can_manage_chat"] = False
+    kw["is_anonymous"] = False
+    filtered = _filter_kwargs(kw)
+    try:
+        await ctx.bot.promote_chat_member(chat_id, target_id, **filtered)
+    except TelegramError:
+        fallback = {k: v for k, v in filtered.items() if k not in _OPTIONAL_PROMOTE_KEYS}
+        await ctx.bot.promote_chat_member(chat_id, target_id, **fallback)
+
+
+async def _demote_via_restrict(ctx, chat_id: int, target_id: int) -> None:
+    """Fallback for bot targets: Telegram refuses edit-admin on bots (BOT_CHANNELS_NA).
+    A participant is either an admin or restricted, so restricting the target drops its admin status; lifting the
+    restriction afterwards (all permissions True = the Bot API way to remove restrictions) returns it to a plain member."""
+    await ctx.bot.restrict_chat_member(chat_id, target_id, permissions=ChatPermissions(can_send_messages=False))
+    try:
+        await ctx.bot.restrict_chat_member(chat_id, target_id, permissions=ChatPermissions.all_permissions())
+    except TelegramError as e:
+        raise RuntimeError(
+            f"admin powers were removed but lifting the restriction failed ({e}). Unrestrict the user manually."
+        ) from e
+
+
 async def demote_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     qy, st, key = await _load(update, "demote")
     if not st:
@@ -649,38 +708,50 @@ async def demote_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     bm = await _verify_now(ctx, qy, st)
     if bm is None:
         return
-    kw = {}
-    for _, _, params in _ALL_RIGHTS:
-        for p in params:
-            if p == "is_anonymous":
-                continue
-            kw[p] = False
-    kw["can_manage_chat"] = False
-    kw["is_anonymous"] = False
-    filtered = _filter_kwargs(kw)
-    try:
-        await ctx.bot.promote_chat_member(st["chat_id"], st["target"], **filtered)
-    except TelegramError as e:
-        fallback = {k: v for k, v in filtered.items()
-                    if k not in ("can_manage_tags", "can_send_welcome_messages",
-                                 "can_manage_live_streams",
-                                 "can_post_stories", "can_edit_stories", "can_delete_stories")}
+
+    chat_id, target_id = st["chat_id"], st["target"]
+    is_bot = bool(st.get("tgt_is_bot"))
+
+    async def _fail(detail: str):
+        await qy.answer("Failed, see message below.")
+        await say(ctx, chat_id, f"{st['inv_m']}, " + T("demotion failed:") + f" {detail}")
         try:
-            await ctx.bot.promote_chat_member(st["chat_id"], st["target"], **fallback)
-        except TelegramError as e2:
-            await qy.answer("Failed, see message below.")
-            await say(ctx, st["chat_id"], f"{st['inv_m']}, " + T("demotion failed:") + f" {explain(e2)}")
+        await _demote_via_promote(ctx, chat_id, target_id)
+    except TelegramError as e:
+        print(f"[admin] demote failed chat={chat_id} target={target_id} is_bot={is_bot}: {type(e).__name__}: {e}")
+        if not is_bot:
+            await _fail(explain(e))
             return
+        # bots can't have their admin powers edited through promote_chat_member -> restrict / lift instead
+        print(f"[admin] demote: trying restrict fallback for bot target={target_id}")
+        try:
+            await _demote_via_restrict(ctx, chat_id, target_id)
+        except RuntimeError as e2:
+            print(f"[admin] demote fallback incomplete chat={chat_id} target={target_id}: {e2}")
+            await _fail(esc(str(e2)))
+            return
+        except TelegramError as e2:
+            print(f"[admin] demote fallback failed chat={chat_id} target={target_id}: {type(e2).__name__}: {e2}")
+            await _fail(explain(e2))
+            return
+
+    # verify instead of trusting the API call
+    tm = None
+    try:
+        tm = await ctx.bot.get_chat_member(chat_id, target_id)
+    except TelegramError:
+        pass
+    if tm is not None and tm.status == ADMIN:
+        print(f"[admin] demote: request accepted but target={target_id} is still an admin")
+        await _fail(T("telegram accepted the request but the user is still an admin."))
+        return
+
     PANELS.pop(key, None)
     await qy.edit_message_text(q(T("<b>✅ demoted</b>\n\n{m} is no longer an admin.", m=st["tgt_m"])))
     await qy.answer("Demoted ✅")
 
     # ── logchannel ──
-    try:
-        _tm = await ctx.bot.get_chat_member(st["chat_id"], st["target"])
-        _target_name = _tm.user.full_name
-    except TelegramError:
-        _target_name = "User"
+    _target_name = tm.user.full_name if tm is not None else "User"
     _chat_title = qy.message.chat.title or ""
     await logchannel.log_action(
         ctx.bot, st["chat_id"], "DEMOTE",
@@ -697,4 +768,3 @@ def register(app):
     app.add_handler(CallbackQueryHandler(promote_cb, pattern=r"^pr:"))
     app.add_handler(CallbackQueryHandler(demote_cb, pattern=r"^dm:"))
     app.add_handler(CallbackQueryHandler(anon_verify_callback, pattern=r"^anon_"))
-    
