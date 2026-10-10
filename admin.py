@@ -220,7 +220,6 @@ def _build_rich_panel(st) -> dict:
     current_page_rights = PAGES[page]
 
     # ── Header (Blockquote) with Fancy Font ──
-    # Apply fancy font to static text only, keep user name as is.
     fancy_select = _fancy("Select Admin Rights for")
     fancy_page = _fancy("Page")
     header_text = f"{fancy_select} {st.get('tgt_name', 'User')}\n{fancy_page} {page + 1}/{total_pages}"
@@ -242,6 +241,12 @@ def _build_rich_panel(st) -> dict:
     for key, label, params in current_page_rights:
         on = bool(st["sel"].get(key))
         bot_has = _has_all(st["bot_member"], params)
+        
+        # 🔴 FIX: Naye permissions (can_manage_tags, can_send_welcome_messages) ke liye check bypass
+        # agar library purani hai ya API naya feature support nahi kar raha, toh button force enable karo
+        if not bot_has and any(p in ("can_manage_tags", "can_send_welcome_messages") for p in params):
+            bot_has = True
+
         fancy_label = _fancy(label) # Apply fancy font here
 
         if not bot_has:
@@ -549,8 +554,12 @@ async def promote_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await qy.answer()
             return
         if not bot_has:
-            await qy.answer("❌ I don't have this power.", show_alert=True)
-            return
+            # 🔴 FIX: Allow toggling for new permissions even if bot_has is False
+            if any(p in ("can_manage_tags", "can_send_welcome_messages") for p in params):
+                bot_has = True
+            else:
+                await qy.answer("❌ I don't have this power.", show_alert=True)
+                return
         st["sel"][arg] = not st["sel"].get(arg)
     elif action == "go":
         bm = await _verify_now(ctx, qy, st)
@@ -563,8 +572,10 @@ async def promote_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if not st["sel"].get(k):
                 continue
             if not _has_all(bm, params):
-                missing.append(label)
-                continue
+                # Allow new permissions to pass through to API even if _has_all says False
+                if not any(p in ("can_manage_tags", "can_send_welcome_messages") for p in params):
+                    missing.append(label)
+                    continue
             for p in params:
                 kw[p] = True
         if missing:
@@ -698,3 +709,4 @@ def register(app):
     app.add_handler(CallbackQueryHandler(demote_cb, pattern=r"^dm:"))
     app.add_handler(CallbackQueryHandler(anon_verify_callback, pattern=r"^anon_"))
     
+          
