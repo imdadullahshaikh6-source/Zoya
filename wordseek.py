@@ -5,11 +5,10 @@ import time
 from telegram import Update
 from telegram.ext import ContextTypes, CommandHandler, MessageHandler, filters
 import words
+import database as dbase  # ✅ DB Import
 
 # Game state
 active_games = {}
-user_scores = {}
-user_names = {}
 chat_levels = {}   
 last_played = {}   
 
@@ -164,8 +163,8 @@ async def guess_word(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         points = 20 - (game.get('hints_taken', 0) * 5)
         if points < 5: points = 5
         
-        user_scores[user_id] = user_scores.get(user_id, 0) + points
-        user_names[user_id] = user_name
+        # ✅ DB Me score save karo
+        await dbase.wordseek_add_score(chat_id, user_id, user_name, points)
         
         chat_levels[chat_id] = min(chat_levels.get(chat_id, 1) + 1, 3)
         last_played[chat_id] = time.time()
@@ -174,7 +173,6 @@ async def guess_word(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try: await update.message.set_reaction(random.choice(reactions))
         except Exception: pass
         
-        # ✅ FIX: Quotes hata diye, simple text
         start_text = f"Start with /new{game['length']}"
         
         await update.message.reply_text(
@@ -230,14 +228,20 @@ async def hint_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"<i>(This will cost you 5 points if you win!)</i>", parse_mode='HTML')
 
 async def leaderboard_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not user_scores:
-        await update.message.reply_text("🏆 No scores yet! Start a game with /new5 to get on the board."); return
+    chat_id = update.effective_chat.id
     
-    sorted_scores = sorted(user_scores.items(), key=lambda x: x[1], reverse=True)
-    text = "<b>🏆 𝙒𝙤𝙧𝙙𝙎𝙚𝙚𝙠 𝙇𝙚𝙖𝙙𝙚𝙧𝙗𝙤𝙖𝙧𝙙</b>\n\n"
-    for i, (user_id, score) in enumerate(sorted_scores[:10], 1):
-        name = user_names.get(user_id, "Unknown")
+    # ✅ DB se sirf is chat ka leaderboard fetch karo
+    scores = await dbase.wordseek_get_leaderboard(chat_id)
+    
+    if not scores:
+        await update.message.reply_text("🏆 Is group me abhi tak koi score nahi hai! /new5 se game start karo."); return
+    
+    text = "<b>🏆 𝙒𝙤𝙧𝙙𝙎𝙚𝙚𝙠 𝙇𝙚𝙖𝙙𝙚𝙧𝙗𝙤𝙖𝙧𝙙 (This Group)</b>\n\n"
+    for i, doc in enumerate(scores, 1):
+        name = doc.get("name", "Unknown")
+        score = doc.get("score", 0)
         text += f"{i}. <b>{name}</b> — {score} pts\n"
+    
     await update.message.reply_text(text, parse_mode='HTML')
 
 async def end_game(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
