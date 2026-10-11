@@ -1,5 +1,6 @@
 # wordseek.py
 import random
+import difflib  # ✅ Naya module typos check karne ke liye
 from telegram import Update
 from telegram.ext import ContextTypes, CommandHandler, MessageHandler, filters
 import words
@@ -58,6 +59,30 @@ def get_guess_result(guess, target):
                 result[i] = '🟥'
                 
     return ''.join(result)
+
+# ✅ Naya function: Thodi galat spelling bhi accept karega, lekin bakwas word reject karega
+def is_valid_guess(word, length):
+    if length == 4: 
+        dictionary = words.WORDS_4
+    elif length == 5: 
+        dictionary = words.WORDS_5
+    elif length == 6: 
+        dictionary = words.WORDS_6
+    else: 
+        return False
+
+    # 1. Agar word exact dictionary me hai
+    if word in dictionary:
+        return True
+
+    # 2. Agar word thoda galat hai (typo), toh check karo kya ye kisi valid word ke kareeb hai?
+    # cutoff=0.7 ka matlab hai 70% match hona chahiye
+    matches = difflib.get_close_matches(word, dictionary, n=1, cutoff=0.7)
+    if matches:
+        return True
+        
+    # 3. Agar bilkul bakwas word hai (xuabk jaisa), toh reject kar do
+    return False
 
 async def new_game(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -120,7 +145,8 @@ async def guess_word(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    if text not in words.WORDS_4 and text not in words.WORDS_5 and text not in words.WORDS_6:
+    # ✅ Ab strict check ki jagah smart check use kar rahe hain
+    if not is_valid_guess(text, game['length']):
         await update.message.reply_text(
             f"❌ <b>{text}</b> is not a valid {game['length']}-letter word.", 
             parse_mode='HTML'
