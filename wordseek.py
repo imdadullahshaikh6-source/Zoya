@@ -12,7 +12,6 @@ active_games = {}
 chat_levels = {}   
 last_played = {}   
 
-# ✅ HELP_TXT (professional, WordHush style)
 HELP_TXT = (
     "<blockquote>🔍 𝙒𝙤𝙧𝙙𝙎𝙚𝙚𝙠 🔍</blockquote>\n\n"
     "<i>🎯 The Ultimate Word Guessing Challenge</i>\n\n"
@@ -139,7 +138,7 @@ async def get_word_for_game(chat_id, length):
 async def new_game(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if chat_id in active_games:
-        await update.message.reply_text("⚠️ A game is already active in this chat! Use /end to stop it.")
+        await ctx.bot.send_message(chat_id, "⚠️ A game is already active in this chat! Use /end to stop it.")
         return
     
     text = update.message.text
@@ -159,8 +158,8 @@ async def new_game(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     board_text = f"<blockquote><b>Game started! Guess the {length}-letter word!</b></blockquote>\n\n"
     board_text += f"<b>{length}-letter mode · 0/30</b>"
     
-    msg = await update.message.reply_text(board_text, parse_mode='HTML')
-    active_games[chat_id]['message_id'] = msg.message_id
+    # ✅ Normal message send (no reply/tag)
+    await ctx.bot.send_message(chat_id, board_text, parse_mode='HTML')
 
 async def guess_word(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -173,11 +172,11 @@ async def guess_word(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if len(text) != game['length']: return 
     
     if text in game['guesses']:
-        await update.message.reply_text(f"⚠️ <b>Someone has already guessed this word. Please try another one!</b>", parse_mode='HTML')
+        await ctx.bot.send_message(chat_id, f"⚠️ <b>Someone has already guessed this word. Please try another one!</b>", parse_mode='HTML')
         return
 
     if not is_valid_guess(text, game['length']):
-        await update.message.reply_text(f"❌ <b>{text}</b> is not a valid {game['length']}-letter word.", parse_mode='HTML')
+        await ctx.bot.send_message(chat_id, f"❌ <b>{text}</b> is not a valid {game['length']}-letter word.", parse_mode='HTML')
         return 
     
     game['guesses'].append(text)
@@ -210,13 +209,14 @@ async def guess_word(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         
         start_text = f"Start with /new{game['length']}"
         
-        await update.message.reply_text(
+        # ✅ Normal message send (no reply/tag)
+        await ctx.bot.send_message(
+            chat_id,
             f"🎉 <b>Congrats! You guessed it correctly.</b>\n"
             f"<b>Correct Word:</b> {text}\n"
             f"<b>Added {points} to the leaderboard.</b>\n\n"
             f"{start_text}",
-            parse_mode='HTML',
-            reply_to_message_id=update.message.message_id
+            parse_mode='HTML'
         )
         del active_games[chat_id]
         return
@@ -227,7 +227,8 @@ async def guess_word(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         
         start_text = f"Start with /new{game['length']}"
         
-        await update.message.reply_text(
+        await ctx.bot.send_message(
+            chat_id,
             f"😔 <b>Game over! No one guessed the word.</b>\n\n"
             f"{start_text}",
             parse_mode='HTML'
@@ -235,12 +236,13 @@ async def guess_word(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         del active_games[chat_id]
         return
     
-    await update.message.reply_text(board_text, parse_mode='HTML')
+    # ✅ Normal message send (no reply/tag)
+    await ctx.bot.send_message(chat_id, board_text, parse_mode='HTML')
 
 async def hint_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if chat_id not in active_games:
-        await update.message.reply_text("❌ No active game in this chat!"); return
+        await ctx.bot.send_message(chat_id, "❌ No active game in this chat!"); return
     game = active_games[chat_id]
     if game['status'] != 'active': return
     
@@ -252,13 +254,14 @@ async def hint_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 
     unrevealed = [i for i in range(length) if i not in revealed_indices]
     if not unrevealed:
-        await update.message.reply_text("🤔 You already know all the letters! Just guess the word."); return
+        await ctx.bot.send_message(chat_id, "🤔 You already know all the letters! Just guess the word."); return
         
     hint_index = random.choice(unrevealed)
     hint_letter = word[hint_index].upper()
     game['hints_taken'] = game.get('hints_taken', 0) + 1
     
-    await update.message.reply_text(
+    await ctx.bot.send_message(
+        chat_id,
         f"💡 <b>Hint:</b> The letter at position <b>{hint_index + 1}</b> is <b>{hint_letter}</b>.\n"
         f"<i>(This will cost you 5 points if you win!)</i>", parse_mode='HTML')
 
@@ -267,7 +270,7 @@ async def leaderboard_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     scores = await dbase.wordseek_get_leaderboard(chat_id)
     
     if not scores:
-        await update.message.reply_text("🏆 Is group me abhi tak koi score nahi hai! /new5 se game start karo."); return
+        await ctx.bot.send_message(chat_id, "🏆 Is group me abhi tak koi score nahi hai! /new5 se game start karo."); return
     
     text = "<b>🏆 𝙒𝙤𝙧𝙙𝙎𝙚𝙚𝙠 𝙇𝙚𝙖𝙙𝙚𝙧𝙗𝙤𝙖𝙧𝙙</b>\n"
     text += f"<i>(Group rankings)</i>\n\n"
@@ -277,7 +280,7 @@ async def leaderboard_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         medal = "🥇" if i == 1 else ("🥈" if i == 2 else ("🥉" if i == 3 else f"{i}."))
         text += f"{medal} <b>{name}</b> — {score} pts\n"
     
-    await update.message.reply_text(text, parse_mode='HTML')
+    await ctx.bot.send_message(chat_id, text, parse_mode='HTML')
 
 async def myscore_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -287,14 +290,16 @@ async def myscore_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     score = await dbase.wordseek_get_user_score(chat_id, user_id)
     
     if score == 0:
-        await update.message.reply_text(
+        await ctx.bot.send_message(
+            chat_id,
             f"📊 <b>{user_name}</b>, tumne is group me abhi tak koi score nahi banaya.\n"
             f"<code>/new5</code> se game start karo!",
             parse_mode='HTML'
         )
         return
     
-    await update.message.reply_text(
+    await ctx.bot.send_message(
+        chat_id,
         f"<blockquote>📊 <b>Your WordSeek Score</b></blockquote>\n\n"
         f"👤 <b>Name:</b> {user_name}\n"
         f"🏆 <b>Score:</b> {score} pts\n"
@@ -312,7 +317,8 @@ async def end_game(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     
     start_text = f"Start with /new{length}"
     
-    await update.message.reply_text(
+    await ctx.bot.send_message(
+        chat_id,
         f"🛑 <b>Game ended by command. The word was hidden.</b>\n\n"
         f"{start_text}",
         parse_mode='HTML')
