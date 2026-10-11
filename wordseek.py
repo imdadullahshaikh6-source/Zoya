@@ -1,6 +1,6 @@
 # wordseek.py
 import random
-import difflib  # ✅ Naya module typos check karne ke liye
+import difflib
 from telegram import Update
 from telegram.ext import ContextTypes, CommandHandler, MessageHandler, filters
 import words
@@ -40,6 +40,20 @@ COMMANDS = [
     ("end", "End the current WordSeek game"),
 ]
 
+# ✅ New Function: Convert text to Mathematical Bold Font (like 𝗪𝗢𝗥𝗗)
+def to_math_bold(text):
+    res = []
+    for ch in text:
+        if 'A' <= ch <= 'Z':
+            res.append(chr(ord(ch) - 65 + 0x1D5D4))
+        elif 'a' <= ch <= 'z':
+            res.append(chr(ord(ch) - 97 + 0x1D5EE))
+        elif '0' <= ch <= '9':
+            res.append(chr(ord(ch) - 48 + 0x1D7EC))
+        else:
+            res.append(ch)
+    return "".join(res)
+
 def get_guess_result(guess, target):
     result = [None] * len(guess)
     target_list = list(target)
@@ -60,28 +74,19 @@ def get_guess_result(guess, target):
                 
     return ''.join(result)
 
-# ✅ Naya function: Thodi galat spelling bhi accept karega, lekin bakwas word reject karega
 def is_valid_guess(word, length):
-    if length == 4: 
-        dictionary = words.WORDS_4
-    elif length == 5: 
-        dictionary = words.WORDS_5
-    elif length == 6: 
-        dictionary = words.WORDS_6
-    else: 
-        return False
+    if length == 4: dictionary = words.WORDS_4
+    elif length == 5: dictionary = words.WORDS_5
+    elif length == 6: dictionary = words.WORDS_6
+    else: return False
 
-    # 1. Agar word exact dictionary me hai
     if word in dictionary:
         return True
 
-    # 2. Agar word thoda galat hai (typo), toh check karo kya ye kisi valid word ke kareeb hai?
-    # cutoff=0.7 ka matlab hai 70% match hona chahiye
     matches = difflib.get_close_matches(word, dictionary, n=1, cutoff=0.7)
     if matches:
         return True
         
-    # 3. Agar bilkul bakwas word hai (xuabk jaisa), toh reject kar do
     return False
 
 async def new_game(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -115,7 +120,8 @@ async def new_game(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         'hints_taken': 0
     }
     
-    board_text = f"<b>Game started! Guess the {length}-letter word!</b>\n\n"
+    # ✅ FIX: Added blockquote to the start message
+    board_text = f"<blockquote><b>Game started! Guess the {length}-letter word!</b></blockquote>\n\n"
     board_text += f"<b>{length}-letter mode · 0/30</b>"
     
     msg = await update.message.reply_text(board_text, parse_mode='HTML')
@@ -145,7 +151,6 @@ async def guess_word(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ✅ Ab strict check ki jagah smart check use kar rahe hain
     if not is_valid_guess(text, game['length']):
         await update.message.reply_text(
             f"❌ <b>{text}</b> is not a valid {game['length']}-letter word.", 
@@ -160,7 +165,8 @@ async def guess_word(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     for g in game['guesses']:
         result = get_guess_result(g, game['word'])
         spaced_result = ' '.join(result)
-        board_lines.append(f"{spaced_result}  <code><b>{g.upper()}</b></code>")
+        # ✅ FIX: Using the new Mathematical Bold Font
+        board_lines.append(f"{spaced_result}  {to_math_bold(g.upper())}")
     
     board_text = f"<b>{game['length']}-letter mode · {guess_count}/30</b>\n\n"
     board_text += "\n".join(board_lines)
@@ -176,11 +182,18 @@ async def guess_word(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         user_scores[user_id] = user_scores.get(user_id, 0) + points
         user_names[user_id] = user_name
         
+        # ✅ FIX: Added random reaction on win
+        reactions = ["👍", "🔥", "🎉", "❤", "🥰", "👏", "🤩", "💯"]
+        try:
+            await update.message.set_reaction(random.choice(reactions))
+        except Exception as e:
+            pass # Ignore if reaction fails
+        
         await update.message.reply_text(
             f"🎉 <b>Congrats! You guessed it correctly.</b>\n"
             f"<b>Correct Word:</b> {text}\n"
             f"<b>Added {points} to the leaderboard.</b>\n\n"
-            f"Start with <code>/new{game['length']}</code>",
+            f"<blockquote>Start with <code>/new{game['length']}</code></blockquote>",
             parse_mode='HTML',
             reply_to_message_id=update.message.message_id
         )
@@ -191,7 +204,7 @@ async def guess_word(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         game['status'] = 'ended'
         await update.message.reply_text(
             f"😔 <b>Game over! No one guessed the word.</b>\n"
-            f"Start with <code>/new{game['length']}</code>",
+            f"<blockquote>Start with <code>/new{game['length']}</code></blockquote>",
             parse_mode='HTML'
         )
         del active_games[chat_id]
@@ -258,7 +271,7 @@ async def end_game(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     del active_games[chat_id]
     await update.message.reply_text(
         f"🛑 <b>Game ended by command. The word was hidden.</b>\n"
-        f"Start with <code>/new{length}</code>",
+        f"<blockquote>Start with <code>/new{length}</code></blockquote>",
         parse_mode='HTML'
     )
 
