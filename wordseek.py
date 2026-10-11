@@ -2,16 +2,16 @@
 import random
 import difflib
 import time
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
+from telegram import Update
+from telegram.ext import ContextTypes, CommandHandler, MessageHandler, filters
 import words
 
 # Game state
 active_games = {}
 user_scores = {}
 user_names = {}
-chat_levels = {}   # ✅ Har group ka level track karne ke liye
-last_played = {}   # ✅ 1 hour reset ke liye
+chat_levels = {}   
+last_played = {}   
 
 HELP_TXT = (
     "<b>🔍 𝙒𝙤𝙧𝙙𝙎𝙚𝙚𝙠</b>\n\n"
@@ -82,11 +82,9 @@ def is_valid_guess(word, length):
     matches = difflib.get_close_matches(word, dictionary, n=1, cutoff=0.7)
     return bool(matches)
 
-# ✅ Naya: Level ke hisab se word choose karne ka function
 def get_word_for_game(chat_id, length):
-    # Check 1 hour reset
     if time.time() - last_played.get(chat_id, 0) > 3600:
-        chat_levels[chat_id] = 1  # Reset to Easy
+        chat_levels[chat_id] = 1 
     
     level = chat_levels.get(chat_id, 1)
     
@@ -103,11 +101,6 @@ def get_word_for_game(chat_id, length):
         elif level == 2: return random.choice(words.MEDIUM_WORDS_6)
         else: return random.choice(words.WORDS_6)
 
-def get_start_keyboard(length):
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton(f"Start with /new{length}", callback_data=f"start_new_{length}", style="primary")
-    ]])
-
 async def new_game(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if chat_id in active_games:
@@ -117,14 +110,10 @@ async def new_game(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     command = text.split('@')[0].lower()
     
-    if command.endswith('4'):
-        length = 4
-    elif command.endswith('5'):
-        length = 5
-    elif command.endswith('6'):
-        length = 6
-    else:
-        return
+    if command.endswith('4'): length = 4
+    elif command.endswith('5'): length = 5
+    elif command.endswith('6'): length = 6
+    else: return
     
     word = get_word_for_game(chat_id, length)
     active_games[chat_id] = {
@@ -178,7 +167,6 @@ async def guess_word(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         user_scores[user_id] = user_scores.get(user_id, 0) + points
         user_names[user_id] = user_name
         
-        # ✅ Level badhao aur timer reset karo
         chat_levels[chat_id] = min(chat_levels.get(chat_id, 1) + 1, 3)
         last_played[chat_id] = time.time()
         
@@ -186,54 +174,35 @@ async def guess_word(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try: await update.message.set_reaction(random.choice(reactions))
         except Exception: pass
         
+        # ✅ FIX: Quotes hata diye, simple text
+        start_text = f"Start with /new{game['length']}"
+        
         await update.message.reply_text(
             f"🎉 <b>Congrats! You guessed it correctly.</b>\n"
             f"<b>Correct Word:</b> {text}\n"
             f"<b>Added {points} to the leaderboard.</b>\n\n"
-            f"<blockquote>Start with <code>/new{game['length']}</code></blockquote>",
+            f"{start_text}",
             parse_mode='HTML',
-            reply_to_message_id=update.message.message_id,
-            reply_markup=get_start_keyboard(game['length']) # ✅ Button yahan add kiya
+            reply_to_message_id=update.message.message_id
         )
         del active_games[chat_id]
         return
     
     if guess_count >= 30:
         game['status'] = 'ended'
-        last_played[chat_id] = time.time() # Timer reset
+        last_played[chat_id] = time.time()
+        
+        start_text = f"Start with /new{game['length']}"
         
         await update.message.reply_text(
-            f"😔 <b>Game over! No one guessed the word.</b>\n"
-            f"<blockquote>Start with <code>/new{game['length']}</code></blockquote>",
-            parse_mode='HTML',
-            reply_markup=get_start_keyboard(game['length']) # ✅ Button yahan bhi add kiya
+            f"😔 <b>Game over! No one guessed the word.</b>\n\n"
+            f"{start_text}",
+            parse_mode='HTML'
         )
         del active_games[chat_id]
         return
     
     await update.message.reply_text(board_text, parse_mode='HTML')
-
-async def start_new_game_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    qy = update.callback_query
-    await qy.answer()
-    length = int(qy.data.split("_")[-1])
-    
-    chat_id = qy.message.chat.id
-    if chat_id in active_games:
-        await qy.message.reply_text("⚠️ A game is already active in this chat!")
-        return
-    
-    word = get_word_for_game(chat_id, length)
-    active_games[chat_id] = {
-        'word': word, 'length': length, 'guesses': [], 'max_guesses': 30,
-        'status': 'active', 'hints_taken': 0
-    }
-    
-    board_text = f"<blockquote><b>Game started! Guess the {length}-letter word!</b></blockquote>\n\n"
-    board_text += f"<b>{length}-letter mode · 0/30</b>"
-    
-    msg = await qy.message.reply_text(board_text, parse_mode='HTML')
-    active_games[chat_id]['message_id'] = msg.message_id
 
 async def hint_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -278,15 +247,17 @@ async def end_game(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     length = game['length']
     del active_games[chat_id]
     last_played[chat_id] = time.time()
+    
+    start_text = f"Start with /new{length}"
+    
     await update.message.reply_text(
-        f"🛑 <b>Game ended by command. The word was hidden.</b>\n"
-        f"<blockquote>Start with <code>/new{length}</code></blockquote>",
-        parse_mode='HTML', reply_markup=get_start_keyboard(length))
+        f"🛑 <b>Game ended by command. The word was hidden.</b>\n\n"
+        f"{start_text}",
+        parse_mode='HTML')
 
 def register(app):
     app.add_handler(CommandHandler(["new4", "new5", "new6"], new_game))
     app.add_handler(MessageHandler(filters.Regex(r'^[./]new[456]$'), new_game))
-    app.add_handler(CallbackQueryHandler(start_new_game_cb, pattern=r"^start_new_[456]$")) # ✅ Button handler
     
     app.add_handler(CommandHandler("hint", hint_cmd))
     app.add_handler(MessageHandler(filters.Regex(r'^[./]hint$'), hint_cmd))
