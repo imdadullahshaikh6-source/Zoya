@@ -51,19 +51,26 @@ async def init(uri: str, name: str):
 
     await _db.locks.create_index("chat_id", unique=True)
 
-    # ✅ NEW: logchannels index
+    # ✅ logchannels index
     try:
         await _db.logchannels.create_index("chat_id", unique=True)
         log.info("[db] logchannels index ready ✅")
     except Exception as e:
         log.warning("[db] logchannels index creation failed: %s", e)
 
-    # ✅ NEW: WordSeek Leaderboard index
+    # ✅ WordSeek Leaderboard index
     try:
         await _db.wordseek_scores.create_index([("chat_id", 1), ("score", -1)])
         log.info("[db] wordseek_scores index ready ✅")
     except Exception as e:
         log.warning("[db] wordseek_scores index creation failed: %s", e)
+
+    # ✅ NEW: WordSeek History index (word repeat rokne ke liye)
+    try:
+        await _db.wordseek_history.create_index("chat_id", unique=True)
+        log.info("[db] wordseek_history index ready ✅")
+    except Exception as e:
+        log.warning("[db] wordseek_history index creation failed: %s", e)
 
     log.info("MongoDB connected (db: %s)", name)
 
@@ -234,12 +241,10 @@ async def guardian_get(chat_id: int) -> dict | None:
         except (TypeError, ValueError): return None
     doc = await _db.guardian.find_one({"chat_id": chat_id})
     if not doc: return None
-    # 🔥 FIX: har delay field ko int me convert karo, missing ko 0 karo
     for k in ("delay_seconds", "edit_delay_seconds", "media_delay_seconds"):
         if k in doc and doc[k] is not None:
             try: doc[k] = int(doc[k])
             except (TypeError, ValueError): doc[k] = 0
-    # enabled ko bool me convert karo
     raw = doc.get("enabled")
     if isinstance(raw, str):
         doc["enabled"] = raw.strip().lower() in ("1", "true", "t", "on", "yes", "y")
@@ -247,7 +252,6 @@ async def guardian_get(chat_id: int) -> dict | None:
         doc["enabled"] = False
     else:
         doc["enabled"] = bool(raw)
-    # 🔥 FIX: permitted_users hamesha list honi chahiye
     if not isinstance(doc.get("permitted_users"), list):
         doc["permitted_users"] = []
     return doc
@@ -255,15 +259,6 @@ async def guardian_get(chat_id: int) -> dict | None:
 
 async def guardian_set(chat_id: int, delay_seconds: int | None = None, enabled: bool | None = None,
                        edit_delay_seconds: int | None = None, media_delay_seconds: int | None = None):
-    """
-    Partial update — sirf wahi fields update hoti hain jo pass ki jayen.
-    Baaki fields DB me jaise hain waise rehte hain. ✅
-
-    Example:
-        guardian_set(123, edit_delay_seconds=60)    # sirf edit, media untouched
-        guardian_set(123, media_delay_seconds=180)  # sirf media, edit untouched
-        guardian_set(123, enabled=False)            # sirf enabled
-    """
     if not isinstance(chat_id, int):
         try: chat_id = int(chat_id)
         except (TypeError, ValueError): return
@@ -325,10 +320,9 @@ async def approved_list(chat_id: int) -> dict:
     return {u["id"]: u.get("name", "User") for u in doc.get("approved", [])}
 
 
-# ─────────────── logchannel (NEW) ───────────────
+# ─────────────── logchannel ───────────────
 
 async def logchannel_set(chat_id: int, channel_id: int, channel_name: str, set_by: int):
-    """Save log-channel mapping for a group."""
     if not isinstance(chat_id, int):
         try: chat_id = int(chat_id)
         except (TypeError, ValueError): return
@@ -350,7 +344,6 @@ async def logchannel_set(chat_id: int, channel_id: int, channel_name: str, set_b
 
 
 async def logchannel_get(chat_id: int) -> dict | None:
-    """Get log-channel config for a group."""
     if not isinstance(chat_id, int):
         try: chat_id = int(chat_id)
         except (TypeError, ValueError): return None
@@ -358,7 +351,6 @@ async def logchannel_get(chat_id: int) -> dict | None:
 
 
 async def logchannel_unset(chat_id: int) -> bool:
-    """Remove log-channel mapping for a group."""
     if not isinstance(chat_id, int):
         try: chat_id = int(chat_id)
         except (TypeError, ValueError): return False
@@ -367,7 +359,6 @@ async def logchannel_unset(chat_id: int) -> bool:
 
 
 async def logchannel_unset_by_channel(channel_id: int) -> int:
-    """Remove all mappings pointing to a channel. Returns count."""
     if not isinstance(channel_id, int):
         try: channel_id = int(channel_id)
         except (TypeError, ValueError): return 0
@@ -376,7 +367,6 @@ async def logchannel_unset_by_channel(channel_id: int) -> int:
 
 
 async def logchannel_groups_for_channel(channel_id: int) -> list:
-    """Get all groups linked to a channel."""
     if not isinstance(channel_id, int):
         try: channel_id = int(channel_id)
         except (TypeError, ValueError): return []
@@ -384,7 +374,7 @@ async def logchannel_groups_for_channel(channel_id: int) -> list:
     return [doc async for doc in cursor]
 
 
-# ─────────────── WordSeek Leaderboard (NEW) ───────────────
+# ─────────────── WordSeek Leaderboard ───────────────
 
 async def wordseek_add_score(chat_id: int, user_id: int, name: str, points: int):
     """Add points to a user's score in a specific chat."""
@@ -409,3 +399,44 @@ async def wordseek_get_leaderboard(chat_id: int, limit: int = 10):
     if not isinstance(chat_id, int): return []
     cursor = _db.wordseek_scores.find({"chat_id": chat_id}).sort("score", -1).limit(limit)
     return [doc async for doc in cursor]
+
+
+async def wordseek_get_user_score(chat_id: int, user_id: int) -> int:
+    """Get a specific user's score in a chat."""
+    if not isinstance(chat_id, int) or not isinstance(user_id, int): return 0
+    _id = f"ws:{chat_id}:{user_id}"
+    doc = await _db.wordseek_scores.find_one({"_id": _id})
+    return doc.get("score", 0) if doc else 0
+
+
+# ─────────────── WordSeek Word History (NEW) ───────────────
+
+async def wordseek_add_history(chat_id: int, word: str):
+    """Add a used word to the chat's history (to avoid repeats)."""
+    if not isinstance(chat_id, int): return
+    await _db.wordseek_history.update_one(
+        {"chat_id": chat_id},
+        {
+            "$addToSet": {"words": word.lower()},
+            "$set": {"updated": time.time()}
+        },
+        upsert=True
+    )
+
+async def wordseek_get_history(chat_id: int) -> list:
+    """Get all used words for a chat."""
+    if not isinstance(chat_id, int): return []
+    doc = await _db.wordseek_history.find_one({"chat_id": chat_id})
+    return doc.get("words", []) if doc else []
+
+async def wordseek_reset_history(chat_id: int, keep_recent: list = None):
+    """Reset history but optionally keep recent words."""
+    if not isinstance(chat_id, int): return
+    if keep_recent:
+        await _db.wordseek_history.update_one(
+            {"chat_id": chat_id},
+            {"$set": {"words": keep_recent, "updated": time.time()}},
+            upsert=True
+        )
+    else:
+        await _db.wordseek_history.delete_one({"chat_id": chat_id})
