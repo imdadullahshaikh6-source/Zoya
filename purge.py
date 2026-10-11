@@ -1,4 +1,4 @@
-"""Purge module: .purge, .spurge, .del  (Rose-style: newest -> oldest bulk delete + verify pass)."""
+"""Purge module: .purge, .spurge, .del (Rose-style bulk delete logic)."""
 import asyncio
 import logging
 from collections import Counter
@@ -18,10 +18,15 @@ COMMANDS = [
 
 CHUNK = 100            # Telegram deleteMessages limit per call
 MAX_RANGE = 5000       # safety cap on one purge
-VERIFY_LIMIT = 1500    # single-delete verify pass only up to this many ids
-VERIFY_CONCURRENCY = 15
 
 _active_purges: set = set()   # chat_ids currently purging
+
+
+# ✅ NAYA: Original bot wala divide_chunks function
+def divide_chunks(l: list, n: int = 100):
+    """Split a list into chunks of maximum size n."""
+    for i in range(0, len(l), n):
+        yield l[i:i + n]
 
 
 async def auto_delete_msg(ctx, message, delay=10):
@@ -74,87 +79,46 @@ async def check_purge_permissions(update: Update, ctx) -> bool:
     return True
 
 
-async def _delete_one(ctx, chat_id: int, mid: int, stats: Counter, reasons: Counter):
-    """Single delete that REPORTS why it failed (instead of silently ignoring)."""
-    for _ in range(4):
-        try:
-            await ctx.bot.delete_message(chat_id, mid)
-            stats["deleted_in_verify"] += 1
-            return
-        except RetryAfter as e:
-            await asyncio.sleep(e.retry_after + 1)
-        except BadRequest as e:
-            txt = str(e).lower()
-            if "not found" in txt:          # already gone / never existed -> fine
-                stats["gone"] += 1
-            else:                           # e.g. "message can't be deleted"
-                stats["failed"] += 1
-                reasons[str(e)] += 1
-            return
-        except Forbidden as e:
-            stats["failed"] += 1
-            reasons[f"Forbidden: {e}"] += 1
-            return
-        except TelegramError:
-            await asyncio.sleep(0.5)
-    stats["failed"] += 1
-    reasons["retries exhausted"] += 1
-
-
-async def _delete_chunk(ctx, chat_id: int, ids: list):
-    """Bulk delete up to 100 ids. Missing/old ids are skipped by Telegram."""
-    for _ in range(5):
-        try:
-            await ctx.bot.delete_messages(chat_id, ids)
-            return
-        except RetryAfter as e:
-            log.warning(f"FloodWait {e.retry_after}s on bulk delete")
-            await asyncio.sleep(e.retry_after + 1)
-        except AttributeError:
-            break   # PTB < 21: no delete_messages
-        except Forbidden as e:
-            log.warning(f"Bulk delete Forbidden: {e}")
-            return
-        except BadRequest as e:
-            log.warning(f"Bulk delete BadRequest: {e} -> single fallback")
-            break
-        except TelegramError as e:
-            log.warning(f"Bulk delete error: {e}")
-            await asyncio.sleep(0.5)
-    stats, reasons = Counter(), Counter()
-    for mid in ids:
-        await _delete_one(ctx, chat_id, mid, stats, reasons)
-        await asyncio.sleep(0.03)
-
-
-async def _perfect_purge(ctx, chat_id: int, start_id: int, end_id: int) -> Counter:
-    """Delete [start_id, end_id] newest -> oldest (like Rose), then verify leftovers."""
-    if end_id - start_id + 1 > MAX_RANGE:
-        start_id = end_id - MAX_RANGE + 1
-    ids = list(range(end_id, start_id - 1, -1))      # newest first
-
-    # pass 1 + 2: bulk
-    for _ in range(2):
-        for i in range(0, len(ids), CHUNK):
-            await _delete_chunk(ctx, chat_id, ids[i:i + CHUNK])
-            await asyncio.sleep(0.05)
-        await asyncio.sleep(0.3)
-
-    # verify pass: anything still deletable gets deleted; real failures are logged with Telegram's reason
-    stats, reasons = Counter(), Counter()
-    if len(ids) <= VERIFY_LIMIT:
-        sem = asyncio.Semaphore(VERIFY_CONCURRENCY)
-
-        async def run(mid):
-            async with sem:
-                await _delete_one(ctx, chat_id, mid, stats, reasons)
-
-        await asyncio.gather(*(run(m) for m in ids))
-        if stats["failed"]:
-            log.warning(f"purge chat={chat_id}: {stats['failed']} undeletable. reasons={dict(reasons)}")
-        if stats["deleted_in_verify"]:
-            log.info(f"purge chat={chat_id}: verify pass caught {stats['deleted_in_verify']} missed msgs")
-    return stats
+async def _bulk_delete(ctx, chat_id: int, ids: list):
+    """Bulk delete messages in chunks of 100 (Original bot logic)."""
+    if not ids:
+        return
+    
+    # ✅ Original bot wala logic: divide into chunks
+    chunks = list(divide_chunks(ids, CHUNK))
+    
+    for chunk in chunks:
+        for _ in range(5): # Retry loop
+            try:
+                await ctx.bot.delete_messages(chat_id, chunk)
+                break # Success, break retry loop
+            except RetryAfter as e:
+                log.warning(f"FloodWait {e.retry_after}s on bulk delete")
+                await asyncio.sleep(e.retry_after + 1)
+            except AttributeError:
+                # PTB < 21 fallback: delete one by one
+                for mid in chunk:
+                    try:
+                        await ctx.bot.delete_message(chat_id, mid)
+                    except Exception:
+                        pass
+                break
+            except Forbidden as e:
+                log.warning(f"Bulk delete Forbidden: {e}")
+                return
+            except BadRequest as e:
+                log.warning(f"Bulk delete BadRequest: {e} -> trying single fallback")
+                # Fallback to single delete if bulk fails
+                for mid in chunk:
+                    try:
+                        await ctx.bot.delete_message(chat_id, mid)
+                    except Exception:
+                        pass
+                break
+            except TelegramError as e:
+                log.warning(f"Bulk delete error: {e}")
+                await asyncio.sleep(0.5)
+        await asyncio.sleep(0.05) # Small delay between chunks
 
 
 async def _run_purge(update: Update, ctx: ContextTypes.DEFAULT_TYPE, silent: bool):
@@ -176,18 +140,26 @@ async def _run_purge(update: Update, ctx: ContextTypes.DEFAULT_TYPE, silent: boo
     if chat.id in _active_purges:
         return
     _active_purges.add(chat.id)
-    stats = Counter()
+    
     try:
         start_id = msg.reply_to_message.message_id
         end_id = msg.message_id
-        stats = await _perfect_purge(ctx, chat.id, start_id, end_id)
+        
+        # Safety cap
+        if end_id - start_id + 1 > MAX_RANGE:
+            start_id = end_id - MAX_RANGE + 1
+            
+        # Message IDs ki list banao (reply wale se command wale tak)
+        message_ids = list(range(start_id, end_id + 1))
+        
+        # ✅ Original bot logic: Bulk delete in chunks
+        await _bulk_delete(ctx, chat.id, message_ids)
+        
     finally:
         _active_purges.discard(chat.id)
 
     if not silent:
         text = "Purge Completed."
-        if stats.get("failed"):
-            text += f"\n{stats['failed']} message(s) could not be deleted by Telegram."
         note = await ctx.bot.send_message(chat.id, f"<blockquote>{text}</blockquote>", parse_mode="HTML")
         asyncio.create_task(auto_delete_msg(ctx, note, 5))
 
@@ -216,7 +188,8 @@ async def del_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await check_purge_permissions(update, ctx):
         return
 
-    await _delete_chunk(ctx, chat.id, [msg.message_id, msg.reply_to_message.message_id])
+    # Delete command message and replied message
+    await _bulk_delete(ctx, chat.id, [msg.message_id, msg.reply_to_message.message_id])
 
 
 def register(app: Application):
@@ -226,4 +199,3 @@ def register(app: Application):
         filters.Regex(r"^[./]spurge(?:@\w+)?$") & filters.ChatType.GROUPS, spurge_cmd, block=False))
     app.add_handler(MessageHandler(
         filters.Regex(r"^[./](?:del|dly)(?:@\w+)?$") & filters.ChatType.GROUPS, del_cmd, block=False))
-    
