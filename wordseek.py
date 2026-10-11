@@ -86,12 +86,9 @@ async def new_game(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         'status': 'active'
     }
     
-    # ✅ FIX: Removed "Game started!" line and formatted board perfectly
-    squares = ' '.join(['🟥'] * length)
-    question_marks = ' '.join(['?'] * length)
-    
-    board_text = f"<b>{length}-letter mode · 0/30</b>\n\n"
-    board_text += f"{squares}  <code><b>{question_marks}</b></code>"
+    # ✅ FIX: Removed initial red squares and question marks, brought back "Game started!" line
+    board_text = f"<b>Game started! Guess the {length}-letter word!</b>\n\n"
+    board_text += f"<b>{length}-letter mode · 0/30</b>"
     
     msg = await update.message.reply_text(board_text, parse_mode='HTML')
     active_games[chat_id]['message_id'] = msg.message_id
