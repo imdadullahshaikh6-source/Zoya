@@ -2,6 +2,7 @@
 import random
 import difflib
 import time
+import html
 from telegram import Update
 from telegram.ext import ContextTypes, CommandHandler, MessageHandler, filters
 import words
@@ -158,7 +159,6 @@ async def new_game(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     board_text = f"<blockquote><b>Game started! Guess the {length}-letter word!</b></blockquote>\n\n"
     board_text += f"<b>{length}-letter mode · 0/30</b>"
     
-    # ✅ Normal message send (no reply/tag)
     await ctx.bot.send_message(chat_id, board_text, parse_mode='HTML')
 
 async def guess_word(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -209,7 +209,6 @@ async def guess_word(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         
         start_text = f"Start with /new{game['length']}"
         
-        # ✅ Normal message send (no reply/tag)
         await ctx.bot.send_message(
             chat_id,
             f"🎉 <b>Congrats! You guessed it correctly.</b>\n"
@@ -236,7 +235,6 @@ async def guess_word(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         del active_games[chat_id]
         return
     
-    # ✅ Normal message send (no reply/tag)
     await ctx.bot.send_message(chat_id, board_text, parse_mode='HTML')
 
 async def hint_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -273,9 +271,10 @@ async def leaderboard_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(chat_id, "🏆 Is group me abhi tak koi score nahi hai! /new5 se game start karo."); return
     
     text = "<b>🏆 𝙒𝙤𝙧𝙙𝙎𝙚𝙚𝙠 𝙇𝙚𝙖𝙙𝙚𝙧𝙗𝙤𝙖𝙧𝙙</b>\n"
-    text += f"<i>(Group rankings)</i>\n\n"
+    text += "<i>(Group rankings)</i>\n\n"
     for i, doc in enumerate(scores, 1):
-        name = doc.get("name", "Unknown")
+        # ✅ html.escape() taaki special characters error na de
+        name = html.escape(str(doc.get("name", "Unknown")))
         score = doc.get("score", 0)
         medal = "🥇" if i == 1 else ("🥈" if i == 2 else ("🥉" if i == 3 else f"{i}."))
         text += f"{medal} <b>{name}</b> — {score} pts\n"
@@ -285,7 +284,8 @@ async def leaderboard_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def myscore_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
-    user_name = update.effective_user.first_name
+    # ✅ html.escape() taaki special characters error na de
+    user_name = html.escape(update.effective_user.first_name)
     
     score = await dbase.wordseek_get_user_score(chat_id, user_id)
     
