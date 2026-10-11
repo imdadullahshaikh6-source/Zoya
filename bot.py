@@ -25,7 +25,7 @@ import filters as bot_filters
 import fun
 import guardian
 import lock
-import logchannel        # ✅ NEW
+import logchannel
 import logs
 import pin
 import ping
@@ -33,6 +33,7 @@ import purge
 import sticker
 import welcome
 import mantion
+import wordseek  # ✅ NEW
 from common import B, T, log, mention, say, sc
 
 # ✅ LOGGING FIX
@@ -121,6 +122,7 @@ PAGES = {
     "logchannel": ("📋 𝙇𝙤𝙜 𝘾𝙝𝙖𝙣𝙣𝙚𝙡", logchannel.HELP_TXT),
     "locks": ("🔒 𝙇𝙤𝙘𝙠𝙨", LOCKS_TXT),
     "purge": ("🧹 𝙋𝙪𝙧𝙜𝙚", PURGE_TXT),
+    "wordseek": ("🔍 𝙒𝙤𝙧𝙙𝙎𝙚𝙚𝙠", wordseek.HELP_TXT), # ✅ NEW
 }
 
 ALIASES = {
@@ -138,6 +140,7 @@ ALIASES = {
     "logchannel": "logchannel", "setlog": "logchannel", "unsetlog": "logchannel",
     "locks": "locks", "locktypes": "locks",
     "purge": "purge", "spurge": "purge", "del": "purge",
+    "wordseek": "wordseek", # ✅ NEW
 }
 
 
@@ -179,6 +182,10 @@ def main_page():
         for key, style in row:
             btn_row.append(B(PAGES[key][0], f"help:{key}", style=style))
         rows.append(btn_row)
+    
+    # ✅ WordSeek button added here (no color, same as Back button)
+    rows.append([B("𝙒𝙤𝙧𝙙𝙎𝙚𝙚𝙠", "help:wordseek")])
+    
     rows.append([B("⬅ 𝘽𝙖𝙘𝙠", "help:home"), B("✖ 𝘾𝙡𝙤𝙨𝙚", "help:close", style="danger")])
     return text, InlineKeyboardMarkup(rows)
 
@@ -330,7 +337,7 @@ async def post_init(app: Application):
     app.bot_data["me"] = await app.bot.get_me()
     cmds = [("start", "Start the bot"), ("help", "Show commands")]
     for mod in (welcome, admin, afk, ban, sticker, fun, bot_filters, ping,
-                guardian, cleancommand, logchannel, pin, lock, purge):
+                guardian, cleancommand, logchannel, pin, lock, purge, wordseek): # ✅ wordseek added
         cmds += mod.COMMANDS
     await app.bot.set_my_commands(cmds)
     log.info("Started as @%s", app.bot_data["me"].username)
@@ -372,12 +379,13 @@ def main():
     ping.register(app)
     guardian.register(app)
     cleancommand.register(app)
-    logchannel.register(app)     # ✅ NEW
+    logchannel.register(app)
     pin.register(app)
     mantion.register(app)
     lock.register(app)
     logs.register(app)
     purge.register(app)
+    wordseek.register(app)  # ✅ NEW
 
     app.add_error_handler(on_error)
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
