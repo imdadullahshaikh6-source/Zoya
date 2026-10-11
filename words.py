@@ -1,45 +1,52 @@
 # words.py
+import json
 import os
 
-def load_words_from_file(filename="words.txt"):
+def load_words_from_json(filename="words.json"):
     base_dir = os.path.dirname(os.path.abspath(__file__))
     filepath = os.path.join(base_dir, filename)
     
     if not os.path.exists(filepath):
-        print(f"⚠️ WARNING: {filepath} NOT FOUND! Using fallback words.")
-        return []
+        print(f"⚠️ WARNING: {filepath} NOT FOUND!")
+        return {}
     
     with open(filepath, "r", encoding="utf-8") as f:
-        all_words = [line.strip().lower() for line in f.readlines() if line.strip().isalpha()]
+        data = json.load(f)
     
-    print(f"✅ SUCCESS: Loaded {len(all_words)} words from {filename}")
-    return all_words
+    cleaned = {}
+    for level, words_list in data.items():
+        clean = []
+        for w in words_list:
+            for p in w.lower().split("/"):
+                p = p.strip()
+                if p.isalpha():
+                    clean.append(p)
+        cleaned[level] = list(set(clean))
+    return cleaned
 
-_all_words = load_words_from_file()
+_data = load_words_from_json()
 
-# Strictly filter by length
-WORDS_4 = [w for w in _all_words if len(w) == 4]
-WORDS_5 = [w for w in _all_words if len(w) == 5]
-WORDS_6 = [w for w in _all_words if len(w) == 6]
+def filt(word_list, length):
+    return [w for w in word_list if len(w) == length]
 
-# ✅ Naya Filter: Sirf common words rakho (jo shuru ke 50,000 me aate hain)
-# 3.7L wali list alphabetical hai, toh shuru ke words zyada common hote hain
-if len(WORDS_4) > 5000: WORDS_4 = WORDS_4[:10000]  # Top 10,000 4-letter words
-if len(WORDS_5) > 5000: WORDS_5 = WORDS_5[:10000]  # Top 10,000 5-letter words
-if len(WORDS_6) > 5000: WORDS_6 = WORDS_6[:10000]  # Top 10,000 6-letter words
+# EASY (A1 + A2)
+EASY_WORDS_4 = filt(_data.get("A1", []) + _data.get("A2", []), 4)
+EASY_WORDS_5 = filt(_data.get("A1", []) + _data.get("A2", []), 5)
+EASY_WORDS_6 = filt(_data.get("A1", []) + _data.get("A2", []), 6)
 
-# Fallback in case words.txt is missing (so the bot doesn't crash)
-if not WORDS_4:
-    print("⚠️ Using hardcoded fallback words.")
-    WORDS_4 = ["able", "acid", "aged", "also", "area", "army", "away", "baby", "back", "ball"]
-    WORDS_5 = ["about", "above", "abuse", "actor", "acute", "admit", "adopt", "adult", "after", "again"]
-    WORDS_6 = ["aboard", "accept", "access", "across", "acting", "action", "active", "actual", "advice", "advise"]
+# MEDIUM (B1 + B2)
+MEDIUM_WORDS_4 = filt(_data.get("B1", []) + _data.get("B2", []), 4)
+MEDIUM_WORDS_5 = filt(_data.get("B1", []) + _data.get("B2", []), 5)
+MEDIUM_WORDS_6 = filt(_data.get("B1", []) + _data.get("B2", []), 6)
 
-# Level system ke liye
-EASY_WORDS_4 = WORDS_4[:500] if len(WORDS_4) > 500 else WORDS_4
-EASY_WORDS_5 = WORDS_5[:500] if len(WORDS_5) > 500 else WORDS_5
-EASY_WORDS_6 = WORDS_6[:500] if len(WORDS_6) > 500 else WORDS_6
+# HARD (C1 + C2)
+HARD_WORDS_4 = filt(_data.get("C1", []) + _data.get("C2", []), 4)
+HARD_WORDS_5 = filt(_data.get("C1", []) + _data.get("C2", []), 5)
+HARD_WORDS_6 = filt(_data.get("C1", []) + _data.get("C2", []), 6)
 
-MEDIUM_WORDS_4 = WORDS_4[:3000] if len(WORDS_4) > 3000 else WORDS_4
-MEDIUM_WORDS_5 = WORDS_5[:3000] if len(WORDS_5) > 3000 else WORDS_5
-MEDIUM_WORDS_6 = WORDS_6[:3000] if len(WORDS_6) > 3000 else WORDS_6
+# Combined (fallback)
+WORDS_4 = EASY_WORDS_4 + MEDIUM_WORDS_4 + HARD_WORDS_4
+WORDS_5 = EASY_WORDS_5 + MEDIUM_WORDS_5 + HARD_WORDS_5
+WORDS_6 = EASY_WORDS_6 + MEDIUM_WORDS_6 + HARD_WORDS_6
+
+print(f"✅ words.json loaded → 4L: {len(WORDS_4)}, 5L: {len(WORDS_5)}, 6L: {len(WORDS_6)}")
