@@ -63,7 +63,6 @@ async def new_game(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     
     text = update.message.text
-    # Extract length from command (e.g., /new4 or .new4)
     command = text.split('@')[0].lower()
     
     if command.endswith('4'):
@@ -87,13 +86,12 @@ async def new_game(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         'status': 'active'
     }
     
-    # ✅ FIX 1: Initial board with spaces between squares
+    # ✅ FIX: Removed "Game started!" line and formatted board perfectly
     squares = ' '.join(['🟥'] * length)
     question_marks = ' '.join(['?'] * length)
     
-    board_text = f"<b>Game started! Guess the {length}-letter word!</b>\n\n"
-    board_text += f"<b>{length}-letter mode · 0/30</b>\n"
-    board_text += f"{squares}  {question_marks}"
+    board_text = f"<b>{length}-letter mode · 0/30</b>\n\n"
+    board_text += f"{squares}  <code><b>{question_marks}</b></code>"
     
     msg = await update.message.reply_text(board_text, parse_mode='HTML')
     active_games[chat_id]['message_id'] = msg.message_id
@@ -107,16 +105,23 @@ async def guess_word(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if game['status'] != 'active':
         return
     
-    # Ignore if message is from a bot
     if update.effective_user.is_bot:
         return
         
     text = update.message.text.strip().lower()
     
-    # ✅ THINKING PART 1: Check length
+    # Check length
     if len(text) != game['length']:
         return 
     
+    # ✅ THINKING PART 1: Check if word is already guessed
+    if text in game['guesses']:
+        await update.message.reply_text(
+            f"⚠️ <b>Someone has already guessed this word. Please try another one!</b>", 
+            parse_mode='HTML'
+        )
+        return
+
     # ✅ THINKING PART 2: Check if it's a valid word from our dictionary
     if text not in words.WORDS_4 and text not in words.WORDS_5 and text not in words.WORDS_6:
         await update.message.reply_text(
@@ -125,7 +130,7 @@ async def guess_word(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return 
     
-    # If it passes the checks, register the guess
+    # If it passes all checks, register the guess
     game['guesses'].append(text)
     guess_count = len(game['guesses'])
     
@@ -133,9 +138,9 @@ async def guess_word(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     board_lines = []
     for g in game['guesses']:
         result = get_guess_result(g, game['word'])
-        # ✅ FIX 1 & 2: Add spaces between emojis and bold the word
+        # ✅ FIX: Add spaces between emojis and use <code><b> for perfect bold font
         spaced_result = ' '.join(result)
-        board_lines.append(f"{spaced_result}  <b>{g.upper()}</b>")
+        board_lines.append(f"{spaced_result}  <code><b>{g.upper()}</b></code>")
     
     board_text = f"<b>{game['length']}-letter mode · {guess_count}/30</b>\n\n"
     board_text += "\n".join(board_lines)
@@ -185,13 +190,10 @@ async def end_game(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 def register(app):
-    # Start commands
     app.add_handler(CommandHandler(["new4", "new5", "new6"], new_game))
     app.add_handler(MessageHandler(filters.Regex(r'^[./]new[456]$'), new_game))
-    # End commands
     app.add_handler(CommandHandler("end", end_game))
     app.add_handler(MessageHandler(filters.Regex(r'^[./]end$'), end_game))
-    # Guess handler (only for groups, text, not commands, not starting with . or /)
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^[./]') & filters.ChatType.GROUPS, 
         guess_word
