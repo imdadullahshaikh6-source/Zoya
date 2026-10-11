@@ -114,7 +114,8 @@ PAGES = {
     "admin": ("👮 𝘼𝙙𝙢𝙞𝙣", admin.HELP_TXT),
     "afk": ("💤 𝘼𝙁𝙆", afk.HELP_TXT),
     "mod": ("🛡 𝙈𝙤𝙙𝙚𝙧𝙖𝙩𝙞𝙤𝙣", ban.HELP_TXT),
-    "extra": ("🎁 𝙀𝙭𝙩𝙧𝙖", sticker.HELP_TXT + "\n\n" + fun.HELP_TXT),
+    "quotly": ("📝 𝙌𝙪𝙤𝙩𝙡𝙮", sticker.HELP_TXT), # ✅ Sticker -> Quotly
+    "fun": ("🎁 𝙁𝙪𝙣", fun.HELP_TXT),             # ✅ Fun alag
     "filters": ("🔍 𝙁𝙞𝙡𝙩𝙚𝙧𝙨", bot_filters.HELP_TXT),
     "guardian": ("🛡 𝙂𝙪𝙖𝙧𝙙𝙞𝙖𝙣", GUARDIAN_TXT),
     "pin": ("📌 𝙋𝙞𝙣", pin.HELP_TXT),
@@ -122,7 +123,7 @@ PAGES = {
     "logchannel": ("📋 𝙇𝙤𝙜 𝘾𝙝𝙖𝙣𝙣𝙚𝙡", logchannel.HELP_TXT),
     "locks": ("🔒 𝙇𝙤𝙘𝙠𝙨", LOCKS_TXT),
     "purge": ("🧹 𝙋𝙪𝙧𝙜𝙚", PURGE_TXT),
-    "wordseek": ("🔍 𝙒𝙤𝙧𝙙𝙎𝙚𝙚𝙠", wordseek.HELP_TXT), # ✅ NEW
+    "wordseek": ("🔍 𝙒𝙤𝙧𝙙𝙎𝙚𝙚𝙠", wordseek.HELP_TXT),
 }
 
 ALIASES = {
@@ -130,8 +131,8 @@ ALIASES = {
     "admin": "admin", "promote": "admin",
     "afk": "afk",
     "mod": "mod", "moderation": "mod", "ban": "mod", "mute": "mod", "warn": "mod", "kick": "mod",
-    "extra": "extra", "sticker": "extra", "stickers": "extra", "q": "extra",
-    "kang": "extra", "waifu": "extra", "couple": "extra", "fun": "extra",
+    "quotly": "quotly", "sticker": "quotly", "q": "quotly", "kang": "quotly",
+    "fun": "fun", "waifu": "fun", "couple": "fun",
     "filter": "filters", "filters": "filters", "f": "filters",
     "guardian": "guardian", "defender": "guardian", "setdelay": "guardian", "permit": "guardian",
     "editdelay": "guardian", "mediadelay": "guardian",
@@ -140,7 +141,7 @@ ALIASES = {
     "logchannel": "logchannel", "setlog": "logchannel", "unsetlog": "logchannel",
     "locks": "locks", "locktypes": "locks",
     "purge": "purge", "spurge": "purge", "del": "purge",
-    "wordseek": "wordseek", # ✅ NEW
+    "wordseek": "wordseek",
 }
 
 
@@ -166,27 +167,29 @@ def home_page(user, ctx):
     return text, InlineKeyboardMarkup(rows)
 
 
-def main_page():
+def main_page(page: int = 1):
     text = sc("<b>✦ command</b>\n\nchoose a category to see all details.")
-    layout = [
-        [("greet", "success"), ("admin", "primary")],
-        [("afk", "success"), ("mod", "primary")],
-        [("extra", "success"), ("filters", "primary")],
-        [("guardian", "success"), ("pin", "primary")],
-        [("cleancommand", "success"), ("purge", "primary")],
-        [("logchannel", "success"), ("locks", "primary")],
-    ]
     rows = []
-    for row in layout:
-        btn_row = []
-        for key, style in row:
-            btn_row.append(B(PAGES[key][0], f"help:{key}", style=style))
-        rows.append(btn_row)
     
-    # ✅ WordSeek button added here (no color, same as Back button)
-    rows.append([B("𝙒𝙤𝙧𝙙𝙎𝙚𝙚𝙠", "help:wordseek")])
-    
-    rows.append([B("⬅ 𝘽𝙖𝙘𝙠", "help:home"), B("✖ 𝘾𝙡𝙤𝙨𝙚", "help:close", style="danger")])
+    if page == 1:
+        rows = [
+            [B("🎉 𝙂𝙧𝙚𝙚𝙩𝙞𝙣𝙜𝙨", "help:greet", style="success"), B("👮 𝘼𝙙𝙢𝙞𝙣", "help:admin", style="success")],
+            [B("💤 𝘼𝙁𝙆", "help:afk", style="success"), B("🛡 𝙈𝙤𝙙𝙚𝙧𝙖𝙩𝙞𝙤𝙣", "help:mod", style="success")],
+            [B("🔍 𝙁𝙞𝙡𝙩𝙚𝙧𝙨", "help:filters", style="success"), B("🛡 𝙂𝙪𝙖𝙧𝙙𝙞𝙖𝙣", "help:guardian", style="success")],
+            [B("🧹 𝘾𝙡𝙚𝙖𝙣 𝘾𝙤𝙢𝙢𝙖𝙣𝙙", "help:cleancommand", style="success")],
+            [B("⬅ 𝙋𝙧𝙚𝙫𝙞𝙤𝙪𝙨", "help:page2", style="primary"), B("𝙉𝙚𝙭𝙩 ➡", "help:page2", style="primary")],
+            [B("⬅ 𝘽𝙖𝙘𝙠", "help:home"), B("✖ 𝘾𝙡𝙤𝙨𝙚", "help:close", style="danger")],
+        ]
+    else:
+        rows = [
+            [B("📋 𝙇𝙤𝙜 𝘾𝙝𝙖𝙣𝙣𝙚𝙡", "help:logchannel", style="success"), B("🔒 𝙇𝙤𝙘𝙠𝙨", "help:locks", style="success")],
+            [B("📌 𝙋𝙞𝙣", "help:pin", style="success"), B("🧹 𝙋𝙪𝙧𝙜𝙚", "help:purge", style="success")],
+            [B("📝 𝙌𝙪𝙤𝙩𝙡𝙮", "help:quotly", style="success"), B("🎁 𝙁𝙪𝙣", "help:fun", style="success")],
+            [B("𝙒𝙤𝙧𝙙𝙎𝙚𝙚𝙠", "help:wordseek", style="success")],
+            [B("⬅ 𝙋𝙧𝙚𝙫𝙞𝙤𝙪𝙨", "help:page1", style="primary"), B("𝙉𝙚𝙭𝙩 ➡", "help:page1", style="primary")],
+            [B("⬅ 𝘽𝙖𝙘𝙠", "help:home"), B("✖ 𝘾𝙡𝙤𝙨𝙚", "help:close", style="danger")],
+        ]
+        
     return text, InlineKeyboardMarkup(rows)
 
 
@@ -282,7 +285,7 @@ async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if key:
         text, kb = section_page(key)
     else:
-        text, kb = main_page()
+        text, kb = main_page(1)  # ✅ Default page 1
     await ctx.bot.send_message(chat.id, f"<blockquote>{text}</blockquote>", parse_mode=ParseMode.HTML, reply_markup=kb)
 
 
@@ -299,7 +302,11 @@ async def help_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if page == "home":
         text, kb = home_page(qy.from_user, ctx)
     elif page == "main":
-        text, kb = main_page()
+        text, kb = main_page(1)
+    elif page == "page1":
+        text, kb = main_page(1)
+    elif page == "page2":
+        text, kb = main_page(2)
     elif page == "locktypes":
         text = sc("<b>The available locktypes are:</b>")
         kb = lock.get_locktypes_kb(back=True)
@@ -337,7 +344,7 @@ async def post_init(app: Application):
     app.bot_data["me"] = await app.bot.get_me()
     cmds = [("start", "Start the bot"), ("help", "Show commands")]
     for mod in (welcome, admin, afk, ban, sticker, fun, bot_filters, ping,
-                guardian, cleancommand, logchannel, pin, lock, purge, wordseek): # ✅ wordseek added
+                guardian, cleancommand, logchannel, pin, lock, purge, wordseek):
         cmds += mod.COMMANDS
     await app.bot.set_my_commands(cmds)
     log.info("Started as @%s", app.bot_data["me"].username)
@@ -385,7 +392,7 @@ def main():
     lock.register(app)
     logs.register(app)
     purge.register(app)
-    wordseek.register(app)  # ✅ NEW
+    wordseek.register(app)
 
     app.add_error_handler(on_error)
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
