@@ -1,127 +1,25 @@
 # words.py
+import os
 
-WORDS_4 = [
-    "able", "acid", "aged", "also", "area", "army", "away", "baby", "back", "ball",
-    "band", "bank", "base", "bath", "bear", "beat", "been", "beer", "bell", "belt",
-    "best", "bill", "bird", "blow", "blue", "boat", "body", "bomb", "bond", "bone",
-    "book", "boom", "born", "boss", "both", "bowl", "bulk", "burn", "bush", "busy",
-    "cake", "call", "calm", "came", "camp", "card", "care", "case", "cash", "cast",
-    "cell", "chat", "chip", "city", "club", "coal", "coat", "code", "cold", "come",
-    "cook", "cool", "cope", "copy", "core", "cost", "crew", "crop", "dark", "data",
-    "date", "dawn", "days", "dead", "deal", "dean", "dear", "debt", "deep", "deny",
-    "desk", "dial", "diet", "disc", "disk", "does", "done", "door", "dose", "down",
-    "draw", "drew", "drop", "drug", "dual", "dues", "duke", "dust", "duty", "each",
-    "earn", "ease", "east", "easy", "edge", "else", "even", "ever", "exit", "face",
-    "fact", "fail", "fair", "fall", "farm", "fast", "fate", "fear", "feed", "feel",
-    "feet", "fell", "felt", "file", "fill", "film", "find", "fine", "fire", "firm",
-    "fish", "five", "flat", "flow", "food", "foot", "form", "four", "free", "from",
-    "fuel", "full", "fund", "gain", "game", "gate", "gave", "gear", "gene", "gift",
-    "girl", "give", "glad", "goal", "goes", "gold", "golf", "gone", "good", "gray",
-    "grew", "grow", "gulf", "hair", "half", "hall", "hand", "hang", "hard", "harm",
-    "hate", "have", "head", "hear", "heat", "held", "hell", "help", "here", "hero",
-    "high", "hill", "hire", "hold", "hole", "holy", "home", "hope", "host", "hour",
-    "huge", "hung", "hunt", "hurt", "idea", "inch", "into", "iron", "item", "jack",
-    "jane", "jean", "john", "join", "jump", "jury", "just", "keen", "keep", "kent",
-    "kept", "kick", "kill", "kind", "king", "knee", "knew", "know", "lack", "lady",
-    "laid", "lake", "land", "lane", "last", "late", "lead", "left", "less", "life",
-    "lift", "like", "line", "link", "list", "live", "load", "loan", "lock", "long",
-    "look", "loss", "lost", "love", "luck", "made", "mail", "main", "make", "male",
-    "many", "mark", "mass", "matt", "meat", "meet", "menu", "mere", "mile", "milk",
-    "mill", "mind", "mine", "miss", "mode", "mood", "moon", "more", "most", "move",
-    "much", "must", "name", "navy", "near", "neck", "need", "news", "next", "nice",
-    "nick", "nine", "none", "nose", "note", "okay", "once", "only", "onto", "open",
-    "oral", "over", "pace", "pack", "page", "paid", "pain", "pair", "palm", "park",
-    "part", "past", "path", "peak", "pick", "pink", "pipe", "plan", "play", "plot",
-    "plug", "plus", "poem", "poet", "pole", "poll", "pool", "poor", "port", "post",
-    "pull", "pure", "push", "race", "radio", "rail", "rain", "rank", "rare", "rate",
-    "read", "real", "rear", "rely", "rent", "rest", "rice", "rich", "ride", "ring",
-    "rise", "risk", "road", "rock", "role", "roll", "roof", "room", "root", "rope",
-    "rose", "rule", "rush", "safe", "said", "sail", "sale", "salt", "same", "sand",
-    "save", "seat", "seed", "seek", "seem", "seen", "self", "sell", "send", "sent",
-    "sept", "ship", "shop", "shot", "show", "shut", "sick", "side", "sign", "sing",
-    "site", "size", "skin", "slip", "slow", "snow", "soft", "soil", "sold", "sole",
-    "some", "song", "soon", "sort", "soul", "spot", "star", "stay", "step", "stop",
-    "such", "suit", "sure", "take", "tale", "talk", "tank", "tape", "task", "team",
-    "tear", "tell", "tend", "term", "test", "than", "that", "them", "then", "they",
-    "thin", "this", "thus", "time", "tiny", "told", "toll", "tone", "took", "tool",
-    "tour", "town", "tree", "trip", "true", "trust", "turn", "type", "unit", "upon",
-    "used", "user", "vary", "vast", "very", "vice", "view", "vote", "wait", "wake",
-    "walk", "wall", "want", "ward", "warm", "wash", "wave", "ways", "weak", "wear",
-    "week", "well", "went", "were", "west", "what", "when", "whom", "wide", "wife",
-    "wild", "will", "wind", "wine", "wing", "wire", "wise", "wish", "with", "wood",
-    "word", "wore", "work", "yard", "yeah", "year", "your", "zero", "zone"
-]
+def load_words_from_file(filename):
+    if not os.path.exists(filename):
+        print(f"⚠️ Warning: {filename} not found! Using fallback words.")
+        return []
+    
+    with open(filename, "r", encoding="utf-8") as f:
+        all_words = [line.strip().lower() for line in f.readlines() if line.strip().isalpha()]
+    
+    return all_words
 
-WORDS_5 = [
-    "about", "above", "abuse", "actor", "acute", "admit", "adopt", "adult", "after", "again",
-    "agent", "agree", "ahead", "alarm", "album", "alert", "alike", "alive", "allow", "alone",
-    "along", "alter", "among", "anger", "angle", "angry", "apart", "apple", "apply", "arena",
-    "argue", "arise", "array", "aside", "asset", "audio", "audit", "avoid", "awake", "award",
-    "aware", "badly", "baker", "bases", "basic", "basis", "beach", "began", "begin", "begun",
-    "being", "below", "bench", "birth", "black", "blame", "blind", "block", "blood", "board",
-    "boost", "booth", "bound", "brain", "brand", "bread", "break", "breed", "brief", "bring",
-    "broad", "broke", "brown", "build", "built", "buyer", "cable", "calif", "carry", "catch",
-    "cause", "chain", "chair", "chaos", "charm", "chart", "chase", "cheap", "check", "chest",
-    "chief", "child", "china", "chose", "civil", "claim", "class", "clean", "clear", "click",
-    "clock", "close", "coach", "coast", "could", "count", "court", "cover", "craft", "crash",
-    "cream", "crime", "cross", "crowd", "crown", "curve", "cycle", "daily", "dance", "dated",
-    "dealt", "death", "debut", "delay", "depth", "doing", "doubt", "dozen", "draft", "drama",
-    "drawn", "dream", "dress", "drink", "drive", "drove", "dying", "eager", "early", "earth",
-    "eight", "elite", "empty", "enemy", "enjoy", "enter", "entry", "equal", "error", "event",
-    "every", "exact", "exist", "extra", "faith", "false", "fault", "fiber", "field", "fifth",
-    "fifty", "fight", "final", "first", "fixed", "flash", "fleet", "floor", "flour", "fluid",
-    "focus", "force", "forth", "forty", "forum", "found", "frame", "frank", "fraud", "fresh",
-    "front", "fruit", "fully", "funny", "giant", "given", "glass", "globe", "going", "grace",
-    "grade", "grand", "grant", "grass", "great", "green", "gross", "group", "grown", "guard",
-    "guess", "guest", "guide", "happy", "harry", "heart", "heavy", "hence", "henry", "horse",
-    "hotel", "house", "human", "ideal", "image", "index", "inner", "input", "issue", "japan",
-    "jimmy", "joint", "jones", "judge", "known", "label", "large", "laser", "later", "laugh",
-    "layer", "learn", "lease", "least", "leave", "legal", "level", "lewis", "light", "limit",
-    "links", "lives", "local", "logic", "loose", "lower", "lucky", "lunch", "lying", "magic",
-    "major", "maker", "march", "maria", "match", "maybe", "mayor", "meant", "media", "metal",
-    "might", "minor", "minus", "mixed", "model", "money", "month", "moral", "motor", "mount",
-    "mouse", "mouth", "movie", "music", "needs", "never", "newly", "night", "noise", "north",
-    "noted", "novel", "nurse", "occur", "ocean", "offer", "often", "order", "other", "ought",
-    "paint", "panel", "paper", "party", "peace", "peter", "phase", "phone", "photo", "piece",
-    "pilot", "pitch", "place", "plain", "plane", "plant", "plate", "point", "pound", "power",
-    "press", "price", "pride", "prime", "print", "prior", "prize", "proof", "proud", "prove",
-    "queen", "quick", "quiet", "quite", "radio", "raise", "range", "rapid", "ratio", "reach",
-    "ready", "refer", "right", "rural", "scale", "scene", "scope", "score", "sense", "serve",
-    "seven", "shall", "shape", "share", "sharp", "sheet", "shelf", "shell", "shift", "shine",
-    "shirt", "shock", "shoot", "short", "shown", "sight", "since", "sixth", "sixty", "sized",
-    "skill", "sleep", "slide", "small", "smart", "smile", "smith", "smoke", "solid", "solve",
-    "sorry", "sound", "south", "space", "spare", "speak", "speed", "spend", "spent", "split",
-    "spoke", "sport", "staff", "stage", "stake", "stand", "start", "state", "steam", "steel",
-    "stick", "still", "stock", "stone", "stood", "store", "storm", "story", "strip", "stuck",
-    "study", "stuff", "style", "sugar", "suite", "super", "sweet", "table", "taken", "taste",
-    "taxes", "teach", "teeth", "terry", "texas", "thank", "theft", "their", "theme", "there",
-    "these", "thick", "thing", "think", "third", "those", "three", "threw", "throw", "tight",
-    "times", "tired", "title", "today", "topic", "total", "touch", "tough", "tower", "track",
-    "trade", "train", "treat", "trend", "trial", "tried", "tries", "truck", "truly", "trust",
-    "truth", "twice", "under", "undue", "union", "unity", "until", "upper", "upset", "urban",
-    "usage", "usual", "valid", "value", "video", "virus", "visit", "vital", "voice", "waste",
-    "watch", "water", "wheel", "where", "which", "while", "white", "whole", "whose", "woman",
-    "women", "world", "worry", "worse", "worst", "worth", "would", "wound", "write", "wrong",
-    "wrote", "young", "youth"
-]
+_all_words = load_words_from_file("words.txt")
 
-WORDS_6 = [
-    "aboard", "accept", "access", "across", "acting", "action", "active", "actual", "advice", "advise",
-    "affect", "afford", "afraid", "agency", "almost", "always", "amount", "animal", "annual", "answer",
-    "anyone", "anyway", "appeal", "appear", "around", "arrive", "artist", "assume", "attack", "attend",
-    "august", "author", "autumn", "battle", "beauty", "become", "before", "behind", "better", "beyond",
-    "budget", "camera", "cancer", "career", "center", "chance", "change", "charge", "choice", "choose",
-    "church", "common", "couple", "course", "create", "debate", "decade", "decide", "degree", "design",
-    "detail", "dinner", "doctor", "during", "effect", "effort", "either", "energy", "enough", "entire",
-    "expect", "expert", "factor", "family", "father", "figure", "finger", "finish", "follow", "forget",
-    "former", "friend", "future", "garden", "ground", "growth", "happen", "health", "impact", "indeed",
-    "inside", "itself", "lawyer", "leader", "letter", "likely", "listen", "little", "manage", "market",
-    "matter", "member", "memory", "method", "middle", "minute", "modern", "moment", "mother", "nation",
-    "nature", "nearly", "notice", "number", "office", "option", "others", "parent", "people", "period",
-    "person", "player", "police", "policy", "pretty", "public", "rather", "really", "reason", "recent",
-    "record", "reduce", "region", "relate", "remain", "remove", "repeat", "report", "result", "return",
-    "reveal", "school", "season", "second", "senior", "series", "should", "simple", "simply", "single",
-    "sister", "social", "source", "speech", "spring", "street", "strong", "suffer", "summer", "system",
-    "theory", "though", "threat", "toward", "travel", "victim", "weapon", "weight", "window", "within",
-    "wonder", "worker", "writer"
-]
+# Strictly filter by length
+WORDS_4 = [w for w in _all_words if len(w) == 4]
+WORDS_5 = [w for w in _all_words if len(w) == 5]
+WORDS_6 = [w for w in _all_words if len(w) == 6]
+
+# Fallback in case words.txt is missing (so the bot doesn't crash)
+if not WORDS_4:
+    WORDS_4 = ["able", "acid", "aged", "also", "area", "army", "away", "baby", "back", "ball"]
+    WORDS_5 = ["about", "above", "abuse", "actor", "acute", "admit", "adopt", "adult", "after", "again"]
+    WORDS_6 = ["aboard", "accept", "access", "across", "acting", "action", "active", "actual", "advice", "advise"]
