@@ -12,6 +12,7 @@ active_games = {}
 chat_levels = {}   
 last_played = {}   
 
+# ✅ HELP_TXT (professional, WordHush style)
 HELP_TXT = (
     "<blockquote>🔍 𝙒𝙤𝙧𝙙𝙎𝙚𝙚𝙠 🔍</blockquote>\n\n"
     "<i>🎯 The Ultimate Word Guessing Challenge</i>\n\n"
@@ -95,7 +96,6 @@ def is_valid_guess(word, length):
     return bool(matches)
 
 def get_level_word_list(level, length):
-    """Get the word list for the given level and length."""
     if length == 4:
         if level == 1: return words.EASY_WORDS_4
         elif level == 2: return words.MEDIUM_WORDS_4
@@ -111,7 +111,6 @@ def get_level_word_list(level, length):
     return []
 
 async def get_word_for_game(chat_id, length):
-    # Reset level if 1 hour has passed
     if time.time() - last_played.get(chat_id, 0) > 3600:
         chat_levels[chat_id] = 1 
     
@@ -119,25 +118,21 @@ async def get_word_for_game(chat_id, length):
     word_list = get_level_word_list(level, length)
     
     if not word_list:
-        word_list = words.EASY_WORDS_4 if length == 4 else (words.EASY_WORDS_5 if length == 5 else words.EASY_WORDS_6)
+        if length == 4: word_list = words.EASY_WORDS_4
+        elif length == 5: word_list = words.EASY_WORDS_5
+        else: word_list = words.EASY_WORDS_6
     
-    # ✅ Get history (avoid repeats)
     history = await dbase.wordseek_get_history(chat_id)
-    
-    # Filter out used words
     available = [w for w in word_list if w not in history]
     
-    # If too few left, reset history (keep recent 5)
     if len(available) < 10:
         keep_recent = history[-5:] if len(history) >= 5 else history
         await dbase.wordseek_reset_history(chat_id, keep_recent)
         available = [w for w in word_list if w not in keep_recent]
-        # If still empty, use full list
         if not available:
             available = word_list
     
     word = random.choice(available)
-    # Save to history
     await dbase.wordseek_add_history(chat_id, word)
     return word
 
@@ -206,7 +201,6 @@ async def guess_word(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         
         await dbase.wordseek_add_score(chat_id, user_id, user_name, points)
         
-        # Level up (max 3)
         chat_levels[chat_id] = min(chat_levels.get(chat_id, 1) + 1, 3)
         last_played[chat_id] = time.time()
         
