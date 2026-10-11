@@ -58,6 +58,13 @@ async def init(uri: str, name: str):
     except Exception as e:
         log.warning("[db] logchannels index creation failed: %s", e)
 
+    # ✅ NEW: WordSeek Leaderboard index
+    try:
+        await _db.wordseek_scores.create_index([("chat_id", 1), ("score", -1)])
+        log.info("[db] wordseek_scores index ready ✅")
+    except Exception as e:
+        log.warning("[db] wordseek_scores index creation failed: %s", e)
+
     log.info("MongoDB connected (db: %s)", name)
 
 
@@ -374,4 +381,31 @@ async def logchannel_groups_for_channel(channel_id: int) -> list:
         try: channel_id = int(channel_id)
         except (TypeError, ValueError): return []
     cursor = _db.logchannels.find({"channel_id": channel_id})
+    return [doc async for doc in cursor]
+
+
+# ─────────────── WordSeek Leaderboard (NEW) ───────────────
+
+async def wordseek_add_score(chat_id: int, user_id: int, name: str, points: int):
+    """Add points to a user's score in a specific chat."""
+    if not isinstance(chat_id, int) or not isinstance(user_id, int): return
+    _id = f"ws:{chat_id}:{user_id}"
+    await _db.wordseek_scores.update_one(
+        {"_id": _id},
+        {
+            "$inc": {"score": points},
+            "$set": {
+                "chat_id": chat_id,
+                "user_id": user_id,
+                "name": name,
+                "last_played": time.time()
+            }
+        },
+        upsert=True
+    )
+
+async def wordseek_get_leaderboard(chat_id: int, limit: int = 10):
+    """Get top users for a specific chat."""
+    if not isinstance(chat_id, int): return []
+    cursor = _db.wordseek_scores.find({"chat_id": chat_id}).sort("score", -1).limit(limit)
     return [doc async for doc in cursor]
