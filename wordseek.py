@@ -87,9 +87,13 @@ async def new_game(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         'status': 'active'
     }
     
+    # ✅ FIX 1: Initial board with spaces between squares
+    squares = ' '.join(['🟥'] * length)
+    question_marks = ' '.join(['?'] * length)
+    
     board_text = f"<b>Game started! Guess the {length}-letter word!</b>\n\n"
     board_text += f"<b>{length}-letter mode · 0/30</b>\n"
-    board_text += f"{'🟥' * length} {'?' * length}"
+    board_text += f"{squares}  {question_marks}"
     
     msg = await update.message.reply_text(board_text, parse_mode='HTML')
     active_games[chat_id]['message_id'] = msg.message_id
@@ -111,7 +115,7 @@ async def guess_word(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     
     # ✅ THINKING PART 1: Check length
     if len(text) != game['length']:
-        return # Ignore if length doesn't match (e.g., typing a 4-letter word in a 5-letter game)
+        return 
     
     # ✅ THINKING PART 2: Check if it's a valid word from our dictionary
     if text not in words.WORDS_4 and text not in words.WORDS_5 and text not in words.WORDS_6:
@@ -119,7 +123,7 @@ async def guess_word(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"❌ <b>{text}</b> is not a valid {game['length']}-letter word.", 
             parse_mode='HTML'
         )
-        return # Return early so it doesn't count as a guess or update the board
+        return 
     
     # If it passes the checks, register the guess
     game['guesses'].append(text)
@@ -129,7 +133,9 @@ async def guess_word(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     board_lines = []
     for g in game['guesses']:
         result = get_guess_result(g, game['word'])
-        board_lines.append(f"{result} {g.upper()}")
+        # ✅ FIX 1 & 2: Add spaces between emojis and bold the word
+        spaced_result = ' '.join(result)
+        board_lines.append(f"{spaced_result}  <b>{g.upper()}</b>")
     
     board_text = f"<b>{game['length']}-letter mode · {guess_count}/30</b>\n\n"
     board_text += "\n".join(board_lines)
