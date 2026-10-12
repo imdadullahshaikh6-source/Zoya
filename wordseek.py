@@ -95,6 +95,13 @@ def is_valid_guess(word, length):
     matches = difflib.get_close_matches(word, dictionary, n=1, cutoff=0.7)
     return bool(matches)
 
+def calculate_points(length, time_taken, hints_taken):
+    base = 30 if length == 4 else (50 if length == 5 else 80)
+    time_penalty = int(time_taken // 3)
+    hint_penalty = hints_taken * 5
+    final_points = max(5, base - time_penalty - hint_penalty)
+    return final_points
+
 def get_level_word_list(level, length):
     if length == 4:
         if level == 1: return words.EASY_WORDS_4
@@ -153,7 +160,8 @@ async def new_game(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     word = await get_word_for_game(chat_id, length)
     active_games[chat_id] = {
         'word': word, 'length': length, 'guesses': [], 'max_guesses': 30,
-        'status': 'active', 'hints_taken': 0
+        'status': 'active', 'hints_taken': 0,
+        'start_time': time.time()
     }
     
     board_text = f"<blockquote><b>Game started! Guess the {length}-letter word!</b></blockquote>\n\n"
@@ -195,8 +203,8 @@ async def guess_word(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         user_name = update.effective_user.first_name
         
-        points = 20 - (game.get('hints_taken', 0) * 5)
-        if points < 5: points = 5
+        time_taken = time.time() - game.get('start_time', time.time())
+        points = calculate_points(game['length'], time_taken, game['hints_taken'])
         
         await dbase.wordseek_add_score(chat_id, user_id, user_name, points)
         
@@ -207,15 +215,19 @@ async def guess_word(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try: await update.message.set_reaction(random.choice(reactions))
         except Exception: pass
         
-        start_text = f"Start with /new{game['length']}"
+        # ✅ Ab reply ki tarah bhej rahe hain (user ka naam reply header me aayega)
+        win_text = (
+            f"🎉 <b>Congrats! You guessed it correctly.</b>\n"
+            f"<b>Correct Word:</b> {text}\n"
+            f"<b>Added {points} to the leaderboard.</b>"
+        )
         
         await ctx.bot.send_message(
             chat_id,
-            f"🎉 <b>Congrats! You guessed it correctly.</b>\n"
-            f"<b>Correct Word:</b> {text}\n"
-            f"<b>Added {points} to the leaderboard.</b>\n\n"
-            f"{start_text}",
-            parse_mode='HTML'
+            f"<blockquote>{win_text}</blockquote>\n\n"
+            f"Start with /new{game['length']}",
+            parse_mode='HTML',
+            reply_to_message_id=update.message.message_id  # ✅ Reply to winning message
         )
         del active_games[chat_id]
         return
@@ -224,12 +236,12 @@ async def guess_word(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         game['status'] = 'ended'
         last_played[chat_id] = time.time()
         
-        start_text = f"Start with /new{game['length']}"
+        over_text = "😔 <b>Game over! No one guessed the word.</b>"
         
         await ctx.bot.send_message(
             chat_id,
-            f"😔 <b>Game over! No one guessed the word.</b>\n\n"
-            f"{start_text}",
+            f"<blockquote>{over_text}</blockquote>\n\n"
+            f"Start with /new{game['length']}",
             parse_mode='HTML'
         )
         del active_games[chat_id]
@@ -273,18 +285,16 @@ async def leaderboard_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = "<b>🏆 𝙒𝙤𝙧𝙙𝙎𝙚𝙚𝙠 𝙇𝙚𝙖𝙙𝙚𝙧𝙗𝙤𝙖𝙧𝙙</b>\n"
     text += "<i>(Group rankings)</i>\n\n"
     for i, doc in enumerate(scores, 1):
-        # ✅ html.escape() taaki special characters error na de
         name = html.escape(str(doc.get("name", "Unknown")))
         score = doc.get("score", 0)
         medal = "🥇" if i == 1 else ("🥈" if i == 2 else ("🥉" if i == 3 else f"{i}."))
         text += f"{medal} <b>{name}</b> — {score} pts\n"
     
-    await ctx.bot.send_message(chat_id, text, parse_mode='HTML')
+    await ctx.bot.send_message(chat_id, f"<blockquote>{text}</blockquote>", parse_mode='HTML')
 
 async def myscore_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
-    # ✅ html.escape() taaki special characters error na de
     user_name = html.escape(update.effective_user.first_name)
     
     score = await dbase.wordseek_get_user_score(chat_id, user_id)
@@ -298,12 +308,16 @@ async def myscore_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    await ctx.bot.send_message(
-        chat_id,
-        f"<blockquote>📊 <b>Your WordSeek Score</b></blockquote>\n\n"
+    score_text = (
+        f"📊 <b>Your WordSeek Score</b>\n\n"
         f"👤 <b>Name:</b> {user_name}\n"
         f"🏆 <b>Score:</b> {score} pts\n"
-        f"📍 <b>Group:</b> This chat",
+        f"📍 <b>Group:</b> This chat"
+    )
+    
+    await ctx.bot.send_message(
+        chat_id,
+        f"<blockquote>{score_text}</blockquote>",
         parse_mode='HTML'
     )
 
@@ -315,12 +329,12 @@ async def end_game(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     del active_games[chat_id]
     last_played[chat_id] = time.time()
     
-    start_text = f"Start with /new{length}"
+    end_text = "🛑 <b>Game ended by command. The word was hidden.</b>"
     
     await ctx.bot.send_message(
         chat_id,
-        f"🛑 <b>Game ended by command. The word was hidden.</b>\n\n"
-        f"{start_text}",
+        f"<blockquote>{end_text}</blockquote>\n\n"
+        f"Start with /new{length}",
         parse_mode='HTML')
 
 def register(app):
