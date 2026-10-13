@@ -1,17 +1,7 @@
 """Sticker plugin:
 .q / .qr  — render the replied-to message as a Telegram-style quote sticker
 .kang     — steal a replied sticker/photo/GIF/video into the user's own auto-growing pack
-
-Quote commands:
-  .q              → normal quote sticker
-  .q r / .q reply → quote sticker sent as a reply to the source message
-  .qr             → shortcut for .q r
-
-Nested quotes (.qr / .q r): if the replied-to message was itself a reply, the
-message it was replying to is shown inside the quote sticker.
-NOTE: the Telegram Bot API never includes the parent of a replied message, so
-the bot remembers "message -> parent" for every reply it sees in a group
-(see _parent_cache). Only replies sent while the bot was online can be nested."""
+"""
 from __future__ import annotations
 
 import asyncio
@@ -21,6 +11,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import tempfile
 import time
 from collections import OrderedDict
@@ -29,7 +20,6 @@ import httpx
 from fontTools.ttLib import TTFont
 from PIL import Image, ImageDraw, ImageFont
 from telegram import (
-    InlineKeyboardButton,
     InlineKeyboardMarkup,
     InputSticker,
     MessageEntity,
@@ -39,7 +29,7 @@ from telegram.ext import MessageHandler, filters
 
 import database as dbase
 from common import (
-    T, dual_command, esc, say,
+    T, dual_command, esc, say, B,
     QUOTE_API, QUOTE_API_FALLBACKS, QUOTE_BG,
     QUOTE_TIMEOUT, QUOTE_TOTAL_TIMEOUT,
 )
@@ -59,7 +49,6 @@ COMMANDS = [("q", "Quote a message as a sticker"), ("kang", "Steal a sticker int
 MAX_SIDE = 512
 EMOJI_RE = re.compile(r"^[\U0001F000-\U0001FAFF\u2600-\u27BF\u2190-\u21FF\u2B00-\u2BFF]+$")
 
-# broader: extracts every emoji found anywhere in a string
 EMOJI_EXTRACT_RE = re.compile(
     "["
     "\U0001F1E6-\U0001F1FF"
@@ -107,7 +96,7 @@ _ENTITY_TYPE_STR = {
 }
 
 
-# ───────── Pillow helpers (fallback + .kang) ─────────
+# ───────── Pillow helpers ─────────
 FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 FONT_REGULAR = os.path.join(FONT_DIR, "DejaVuSans.ttf")
 FONT_BOLD = os.path.join(FONT_DIR, "DejaVuSans-Bold.ttf")
@@ -748,6 +737,11 @@ async def _download_tg_media_to_temp(ctx, file_id: str, suffix: str) -> str:
     return path
 
 
+def _ffmpeg_sync(cmd: list) -> subprocess.CompletedProcess:
+    """Blocking ffmpeg call — runs in a thread so uvloop/custom loops don't break."""
+    return subprocess.run(cmd, capture_output=True, timeout=90)
+
+
 async def _convert_to_video_sticker(path: str) -> io.BytesIO:
     """Convert any GIF / video to a 512×512 VP9 WebM with alpha channel — required
     for Telegram *video* stickers (Bot API: ≤3 s, ≤512 KB, one video stream)."""
@@ -770,14 +764,16 @@ async def _convert_to_video_sticker(path: str) -> io.BytesIO:
         "-pix_fmt", "yuva420p",
         out_path,
     ]
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, err = await proc.communicate()
+
+    try:
+        proc = await asyncio.to_thread(_ffmpeg_sync, cmd)
+    except Exception as e:
+        raise RuntimeError(f"ffmpeg exec failed: {e}")
+
     if proc.returncode != 0 or not os.path.exists(out_path):
-        raise RuntimeError(f"ffmpeg failed: {err.decode(errors='ignore')[:200]}")
+        err = (proc.stderr or b"").decode(errors="ignore")[:200] or "unknown"
+        raise RuntimeError(f"ffmpeg failed: {err}")
+
     with open(out_path, "rb") as f:
         data = f.read()
     try:
@@ -808,7 +804,6 @@ async def kang_cmd(update, ctx):
                   reply_to=msg.message_id)
         return
 
-    # ── Parse args: optional emoji(s) anywhere, optional pack number (bare digit) ──
     raw_args = list(ctx.args or [])
     pack_num_arg: int | None = None
     extracted_emojis: list[str] = []
@@ -824,7 +819,7 @@ async def kang_cmd(update, ctx):
     tmp_paths: list[str] = []
 
     try:
-        # ── 1. Sticker passthrough ──
+        # 1. Sticker passthrough
         if src.sticker:
             s = src.sticker
             file_arg = s.file_id
@@ -836,13 +831,13 @@ async def kang_cmd(update, ctx):
                 fmt = "static"
             user_emoji = user_emoji or s.emoji or "🤔"
 
-        # ── 2. Photo ──
+        # 2. Photo
         elif src.photo:
             file_arg = await _photo_to_sticker_file(ctx, src.photo[-1])
             fmt = "static"
             user_emoji = user_emoji or "🤔"
 
-        # ── 3. GIF / animation / video / video-document / .tgs ──
+        # 3. GIF / animation / video / video-document / .tgs
         elif (src.animation or src.video or _is_videoish_document(src.document)):
             media = src.animation or src.video or src.document
             fname = getattr(media, "file_name", None) or ""
@@ -888,7 +883,6 @@ async def kang_cmd(update, ctx):
         return name
 
     async def _refresh_thumbnail(pack_name: str):
-        # The thumbnail trick forces Telegram clients to reload the pack view.
         try:
             await ctx.bot.set_sticker_set_thumbnail(
                 user.id, pack_name, thumbnail=sticker_obj.sticker
@@ -898,19 +892,17 @@ async def kang_cmd(update, ctx):
             log.debug("[kang] thumbnail refresh failed (%s): %s", pack_name, e)
 
     rec = await dbase.kang_get(user.id)
-    # Reuse the existing pack only when its prefix matches the current format.
     same_format = bool(
         rec and rec.get("name") and
         re.match(rf"^{re.escape(prefix)}\d+_", rec["name"])
     )
 
     try:
-        # ── Explicit pack number supplied → target that pack directly ──
         if pack_num_arg is not None:
             target = f"{prefix}{pack_num_arg}_{base}_by_{me.username}"
             try:
                 await ctx.bot.add_sticker_to_set(user.id, target, sticker=sticker_obj)
-                name, count = target, rec.get("count", 0) + 1 if (rec and rec.get("name") == target) else 1
+                name, count = target, (rec.get("count", 0) + 1 if (rec and rec.get("name") == target) else 1)
             except TelegramError as e:
                 s = str(e).lower()
                 if "invalid" in s or "not found" in s:
@@ -921,7 +913,6 @@ async def kang_cmd(update, ctx):
             await dbase.kang_set(user.id, name, count, part=pack_num_arg)
             await _refresh_thumbnail(name)
 
-        # ── Same format pack exists → try to append ──
         elif same_format:
             try:
                 await ctx.bot.add_sticker_to_set(user.id, rec["name"], sticker=sticker_obj)
@@ -939,7 +930,6 @@ async def kang_cmd(update, ctx):
                 else:
                     raise
 
-        # ── Different format or first ever → fresh pack ──
         else:
             part = pack_num_arg or 1
             name = await _create(part)
@@ -953,8 +943,9 @@ async def kang_cmd(update, ctx):
 
     link = f"https://t.me/addstickers/{name}"
     kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("📦 View Pack", url=link)
+        B("📦 View Pack", url=link, style="primary")
     ]])
+
     try:
         await ctx.bot.send_message(
             chat.id,
@@ -964,7 +955,6 @@ async def kang_cmd(update, ctx):
             reply_markup=kb,
         )
     except Exception:
-        # Fallback if reply-send fails
         await ctx.bot.send_message(
             chat.id,
             T("✅ added to your pack ({c} stickers so far).\n{l}", c=count, l=esc(link)),
@@ -983,5 +973,5 @@ def register(app):
             block=False,
         ),
         group=-100,
-  )
-  
+                     )
+      
