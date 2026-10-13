@@ -48,7 +48,6 @@ async def init(uri: str, name: str):
             log.error("[db] guardian index still failed: %s", e2)
 
     await _db.clean.create_index("chat_id", unique=True)
-
     await _db.locks.create_index("chat_id", unique=True)
 
     # ✅ logchannels index
@@ -65,7 +64,7 @@ async def init(uri: str, name: str):
     except Exception as e:
         log.warning("[db] wordseek_scores index creation failed: %s", e)
 
-    # ✅ WordSeek History index (word repeat rokne ke liye)
+    # ✅ WordSeek History index
     try:
         await _db.wordseek_history.create_index("chat_id", unique=True)
         log.info("[db] wordseek_history index ready ✅")
@@ -183,10 +182,12 @@ async def random_members(chat_id: int, count: int):
 async def kang_get(user_id: int):
     return await _db.kangs.find_one({"_id": user_id})
 
-async def kang_set(user_id: int, name: str, count: int, part: int | None = None):
+async def kang_set(user_id: int, name: str, count: int, part: int | None = None, format: str | None = None):
     fields = {"name": name, "count": count}
     if part is not None:
         fields["part"] = part
+    if format is not None:
+        fields["format"] = format
     await _db.kangs.update_one({"_id": user_id}, {"$set": fields}, upsert=True)
 
 
@@ -384,7 +385,6 @@ async def logchannel_groups_for_channel(channel_id: int) -> list:
 # ─────────────── WordSeek Leaderboard ───────────────
 
 async def wordseek_add_score(chat_id: int, user_id: int, name: str, points: int):
-    """Add points to a user's score in a specific chat."""
     if not isinstance(chat_id, int) or not isinstance(user_id, int): return
     _id = f"ws:{chat_id}:{user_id}"
     await _db.wordseek_scores.update_one(
@@ -402,14 +402,12 @@ async def wordseek_add_score(chat_id: int, user_id: int, name: str, points: int)
     )
 
 async def wordseek_get_leaderboard(chat_id: int, limit: int = 10):
-    """Get top users for a specific chat."""
     if not isinstance(chat_id, int): return []
     cursor = _db.wordseek_scores.find({"chat_id": chat_id}).sort("score", -1).limit(limit)
     return [doc async for doc in cursor]
 
 
 async def wordseek_get_user_score(chat_id: int, user_id: int) -> int:
-    """Get a specific user's score in a chat."""
     if not isinstance(chat_id, int) or not isinstance(user_id, int): return 0
     _id = f"ws:{chat_id}:{user_id}"
     doc = await _db.wordseek_scores.find_one({"_id": _id})
@@ -419,7 +417,6 @@ async def wordseek_get_user_score(chat_id: int, user_id: int) -> int:
 # ─────────────── WordSeek Word History ───────────────
 
 async def wordseek_add_history(chat_id: int, word: str):
-    """Add a used word to the chat's history (to avoid repeats)."""
     if not isinstance(chat_id, int): return
     await _db.wordseek_history.update_one(
         {"chat_id": chat_id},
@@ -431,13 +428,11 @@ async def wordseek_add_history(chat_id: int, word: str):
     )
 
 async def wordseek_get_history(chat_id: int) -> list:
-    """Get all used words for a chat."""
     if not isinstance(chat_id, int): return []
     doc = await _db.wordseek_history.find_one({"chat_id": chat_id})
     return doc.get("words", []) if doc else []
 
 async def wordseek_reset_history(chat_id: int, keep_recent: list = None):
-    """Reset history but optionally keep recent words."""
     if not isinstance(chat_id, int): return
     if keep_recent:
         await _db.wordseek_history.update_one(
