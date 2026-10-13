@@ -686,100 +686,6 @@ async def _convert_to_video_sticker(path: str) -> io.BytesIO:
     return buf
 
 
-async def _gif_to_quoted_video_sticker(ctx, gif_path: str, sender) -> io.BytesIO:
-    W, H = 512, 512
-    top_bar = 112
-    gif_y = top_bar
-
-    overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    od = ImageDraw.Draw(overlay)
-    od.rounded_rectangle((0, 0, W - 1, H - 1), radius=38, fill=BUBBLE_BG)
-    od.rectangle((14, gif_y - 6, W - 14, H - 14), fill=(0, 0, 0, 0))
-
-    av_size = 72
-    ax, ay = 26, 22
-    photo = await _fetch_avatar_bytes(ctx, sender.id)
-    avatar_ok = False
-    if photo:
-        try:
-            av = Image.open(io.BytesIO(photo)).convert("RGBA")
-            w, h = av.size
-            side = min(w, h)
-            av = av.crop(((w - side) // 2, (h - side) // 2, (w + side) // 2, (h + side) // 2))
-            av = av.resize((av_size, av_size), Image.LANCZOS)
-            mask = Image.new("L", (av_size, av_size), 0)
-            ImageDraw.Draw(mask).ellipse((0, 0, av_size, av_size), fill=255)
-            av.putalpha(mask)
-            overlay.paste(av, (ax, ay), av)
-            avatar_ok = True
-        except Exception:
-            avatar_ok = False
-    if not avatar_ok:
-        av = Image.new("RGBA", (av_size, av_size), (0, 0, 0, 0))
-        da = ImageDraw.Draw(av)
-        da.ellipse((0, 0, av_size, av_size), fill=_peer_color(sender.id))
-        f = _load_font(True, av_size // 2)
-        words = re.findall(r"[A-Za-z]+", sender.full_name or "")
-        initials = (words[0][0] + (words[1][0] if len(words) > 1 else "")).upper() if words else "?"
-        bbox = da.textbbox((0, 0), initials, font=f)
-        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        da.text(((av_size - tw) / 2 - bbox[0], (av_size - th) / 2 - bbox[1]),
-                initials, font=f, fill=(255, 255, 255))
-        overlay.paste(av, (ax, ay), av)
-
-    name = re.sub(r"\s+", " ", (sender.full_name or "User")).strip()[:26]
-    font_name = _load_font(True, 30)
-    font_tag = _load_font(False, 20)
-    od.text((ax + av_size + 18, ay + 6), name, font=font_name, fill=_peer_color(sender.id))
-    od.text((ax + av_size + 18, ay + 44), "GIF", font=font_tag, fill=(180, 180, 200, 255))
-
-    overlay_path = tempfile.mktemp(suffix=".png")
-    overlay.save(overlay_path, "PNG")
-
-    out_path = tempfile.mktemp(suffix=".webm")
-    vf = (
-        f"scale={W}:{H - top_bar}:force_original_aspect_ratio=decrease,"
-        f"pad={W}:{H - top_bar}:(ow-iw)/2:(oh-ih)/2:color=0x1b1429,"
-        f"pad={W}:{H}:0:{gif_y}:color=0x1b1429,"
-        f"setsar=1,fps=30"
-    )
-    cmd = [
-        "ffmpeg", "-y", "-loglevel", "error",
-        "-i", gif_path, "-i", overlay_path,
-        "-filter_complex",
-        f"[0:v]{vf}[gif];[gif][1:v]overlay=0:0:format=auto,format=yuva420p[v]",
-        "-map", "[v]", "-t", "3",
-        "-c:v", "libvpx-vp9", "-b:v", "450k", "-crf", "34",
-        "-preset", "veryfast", "-an", "-pix_fmt", "yuva420p",
-        out_path,
-    ]
-    try:
-        proc = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, timeout=90)
-    except Exception as e:
-        try:
-            os.remove(overlay_path)
-        except OSError:
-            pass
-        raise RuntimeError(f"ffmpeg exec failed: {e}")
-    try:
-        os.remove(overlay_path)
-    except OSError:
-        pass
-    if proc.returncode != 0 or not os.path.exists(out_path):
-        err = (proc.stderr or b"").decode(errors="ignore")[:300] or "unknown"
-        raise RuntimeError(f"ffmpeg failed: {err}")
-    with open(out_path, "rb") as f:
-        data = f.read()
-    try:
-        os.remove(out_path)
-    except OSError:
-        pass
-    buf = io.BytesIO(data)
-    buf.name = "kang.webm"
-    buf.seek(0)
-    return buf
-
-
 def _is_videoish_document(doc) -> bool:
     if doc is None or not getattr(doc, "mime_type", None):
         return False
@@ -856,13 +762,7 @@ async def _kang_impl(update, ctx, force_new_part: int | None = None):
             )
             src_path = await _download_tg_media_to_temp(ctx, media.file_id, suffix)
             tmp_paths.append(src_path)
-            sender = src.from_user or user
-            try:
-                file_arg = await _gif_to_quoted_video_sticker(ctx, src_path, sender)
-                log.info("[kang] GIF quoted sticker built ✅")
-            except Exception as e:
-                log.warning("[kang] quoted GIF failed, fallback to plain: %s", e)
-                file_arg = await _convert_to_video_sticker(src_path)
+            file_arg = await _convert_to_video_sticker(src_path)
             fmt = "video"
             user_emoji = user_emoji or "🎬"
         else:
@@ -1047,4 +947,4 @@ def register(app):
         ),
         group=-100,
             )
-                   
+    
