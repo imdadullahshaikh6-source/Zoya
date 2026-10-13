@@ -65,12 +65,19 @@ async def init(uri: str, name: str):
     except Exception as e:
         log.warning("[db] wordseek_scores index creation failed: %s", e)
 
-    # ✅ NEW: WordSeek History index (word repeat rokne ke liye)
+    # ✅ WordSeek History index (word repeat rokne ke liye)
     try:
         await _db.wordseek_history.create_index("chat_id", unique=True)
         log.info("[db] wordseek_history index ready ✅")
     except Exception as e:
         log.warning("[db] wordseek_history index creation failed: %s", e)
+
+    # ✅ Kangs index (sticker packs)
+    try:
+        await _db.kangs.create_index("name")
+        log.info("[db] kangs index ready ✅")
+    except Exception as e:
+        log.warning("[db] kangs index creation failed: %s", e)
 
     log.info("MongoDB connected (db: %s)", name)
 
@@ -409,7 +416,7 @@ async def wordseek_get_user_score(chat_id: int, user_id: int) -> int:
     return doc.get("score", 0) if doc else 0
 
 
-# ─────────────── WordSeek Word History (NEW) ───────────────
+# ─────────────── WordSeek Word History ───────────────
 
 async def wordseek_add_history(chat_id: int, word: str):
     """Add a used word to the chat's history (to avoid repeats)."""
