@@ -1,6 +1,6 @@
 """Sticker plugin:
 .q / .qr  — render the replied-to message as a Telegram-style quote sticker
-.kang     — steal a replied sticker/photo into the user's own auto-growing pack
+.kang     — steal a replied sticker/photo/GIF/video into the user's own auto-growing pack
 
 Quote commands:
   .q              → normal quote sticker
@@ -21,13 +21,19 @@ import json
 import logging
 import os
 import re
+import tempfile
 import time
 from collections import OrderedDict
 
 import httpx
 from fontTools.ttLib import TTFont
 from PIL import Image, ImageDraw, ImageFont
-from telegram import InputSticker, MessageEntity
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputSticker,
+    MessageEntity,
+)
 from telegram.error import TelegramError
 from telegram.ext import MessageHandler, filters
 
@@ -45,13 +51,33 @@ HELP_TXT = (
     "/q (or .q) — reply to any message to turn it into a quote sticker\n"
     "/qr (or .qr, /q r) — nested quote: also shows the message that the quoted "
     "message was replying to, and is sent as a reply to the original message\n"
-    "/kang (or .kang) [emoji] — reply to a sticker or photo to add it to your "
-    "own sticker pack."
+    "/kang (or .kang) [emoji] [pack#] — reply to a sticker, photo, GIF or video "
+    "to add it to your own sticker pack."
 )
 COMMANDS = [("q", "Quote a message as a sticker"), ("kang", "Steal a sticker into your pack")]
 
 MAX_SIDE = 512
 EMOJI_RE = re.compile(r"^[\U0001F000-\U0001FAFF\u2600-\u27BF\u2190-\u21FF\u2B00-\u2BFF]+$")
+
+# broader: extracts every emoji found anywhere in a string
+EMOJI_EXTRACT_RE = re.compile(
+    "["
+    "\U0001F1E6-\U0001F1FF"
+    "\U0001F300-\U0001F5FF"
+    "\U0001F600-\U0001F64F"
+    "\U0001F680-\U0001F6FF"
+    "\U0001F700-\U0001F77F"
+    "\U0001F780-\U0001F7FF"
+    "\U0001F800-\U0001F8FF"
+    "\U0001F900-\U0001F9FF"
+    "\U0001FA00-\U0001FAFF"
+    "\u2600-\u27BF"
+    "\u2B00-\u2BFF"
+    "\u2190-\u21FF"
+    "\u2300-\u23FF"
+    "\u25A0-\u25FF"
+    "]+"
+)
 
 _FALLBACKS = [u.strip() for u in (QUOTE_API_FALLBACKS or "").split(",") if u.strip()]
 TOTAL_TIMEOUT = QUOTE_TOTAL_TIMEOUT
@@ -246,9 +272,6 @@ def _from_block(user) -> dict:
 
 
 def _build_reply_block(reply) -> dict | None:
-    """Build the replyMessage sub-object in the shape LyoSU quote-api expects.
-    Needs a top-level `name` field — without it the API silently ignores the
-    nested parent."""
     if reply is None:
         return None
     text = _text_of(reply)
@@ -276,7 +299,7 @@ def _build_message(msg, avatar: str | None = None, reply_override: dict | None =
     reply_block = _build_reply_block(getattr(msg, "reply_to_message", None))
     if reply_block:
         block["replyMessage"] = reply_block
-    if reply_override:                      # nested quote supplied by .qr
+    if reply_override:
         block["replyMessage"] = reply_override
     return block
 
@@ -456,9 +479,6 @@ async def _build_quote_sticker(ctx, src_msg, sender, reply_override: dict | None
 
 
 # ───────── nested-quote parent cache ─────────
-# Bot API never sends "reply_to_message.reply_to_message", so we remember the
-# parent of every reply we see: (chat_id, message_id) -> replyMessage block.
-
 _PARENT_CACHE_MAX = 20000
 _parent_cache: "OrderedDict[tuple[int, int], dict]" = OrderedDict()
 
@@ -486,7 +506,6 @@ def _media_label(m) -> str | None:
 
 
 def _snapshot_parent(parent) -> dict | None:
-    """replyMessage block (LyoSU quote-api shape) for a parent message."""
     if parent is None:
         return None
     text = _text_of(parent)
@@ -494,7 +513,7 @@ def _snapshot_parent(parent) -> dict | None:
     if not text:
         text = _media_label(parent) or ""
     if not text:
-        return None                      # service message / unsupported -> skip
+        return None
     user = getattr(parent, "from_user", None)
     chat_obj = getattr(parent, "sender_chat", None)
     if user is None and chat_obj is not None:
@@ -520,12 +539,11 @@ def _remember_parent(chat_id: int, msg_id: int, block: dict) -> None:
 
 
 async def _cache_reply_watcher(update, ctx):
-    """Silently remembers the parent of every reply in groups."""
     m = update.effective_message
     chat = update.effective_chat
     if not m or not chat or not m.reply_to_message:
         return
-    if not _text_of(m):                  # only text/caption messages can be quoted
+    if not _text_of(m):
         return
     block = _snapshot_parent(m.reply_to_message)
     if block:
@@ -533,7 +551,7 @@ async def _cache_reply_watcher(update, ctx):
 
 
 def _find_parent_block(chat_id: int, src) -> dict | None:
-    live = getattr(src, "reply_to_message", None)       # present on some setups
+    live = getattr(src, "reply_to_message", None)
     if live is not None:
         block = _snapshot_parent(live)
         if block:
@@ -544,14 +562,6 @@ def _find_parent_block(chat_id: int, src) -> dict | None:
 # ───────── parent-message helper ─────────
 
 async def _ensure_parent(ctx, chat_id: int, src):
-    """Make sure src.reply_to_message is populated if src itself is a reply.
-
-    PTB exposes the parent in several possible places depending on version:
-      • src.reply_to_message  (full Message — preferred)
-      • src.external_reply.message_id  (for channel replies)
-      • src.reply_to_message_id  (some forks)
-    If none of them are set, we cannot render a nested quote.
-    """
     if getattr(src, "reply_to_message", None):
         return src.reply_to_message
 
@@ -562,8 +572,6 @@ async def _ensure_parent(ctx, chat_id: int, src):
     if not parent_id:
         parent_id = getattr(src, "reply_to_message_id", None)
     if not parent_id:
-        # Some PTB versions keep the ID under reply_to_message itself (as an
-        # incompletely-populated Message)
         rt = getattr(src, "reply_to_message", None)
         if rt is not None:
             parent_id = getattr(rt, "message_id", None)
@@ -582,7 +590,7 @@ async def _ensure_parent(ctx, chat_id: int, src):
         return None
 
 
-# ───────── command handler ─────────
+# ───────── quote command handler ─────────
 
 def _cooldown_left(uid: int) -> float:
     return max(0.0, _last_quote.get(uid, 0.0) + COOLDOWN - time.time())
@@ -599,7 +607,6 @@ async def _quote_and_send(update, ctx, as_reply: bool, nested: bool = False):
         await say(ctx, chat.id, T("only text messages can be quoted."), reply_to=msg.message_id)
         return
 
-    # ── Populate parent (for nested quote) ──
     log.info("[sticker] src.reply_to_message present: %s", bool(getattr(src, "reply_to_message", None)))
     parent = await _ensure_parent(ctx, chat.id, src)
     if parent and parent is not getattr(src, "reply_to_message", None):
@@ -730,102 +737,245 @@ async def _photo_to_sticker_file(ctx, photo):
     return buf
 
 
+async def _download_tg_media_to_temp(ctx, file_id: str, suffix: str) -> str:
+    """Download any Telegram file to a temp path. Caller is responsible for cleanup."""
+    tgfile = await ctx.bot.get_file(file_id)
+    raw = await tgfile.download_as_bytearray()
+    fd, path = tempfile.mkstemp(suffix=suffix)
+    os.close(fd)
+    with open(path, "wb") as f:
+        f.write(bytes(raw))
+    return path
+
+
+async def _convert_to_video_sticker(path: str) -> io.BytesIO:
+    """Convert any GIF / video to a 512×512 VP9 WebM with alpha channel — required
+    for Telegram *video* stickers (Bot API: ≤3 s, ≤512 KB, one video stream)."""
+    out_path = path.rsplit(".", 1)[0] + "_vsticker.webm"
+    vf = (
+        "scale=512:512:force_original_aspect_ratio=decrease,"
+        "pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000,"
+        "fps=30,format=yuva420p"
+    )
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-i", path,
+        "-t", "3",
+        "-vf", vf,
+        "-c:v", "libvpx-vp9",
+        "-b:v", "450k",
+        "-crf", "34",
+        "-preset", "veryfast",
+        "-an",
+        "-pix_fmt", "yuva420p",
+        out_path,
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, err = await proc.communicate()
+    if proc.returncode != 0 or not os.path.exists(out_path):
+        raise RuntimeError(f"ffmpeg failed: {err.decode(errors='ignore')[:200]}")
+    with open(out_path, "rb") as f:
+        data = f.read()
+    try:
+        os.remove(out_path)
+    except OSError:
+        pass
+    buf = io.BytesIO(data)
+    buf.name = "kang.webm"
+    buf.seek(0)
+    return buf
+
+
+def _is_videoish_document(doc) -> bool:
+    if doc is None or not getattr(doc, "mime_type", None):
+        return False
+    mt = doc.mime_type.lower()
+    return mt.startswith("video/") or mt in ("image/gif", "application/x-tgsticker")
+
+
 # ───────── .kang ─────────
 
 async def kang_cmd(update, ctx):
     msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
     src = msg.reply_to_message
-    if not src or not (src.sticker or src.photo):
-        await say(ctx, chat.id, T("reply to a sticker or a photo with /kang to steal it into your pack."), reply_to=msg.message_id)
+    if not src:
+        await say(ctx, chat.id,
+                  T("reply to a sticker, photo, GIF or video with /kang to steal it into your pack."),
+                  reply_to=msg.message_id)
         return
 
-    emoji = ctx.args[0] if ctx.args and EMOJI_RE.match(ctx.args[0]) else None
-
-    if src.sticker:
-        s = src.sticker
-        emoji = emoji or s.emoji or "🤔"
-        file_arg = s.file_id
-        if s.is_video:
-            fmt = "video"
-        elif s.is_animated:
-            fmt = "animated"
+    # ── Parse args: optional emoji(s) anywhere, optional pack number (bare digit) ──
+    raw_args = list(ctx.args or [])
+    pack_num_arg: int | None = None
+    extracted_emojis: list[str] = []
+    for a in raw_args:
+        if a.isdigit() and pack_num_arg is None:
+            pack_num_arg = int(a)
         else:
-            fmt = "static"
-    else:
-        try:
+            extracted_emojis.extend(EMOJI_EXTRACT_RE.findall(a))
+    user_emoji: str | None = "".join(extracted_emojis) or None
+
+    file_arg = None
+    fmt: str | None = None
+    tmp_paths: list[str] = []
+
+    try:
+        # ── 1. Sticker passthrough ──
+        if src.sticker:
+            s = src.sticker
+            file_arg = s.file_id
+            if s.is_video:
+                fmt = "video"
+            elif s.is_animated:
+                fmt = "animated"
+            else:
+                fmt = "static"
+            user_emoji = user_emoji or s.emoji or "🤔"
+
+        # ── 2. Photo ──
+        elif src.photo:
             file_arg = await _photo_to_sticker_file(ctx, src.photo[-1])
-        except Exception as e:
-            await say(ctx, chat.id, T("couldn't read that image:") + f" {esc(e)}", reply_to=msg.message_id)
+            fmt = "static"
+            user_emoji = user_emoji or "🤔"
+
+        # ── 3. GIF / animation / video / video-document / .tgs ──
+        elif (src.animation or src.video or _is_videoish_document(src.document)):
+            media = src.animation or src.video or src.document
+            fname = getattr(media, "file_name", None) or ""
+            suffix = os.path.splitext(fname)[1] or (
+                ".tgs" if getattr(media, "mime_type", "") == "application/x-tgsticker"
+                else ".gif" if getattr(media, "mime_type", "") == "image/gif"
+                else ".mp4"
+            )
+            src_path = await _download_tg_media_to_temp(ctx, media.file_id, suffix)
+            tmp_paths.append(src_path)
+            file_arg = await _convert_to_video_sticker(src_path)
+            fmt = "video"
+            user_emoji = user_emoji or "🎬"
+
+        else:
+            await say(ctx, chat.id,
+                      T("reply to a sticker, photo, GIF or video with /kang to steal it into your pack."),
+                      reply_to=msg.message_id)
             return
-        fmt = "static"
-        emoji = emoji or "🤔"
+    except Exception as e:
+        log.error("[kang] prepare failed: %s", e, exc_info=True)
+        await say(ctx, chat.id, T("couldn't read that media:") + f" {esc(e)}",
+                  reply_to=msg.message_id)
+        return
+    finally:
+        for p in tmp_paths:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+    prefix = {"animated": "anim", "video": "vid", "static": "a"}[fmt]
+    emoji = user_emoji or "🤔"
 
     me = ctx.application.bot_data["me"]
     base = re.sub(r"[^a-zA-Z0-9_]", "", (user.username or f"u{user.id}")).lower() or f"u{user.id}"
     sticker_obj = InputSticker(sticker=file_arg, emoji_list=[emoji], format=fmt)
 
     async def _create(part: int):
-        name = f"a{part}_{base}_by_{me.username}"
+        name = f"{prefix}{part}_{base}_by_{me.username}"
         title = f"{user.first_name or 'My'}'s Pack" + (f" {part}" if part > 1 else "")
         await ctx.bot.create_new_sticker_set(user.id, name, title[:64], stickers=[sticker_obj])
         return name
 
+    async def _refresh_thumbnail(pack_name: str):
+        # The thumbnail trick forces Telegram clients to reload the pack view.
+        try:
+            await ctx.bot.set_sticker_set_thumbnail(
+                user.id, pack_name, thumbnail=sticker_obj.sticker
+            )
+            log.info("[kang] pack refreshed via thumbnail: %s", pack_name)
+        except Exception as e:
+            log.debug("[kang] thumbnail refresh failed (%s): %s", pack_name, e)
+
+    rec = await dbase.kang_get(user.id)
+    # Reuse the existing pack only when its prefix matches the current format.
+    same_format = bool(
+        rec and rec.get("name") and
+        re.match(rf"^{re.escape(prefix)}\d+_", rec["name"])
+    )
+
     try:
-        rec = await dbase.kang_get(user.id)
-        if rec and rec.get("name"):
+        # ── Explicit pack number supplied → target that pack directly ──
+        if pack_num_arg is not None:
+            target = f"{prefix}{pack_num_arg}_{base}_by_{me.username}"
+            try:
+                await ctx.bot.add_sticker_to_set(user.id, target, sticker=sticker_obj)
+                name, count = target, rec.get("count", 0) + 1 if (rec and rec.get("name") == target) else 1
+            except TelegramError as e:
+                s = str(e).lower()
+                if "invalid" in s or "not found" in s:
+                    name = await _create(pack_num_arg)
+                    count = 1
+                else:
+                    raise
+            await dbase.kang_set(user.id, name, count, part=pack_num_arg)
+            await _refresh_thumbnail(name)
+
+        # ── Same format pack exists → try to append ──
+        elif same_format:
             try:
                 await ctx.bot.add_sticker_to_set(user.id, rec["name"], sticker=sticker_obj)
                 name, count = rec["name"], rec.get("count", 0) + 1
                 await dbase.kang_set(user.id, name, count, part=rec.get("part", 1))
-                
-                # ✨ REFRESH MAGIC: Thumbnail update karne se client refresh ho jata hai
-                try:
-                    await ctx.bot.set_sticker_set_thumbnail(user.id, name, thumbnail=sticker_obj.sticker)
-                    log.info("[sticker] pack refreshed via thumbnail: %s", name)
-                except Exception as e:
-                    log.warning("[sticker] thumbnail refresh failed (existing): %s", e)
-                    
+                await _refresh_thumbnail(name)
             except TelegramError as e:
                 s = str(e).lower()
-                if "invalid" in s or "too much" in s or "too many" in s:
+                if "invalid" in s or "too much" in s or "too many" in s or "full" in s:
                     part = rec.get("part", 1) + 1
                     name = await _create(part)
                     count = 1
                     await dbase.kang_set(user.id, name, count, part=part)
-                    
-                    # ✨ REFRESH MAGIC for new part
-                    try:
-                        await ctx.bot.set_sticker_set_thumbnail(user.id, name, thumbnail=sticker_obj.sticker)
-                        log.info("[sticker] new pack part refreshed: %s", name)
-                    except Exception as e:
-                        log.warning("[sticker] thumbnail refresh failed (new part): %s", e)
+                    await _refresh_thumbnail(name)
                 else:
                     raise
+
+        # ── Different format or first ever → fresh pack ──
         else:
-            name = await _create(1)
+            part = pack_num_arg or 1
+            name = await _create(part)
             count = 1
-            await dbase.kang_set(user.id, name, count, part=1)
-            
-            # ✨ REFRESH MAGIC for brand new pack
-            try:
-                await ctx.bot.set_sticker_set_thumbnail(user.id, name, thumbnail=sticker_obj.sticker)
-                log.info("[sticker] brand new pack refreshed: %s", name)
-            except Exception as e:
-                log.warning("[sticker] thumbnail refresh failed (new pack): %s", e)
-                
+            await dbase.kang_set(user.id, name, count, part=part)
+            await _refresh_thumbnail(name)
+
     except TelegramError as e:
         await say(ctx, chat.id, T("kang failed:") + f" {esc(e)}", reply_to=msg.message_id)
         return
 
     link = f"https://t.me/addstickers/{name}"
-    await say(ctx, chat.id, T("✅ added to your pack ({c} stickers so far).\n{l}", c=count, l=esc(link)), reply_to=msg.message_id)
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("📦 View Pack", url=link)
+    ]])
+    try:
+        await ctx.bot.send_message(
+            chat.id,
+            T("✅ added to your pack ({c} stickers so far).", c=count),
+            reply_to_message_id=msg.message_id,
+            allow_sending_without_reply=True,
+            reply_markup=kb,
+        )
+    except Exception:
+        # Fallback if reply-send fails
+        await ctx.bot.send_message(
+            chat.id,
+            T("✅ added to your pack ({c} stickers so far).\n{l}", c=count, l=esc(link)),
+            reply_markup=kb,
+        )
 
 
 def register(app):
     dual_command(app, "q", q_cmd)
     dual_command(app, "qr", qr_cmd)
     dual_command(app, "kang", kang_cmd)
-    # runs first (group -100) and never blocks other handlers
     app.add_handler(
         MessageHandler(
             filters.ChatType.GROUPS & filters.REPLY & (filters.TEXT | filters.CAPTION),
@@ -833,4 +983,5 @@ def register(app):
             block=False,
         ),
         group=-100,
-    )
+  )
+  
