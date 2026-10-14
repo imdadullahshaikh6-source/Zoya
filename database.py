@@ -1,6 +1,7 @@
 """MongoDB layer. Everything persists across restarts/redeploys."""
 import logging
 import time
+from datetime import datetime, timedelta
 
 from motor.motor_asyncio import AsyncIOMotorClient
 
@@ -401,21 +402,84 @@ async def logchannel_groups_for_channel(channel_id: int) -> list:
 # ─────────────── WordSeek Leaderboard ───────────────
 
 async def wordseek_add_score(chat_id: int, user_id: int, name: str, points: int):
+    """Add points to a user's total. Also stores a per-game event for time filtering."""
     if not isinstance(chat_id, int) or not isinstance(user_id, int): return
     _id = f"ws:{chat_id}:{user_id}"
+    now = time.time()
+
+    # Update total (upsert)
     await _db.wordseek_scores.update_one(
         {"_id": _id},
         {
             "$inc": {"score": points},
-            "$set": {"chat_id": chat_id, "user_id": user_id, "name": name, "last_played": time.time()}
+            "$set": {"chat_id": chat_id, "user_id": user_id, "name": name, "last_played": now}
         },
         upsert=True
     )
 
-async def wordseek_get_leaderboard(chat_id: int, limit: int = 10):
+    # Also log the event for time-based leaderboards
+    try:
+        await _db.wordseek_events.insert_one({
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "name": name,
+            "score": points,
+            "createdAt": now,
+        })
+    except Exception as e:
+        log.warning("[wordseek] event insert failed: %s", e)
+
+
+def _time_filter_start(time_key: str):
+    """Return (start_ts, end_ts) for the given time_key, or (None, None) for all."""
+    now = datetime.utcnow()
+    if time_key == "today":
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    elif time_key == "week":
+        start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    elif time_key == "month":
+        start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    elif time_key == "year":
+        start = now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    else:
+        return None, None
+    return start.timestamp(), None
+
+
+async def wordseek_get_leaderboard(chat_id: int, time_key: str = "all", limit: int = 10):
+    """
+    Returns list of {name, score} for the given chat.
+    time_key: 'today' | 'week' | 'month' | 'year' | 'all'
+    """
     if not isinstance(chat_id, int): return []
-    cursor = _db.wordseek_scores.find({"chat_id": chat_id}).sort("score", -1).limit(limit)
-    return [doc async for doc in cursor]
+
+    if time_key == "all":
+        cursor = _db.wordseek_scores.find({"chat_id": chat_id}).sort("score", -1).limit(limit)
+        docs = [doc async for doc in cursor]
+        return [{"name": d.get("name", "Unknown"), "score": d.get("score", 0)} for d in docs]
+
+    start_ts, _ = _time_filter_start(time_key)
+    if start_ts is None:
+        cursor = _db.wordseek_scores.find({"chat_id": chat_id}).sort("score", -1).limit(limit)
+        docs = [doc async for doc in cursor]
+        return [{"name": d.get("name", "Unknown"), "score": d.get("score", 0)} for d in docs]
+
+    # Aggregate events within the time window
+    pipeline = [
+        {"$match": {"chat_id": chat_id, "createdAt": {"$gte": start_ts}}},
+        {"$group": {"_id": "$user_id", "name": {"$last": "$name"}, "score": {"$sum": "$score"}}},
+        {"$sort": {"score": -1}},
+        {"$limit": limit},
+    ]
+    try:
+        results = [doc async for doc in _db.wordseek_events.aggregate(pipeline)]
+        return [{"name": r.get("name", "Unknown"), "score": r.get("score", 0)} for r in results]
+    except Exception as e:
+        log.warning("[wordseek] leaderboard aggregation failed: %s", e)
+        # Fallback: total scores
+        cursor = _db.wordseek_scores.find({"chat_id": chat_id}).sort("score", -1).limit(limit)
+        docs = [doc async for doc in cursor]
+        return [{"name": d.get("name", "Unknown"), "score": d.get("score", 0)} for d in docs]
 
 
 async def wordseek_get_user_score(chat_id: int, user_id: int) -> int:
@@ -423,6 +487,27 @@ async def wordseek_get_user_score(chat_id: int, user_id: int) -> int:
     _id = f"ws:{chat_id}:{user_id}"
     doc = await _db.wordseek_scores.find_one({"_id": _id})
     return doc.get("score", 0) if doc else 0
+
+
+# ─────────────── Stats helpers ───────────────
+
+async def wordseek_get_users_count() -> int:
+    """Total users who have played WordSeek (unique across all chats)."""
+    try:
+        return await _db.wordseek_scores.count_documents({})
+    except Exception as e:
+        log.warning("[stats] users count failed: %s", e)
+        return 0
+
+
+async def wordseek_get_groups_count() -> int:
+    """Total unique group chats that have played WordSeek."""
+    try:
+        ids = await _db.wordseek_scores.distinct("chat_id")
+        return len([c for c in ids if isinstance(c, int) and c < 0])
+    except Exception as e:
+        log.warning("[stats] groups count failed: %s", e)
+        return 0
 
 
 # ─────────────── WordSeek Word History ───────────────
