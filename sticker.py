@@ -694,25 +694,46 @@ def _is_videoish_document(doc) -> bool:
 
 
 async def _refresh_pack(ctx, user_id: int, pack_name: str):
+    """Force Telegram clients to drop their cached view of the pack."""
     try:
-        ss = await ctx.bot.get_sticker_set(pack_name)
-        if not ss or not ss.stickers:
-            return
-        newest = ss.stickers[-1]
-        try:
-            await ctx.bot.set_sticker_set_thumbnail(
-                user_id=user_id, name=pack_name, thumbnail=newest.file_id
-            )
-        except Exception as e:
-            log.debug("[kang] thumb refresh failed: %s", e)
-        try:
-            await ctx.bot.set_sticker_position_in_set(
-                sticker=newest.file_id, position=0, user_id=user_id
-            )
-        except Exception as e:
-            log.debug("[kang] position refresh failed: %s", e)
+        ss = await asyncio.wait_for(ctx.bot.get_sticker_set(pack_name), timeout=15)
     except Exception as e:
-        log.debug("[kang] refresh failed: %s", e)
+        log.debug("[kang] couldn't fetch set for refresh: %s", e)
+        return
+    if not ss or not ss.stickers:
+        return
+
+    newest = ss.stickers[-1]
+
+    # 1. Thumbnail nudge — use a static sticker as thumbnail if available
+    try:
+        thumb_id = None
+        for st in ss.stickers:
+            if not st.is_video and not st.is_animated:
+                thumb_id = st.file_id
+                break
+        if thumb_id:
+            await asyncio.wait_for(
+                ctx.bot.set_sticker_set_thumbnail(
+                    name=pack_name, user_id=user_id, thumbnail=thumb_id
+                ),
+                timeout=15,
+            )
+            log.info("[kang] thumb refreshed for %s", pack_name)
+    except Exception as e:
+        log.debug("[kang] thumb refresh failed: %s", e)
+
+    # 2. Move newest to position 0 — invalidates client-side caches
+    try:
+        await asyncio.wait_for(
+            ctx.bot.set_sticker_position_in_set(
+                sticker=newest.file_id, position=0
+            ),
+            timeout=15,
+        )
+        log.info("[kang] moved newest to position 0 for %s", pack_name)
+    except Exception as e:
+        log.debug("[kang] position refresh failed: %s", e)
 
 
 # ───────── .kang ─────────
@@ -745,8 +766,32 @@ async def _kang_impl(update, ctx, force_new_part: int | None = None):
     try:
         if src.sticker:
             s = src.sticker
-            file_arg = s.file_id
-            fmt = "video" if s.is_video else ("animated" if s.is_animated else "static")
+            if s.is_video:
+                # Video stickers must be re-uploaded via the bot so the file_id
+                # is owned by us — otherwise Telegram hangs on foreign pack ids.
+                try:
+                    tgfile = await asyncio.wait_for(ctx.bot.get_file(s.file_id), timeout=20)
+                    raw = await asyncio.wait_for(tgfile.download_as_bytearray(), timeout=40)
+                except asyncio.TimeoutError:
+                    raise RuntimeError("timed out downloading video sticker")
+                buf = io.BytesIO(bytes(raw))
+                buf.name = "kang.webm"
+                buf.seek(0)
+                tmp_msg = await ctx.bot.send_document(
+                    chat_id=chat.id,
+                    document=buf,
+                    disable_notification=True,
+                    filename="kang_sticker.webm",
+                )
+                file_arg = tmp_msg.document.file_id
+                try:
+                    await tmp_msg.delete()
+                except Exception:
+                    pass
+                fmt = "video"
+            else:
+                file_arg = s.file_id
+                fmt = "animated" if s.is_animated else "static"
             user_emoji = user_emoji or s.emoji or "🤔"
         elif src.photo:
             file_arg = await _photo_to_sticker_file(ctx, src.photo[-1])
@@ -799,8 +844,15 @@ async def _kang_impl(update, ctx, force_new_part: int | None = None):
             name = f"kang{part}_{base}_by_{me.username}"
             title = f"{user.first_name or 'My'}'s Pack" + (f" {part}" if part > 1 else "")
             try:
-                await ctx.bot.create_new_sticker_set(user.id, name, title[:64], stickers=[sticker_obj])
+                await asyncio.wait_for(
+                    ctx.bot.create_new_sticker_set(
+                        user.id, name, title[:64], stickers=[sticker_obj]
+                    ),
+                    timeout=30,
+                )
                 return name, part
+            except asyncio.TimeoutError:
+                raise RuntimeError("sticker pack creation timed out")
             except TelegramError as e:
                 if "already" in str(e).lower() or "invalid" in str(e).lower():
                     part += 1
@@ -817,7 +869,10 @@ async def _kang_impl(update, ctx, force_new_part: int | None = None):
             target_part = pack_num_arg
             target_name = f"kang{target_part}_{base}_by_{me.username}"
             try:
-                await ctx.bot.add_sticker_to_set(user.id, target_name, sticker=sticker_obj)
+                await asyncio.wait_for(
+                    ctx.bot.add_sticker_to_set(user.id, target_name, sticker=sticker_obj),
+                    timeout=30,
+                )
                 name = target_name
                 count = (rec.get("count", 0) + 1) if (rec and rec.get("name") == target_name) else 1
             except TelegramError as e:
@@ -831,7 +886,10 @@ async def _kang_impl(update, ctx, force_new_part: int | None = None):
         elif rec and rec.get("name") and rec_format == fmt:
             name = rec["name"]
             try:
-                await ctx.bot.add_sticker_to_set(user.id, name, sticker=sticker_obj)
+                await asyncio.wait_for(
+                    ctx.bot.add_sticker_to_set(user.id, name, sticker=sticker_obj),
+                    timeout=30,
+                )
                 count = rec.get("count", 0) + 1
                 await dbase.kang_set(user.id, name, count, part=rec.get("part", 1), format=fmt)
             except TelegramError as e:
@@ -846,7 +904,16 @@ async def _kang_impl(update, ctx, force_new_part: int | None = None):
             name, new_part = await _create(current_part + 1)
             count = 1
             await dbase.kang_set(user.id, name, count, part=new_part, format=fmt)
-    except TelegramError as e:
+    except (TelegramError, RuntimeError, asyncio.TimeoutError) as e:
+        log.warning("[kang] failed: %s", e)
+        try:
+            await status.delete()
+        except Exception:
+            pass
+        await say(ctx, chat.id, T("kang failed:") + f" {esc(e)}", reply_to=msg.message_id)
+        return
+    except Exception as e:
+        log.error("[kang] unexpected failure: %s", e, exc_info=True)
         try:
             await status.delete()
         except Exception:
@@ -911,7 +978,7 @@ async def unkang_cmd(update, ctx):
 
     status = await say(ctx, chat.id, T("⏳ removing from your pack..."), reply_to=msg.message_id)
     try:
-        await ctx.bot.delete_sticker_from_set(s.file_id)
+        await asyncio.wait_for(ctx.bot.delete_sticker_from_set(s.file_id), timeout=20)
     except TelegramError as e:
         try:
             await status.edit_text(T("❌ couldn't remove that sticker:") + f" {esc(e)}")
@@ -946,5 +1013,5 @@ def register(app):
             block=False,
         ),
         group=-100,
-            )
+    )
     
