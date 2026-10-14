@@ -131,9 +131,15 @@ async def _handle_anon_admin(update, ctx, action_type: str) -> bool:
 
     target, reason = await resolve_target(update, ctx)
     if not target:
-        await say(ctx, chat.id,
-                  T("reply to a user, or use /{c} @username | user id [reason]", c=action_type),
-                  reply_to=msg.message_id)
+        args = list(ctx.args or [])
+        if args and args[0].startswith("@"):
+            await say(ctx, chat.id, T("⚠️ @{u} ko detect nahi kar paya. Iski privacy settings strict ho sakti hain. "
+                                      "Kripya user ki Profile se ID copy karke dein ya uske message par Reply karein.", 
+                                      u=args[0]), reply_to=msg.message_id)
+        else:
+            await say(ctx, chat.id,
+                      T("reply to a user, or use /{c} @username | user id [reason]", c=action_type),
+                      reply_to=msg.message_id)
         return True
     if target.id == ctx.bot.id:
         await say(ctx, chat.id, T("i can't do that to myself 🙂"), reply_to=msg.message_id)
@@ -173,7 +179,13 @@ async def _target_or_complain(update, ctx, cmd):
     msg, chat = update.effective_message, update.effective_chat
     target, reason = await resolve_target(update, ctx)
     if not target:
-        await say(ctx, chat.id, T("reply to a user, or use /{c} @username | user id [reason]", c=cmd), reply_to=msg.message_id)
+        args = list(ctx.args or [])
+        if args and args[0].startswith("@"):
+            await say(ctx, chat.id, T("⚠️ @{u} ko detect nahi kar paya. Iski privacy settings strict ho sakti hain. "
+                                      "Kripya user ki Profile se ID copy karke dein ya uske message par Reply karein.", 
+                                      u=args[0]), reply_to=msg.message_id)
+        else:
+            await say(ctx, chat.id, T("reply to a user, or use /{c} @username | user id [reason]", c=cmd), reply_to=msg.message_id)
         return None, None
     if target.id == ctx.bot.id:
         await say(ctx, chat.id, T("i can't do that to myself 🙂"), reply_to=msg.message_id)
@@ -820,4 +832,4 @@ def register(app):
     app.add_handler(CallbackQueryHandler(mod_cb, pattern=r"^mod:"))
     # new anonymous verify buttons
     app.add_handler(CallbackQueryHandler(anon_mod_callback, pattern=r"^anonmod:"))
-            
+    
