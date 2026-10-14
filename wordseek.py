@@ -48,7 +48,7 @@ HELP_TXT = (
     "   🟥 letter not in the word\n"
     "• Max 30 guesses per game\n\n"
     "⚡ <b>Controls:</b>\n"
-    "<code>/hint</code> — Reveal one letter (costs points)\n"
+    "<code>/hint</code> — Reveal one letter (−5 pts)\n"
     "<code>/end</code> — End current game\n\n"
     "📊 <code>/leaderboard [today|week|month|year|all]</code>\n"
     "<code>/myscore</code> — personal score\n"
@@ -108,35 +108,13 @@ def is_valid_guess(word, length):
     matches = difflib.get_close_matches(word, dictionary, n=1, cutoff=0.7)
     return bool(matches)
 
-def calculate_points(level, hints_taken):
-    """
-    Hush-style scoring:
-      - Base points by difficulty level
-      - Hint penalty per hint used
-      - Capped at a % of base
-      - Minimum 1 point
-    No time penalty (like Hush).
-    """
-    if level == 1:        # Easy
-        base = 5
-        per_hint = 0.25
-        max_deduct_pct = 0.3
-    elif level == 2:      # Medium
-        base = 10
-        per_hint = 0.5
-        max_deduct_pct = 0.4
-    else:                 # Hard
-        base = 20
-        per_hint = 0.75
-        max_deduct_pct = 0.4
-
-    max_deduct = base * max_deduct_pct
-    deduction = min(hints_taken * per_hint, max_deduct)
-
-    return max(round(base - deduction), 1)
-
-def get_hint_penalty(level):
-    return {1: 0.25, 2: 0.5, 3: 0.75}.get(level, 0.5)
+# 👇 WORdSEEK ORIGINAL SCORING SYSTEM (Hush hata diya)
+def calculate_points(length, time_taken, hints_taken):
+    base = 30 if length == 4 else (50 if length == 5 else 80)
+    time_penalty = int(time_taken // 15)   # 15 sec = 1 pt
+    hint_penalty = hints_taken * 5
+    final_points = base - time_penalty - hint_penalty
+    return max(10, min(base, final_points))
 
 def get_level_word_list(level, length):
     if length == 4:
@@ -222,7 +200,6 @@ async def new_game(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         'status': 'active',
         'hints_taken': 0,
         'start_time': time.time(),
-        'level': chat_levels.get(chat_id, 1),   # 👈 store level for scoring
     }
 
     board_text = f"<blockquote><b>Game started! Guess the {length}-letter word!</b></blockquote>\n\n"
@@ -264,8 +241,9 @@ async def guess_word(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         user_name = update.effective_user.first_name
 
-        # 👇 Hush-style scoring
-        points = calculate_points(game.get('level', 1), game['hints_taken'])
+        # 👇 WordSeek original scoring (time + hints)
+        time_taken = time.time() - game.get('start_time', time.time())
+        points = calculate_points(game['length'], time_taken, game['hints_taken'])
 
         await dbase.wordseek_add_score(chat_id, user_id, user_name, points)
 
@@ -330,13 +308,10 @@ async def hint_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     hint_letter = word[hint_index].upper()
     game['hints_taken'] = game.get('hints_taken', 0) + 1
 
-    level = game.get('level', 1)
-    penalty = get_hint_penalty(level)
-
     await ctx.bot.send_message(
         chat_id,
         f"💡 <b>Hint:</b> Letter at position <b>{hint_index + 1}</b> is <b>{hint_letter}</b>.\n"
-        f"<i>(−{penalty} pts from your score if you win!)</i>",
+        f"<i>(This will cost you 5 points if you win!)</i>",
         parse_mode='HTML'
     )
 
