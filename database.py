@@ -21,7 +21,6 @@ async def init(uri: str, name: str):
     await _db.warns.create_index([("chat_id", 1), ("user_id", 1)])
     await _db.members.create_index("chat_id")
 
-    # ✅ SAFE: filters index
     try:
         await _db.filters.create_index([("chat_id", 1), ("keyword", 1)], unique=True)
         log.info("[db] filters index ready ✅")
@@ -34,7 +33,6 @@ async def init(uri: str, name: str):
         except Exception as e2:
             log.error("[db] filters index still failed: %s", e2)
 
-    # ✅ SAFE: guardian index
     try:
         await _db.guardian.create_index("chat_id", unique=True)
         log.info("[db] guardian index ready ✅")
@@ -50,28 +48,24 @@ async def init(uri: str, name: str):
     await _db.clean.create_index("chat_id", unique=True)
     await _db.locks.create_index("chat_id", unique=True)
 
-    # ✅ logchannels index
     try:
         await _db.logchannels.create_index("chat_id", unique=True)
         log.info("[db] logchannels index ready ✅")
     except Exception as e:
         log.warning("[db] logchannels index creation failed: %s", e)
 
-    # ✅ WordSeek Leaderboard index
     try:
         await _db.wordseek_scores.create_index([("chat_id", 1), ("score", -1)])
         log.info("[db] wordseek_scores index ready ✅")
     except Exception as e:
         log.warning("[db] wordseek_scores index creation failed: %s", e)
 
-    # ✅ WordSeek History index
     try:
         await _db.wordseek_history.create_index("chat_id", unique=True)
         log.info("[db] wordseek_history index ready ✅")
     except Exception as e:
         log.warning("[db] wordseek_history index creation failed: %s", e)
 
-    # ✅ Kangs index (sticker packs)
     try:
         await _db.kangs.create_index("name")
         log.info("[db] kangs index ready ✅")
@@ -179,6 +173,8 @@ async def random_members(chat_id: int, count: int):
     return [doc async for doc in cursor]
 
 
+# ───────── KANG (single current pack + list of all packs) ─────────
+
 async def kang_get(user_id: int):
     return await _db.kangs.find_one({"_id": user_id})
 
@@ -189,6 +185,26 @@ async def kang_set(user_id: int, name: str, count: int, part: int | None = None,
     if format is not None:
         fields["format"] = format
     await _db.kangs.update_one({"_id": user_id}, {"$set": fields}, upsert=True)
+
+
+async def kang_list_packs(user_id: int) -> list:
+    """Return list of all packs this user has created via .kang."""
+    doc = await _db.kangs.find_one({"_id": user_id})
+    return doc.get("packs", []) if doc else []
+
+
+async def kang_upsert_pack(user_id: int, name: str, count: int, part: int, format: str):
+    """Add or update a pack entry in the user's pack list."""
+    await _db.kangs.update_one({"_id": user_id}, {"$pull": {"packs": {"name": name}}})
+    await _db.kangs.update_one(
+        {"_id": user_id},
+        {"$push": {"packs": {"name": name, "count": count, "part": part, "format": format}}},
+        upsert=True,
+    )
+
+
+async def kang_delete_pack(user_id: int, name: str):
+    await _db.kangs.update_one({"_id": user_id}, {"$pull": {"packs": {"name": name}}})
 
 
 # ─────────────── filters ───────────────
@@ -391,12 +407,7 @@ async def wordseek_add_score(chat_id: int, user_id: int, name: str, points: int)
         {"_id": _id},
         {
             "$inc": {"score": points},
-            "$set": {
-                "chat_id": chat_id,
-                "user_id": user_id,
-                "name": name,
-                "last_played": time.time()
-            }
+            "$set": {"chat_id": chat_id, "user_id": user_id, "name": name, "last_played": time.time()}
         },
         upsert=True
     )
@@ -420,10 +431,7 @@ async def wordseek_add_history(chat_id: int, word: str):
     if not isinstance(chat_id, int): return
     await _db.wordseek_history.update_one(
         {"chat_id": chat_id},
-        {
-            "$addToSet": {"words": word.lower()},
-            "$set": {"updated": time.time()}
-        },
+        {"$addToSet": {"words": word.lower()}, "$set": {"updated": time.time()}},
         upsert=True
     )
 
