@@ -108,13 +108,16 @@ def is_valid_guess(word, length):
     matches = difflib.get_close_matches(word, dictionary, n=1, cutoff=0.7)
     return bool(matches)
 
-# 👇 WORdSEEK ORIGINAL SCORING SYSTEM (Hush hata diya)
-def calculate_points(length, time_taken, hints_taken):
-    base = 30 if length == 4 else (50 if length == 5 else 80)
-    time_penalty = int(time_taken // 15)   # 15 sec = 1 pt
-    hint_penalty = hints_taken * 5
-    final_points = base - time_penalty - hint_penalty
-    return max(10, min(base, final_points))
+# 👇 NEW SCORING: Points = 30 - guesses_used - (hints * 5)
+def calculate_points(guesses_used, hints_taken):
+    """
+    Base 30 = max guesses limit.
+    Points = 30 - guesses_used - (hints_taken * 5)
+    Minimum 1 point.
+    """
+    base = 30
+    points = base - guesses_used - (hints_taken * 5)
+    return max(1, points)
 
 def get_level_word_list(level, length):
     if length == 4:
@@ -241,9 +244,8 @@ async def guess_word(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         user_name = update.effective_user.first_name
 
-        # 👇 WordSeek original scoring (time + hints)
-        time_taken = time.time() - game.get('start_time', time.time())
-        points = calculate_points(game['length'], time_taken, game['hints_taken'])
+        # 👇 NEW: Points = 30 - guesses_used - (hints * 5)
+        points = calculate_points(guess_count, game['hints_taken'])
 
         await dbase.wordseek_add_score(chat_id, user_id, user_name, points)
 
@@ -258,6 +260,7 @@ async def guess_word(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         win_text = (
             f"🎉 <b>Congrats! You guessed it correctly.</b>\n"
             f"<b>Correct Word:</b> {text}\n"
+            f"<b>Guesses used:</b> {guess_count}\n"
             f"<b>Added {points} to the leaderboard.</b>"
         )
 
@@ -311,7 +314,7 @@ async def hint_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await ctx.bot.send_message(
         chat_id,
         f"💡 <b>Hint:</b> Letter at position <b>{hint_index + 1}</b> is <b>{hint_letter}</b>.\n"
-        f"<i>(This will cost you 5 points if you win!)</i>",
+        f"<i>(−5 points from your final score!)</i>",
         parse_mode='HTML'
     )
 
