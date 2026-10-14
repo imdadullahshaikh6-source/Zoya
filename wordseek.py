@@ -6,10 +6,9 @@ import html
 import os
 import platform
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import (
-    ContextTypes, CommandHandler, MessageHandler,
-    CallbackQueryHandler, filters
+    ContextTypes, CommandHandler, MessageHandler, filters
 )
 import words
 import database as dbase
@@ -40,7 +39,8 @@ HELP_TXT = (
     "<blockquote>🔍 𝙒𝙤𝙧𝙙𝙎𝙚𝙚𝙠 🔍</blockquote>\n\n"
     "<i>🎯 The Ultimate Word Guessing Challenge</i>\n\n"
     "🎮 <b>How to Play:</b>\n"
-    "• Start with <code>/new4</code>, <code>/new5</code> or <code>/new6</code>\n"
+    "• Start with <code>/new</code>, <code>/new4</code>, <code>/new5</code> or <code>/new6</code>\n"
+    "• <code>/new</code> = default 5-letter game\n"
     "• Type your guess (just the word)\n"
     "• Feedback:\n"
     "   🟩 correct letter, correct spot\n"
@@ -48,7 +48,7 @@ HELP_TXT = (
     "   🟥 letter not in the word\n"
     "• Max 30 guesses per game\n\n"
     "⚡ <b>Controls:</b>\n"
-    "<code>/hint</code> — Reveal one letter (−5 pts)\n"
+    "<code>/hint</code> — Reveal one letter (costs points)\n"
     "<code>/end</code> — End current game\n\n"
     "📊 <code>/leaderboard [today|week|month|year|all]</code>\n"
     "<code>/myscore</code> — personal score\n"
@@ -56,6 +56,7 @@ HELP_TXT = (
 )
 
 COMMANDS = [
+    ("new", "Start a default 5-letter WordSeek game"),
     ("new4", "Start a 4-letter WordSeek game"),
     ("new5", "Start a 5-letter WordSeek game"),
     ("new6", "Start a 6-letter WordSeek game"),
@@ -107,12 +108,35 @@ def is_valid_guess(word, length):
     matches = difflib.get_close_matches(word, dictionary, n=1, cutoff=0.7)
     return bool(matches)
 
-def calculate_points(length, time_taken, hints_taken):
-    base = 30 if length == 4 else (50 if length == 5 else 80)
-    time_penalty = int(time_taken // 15)   # 15 sec = 1 pt
-    hint_penalty = hints_taken * 5
-    final_points = base - time_penalty - hint_penalty
-    return max(10, min(base, final_points))
+def calculate_points(level, hints_taken):
+    """
+    Hush-style scoring:
+      - Base points by difficulty level
+      - Hint penalty per hint used
+      - Capped at a % of base
+      - Minimum 1 point
+    No time penalty (like Hush).
+    """
+    if level == 1:        # Easy
+        base = 5
+        per_hint = 0.25
+        max_deduct_pct = 0.3
+    elif level == 2:      # Medium
+        base = 10
+        per_hint = 0.5
+        max_deduct_pct = 0.4
+    else:                 # Hard
+        base = 20
+        per_hint = 0.75
+        max_deduct_pct = 0.4
+
+    max_deduct = base * max_deduct_pct
+    deduction = min(hints_taken * per_hint, max_deduct)
+
+    return max(round(base - deduction), 1)
+
+def get_hint_penalty(level):
+    return {1: 0.25, 2: 0.5, 3: 0.75}.get(level, 0.5)
 
 def get_level_word_list(level, length):
     if length == 4:
@@ -174,17 +198,31 @@ async def new_game(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     text = update.message.text
-    command = text.split('@')[0].lower()
-    if command.endswith('4'): length = 4
-    elif command.endswith('5'): length = 5
-    elif command.endswith('6'): length = 6
-    else: return
+    command = text.split('@')[0].lower().lstrip('./')
+
+    # 👇 /new or .new → default 5 letters
+    if command == "new":
+        length = 5
+    elif command.endswith('4'):
+        length = 4
+    elif command.endswith('5'):
+        length = 5
+    elif command.endswith('6'):
+        length = 6
+    else:
+        return
 
     word = await get_word_for_game(chat_id, length)
+
     active_games[chat_id] = {
-        'word': word, 'length': length, 'guesses': [], 'max_guesses': 30,
-        'status': 'active', 'hints_taken': 0,
-        'start_time': time.time()
+        'word': word,
+        'length': length,
+        'guesses': [],
+        'max_guesses': 30,
+        'status': 'active',
+        'hints_taken': 0,
+        'start_time': time.time(),
+        'level': chat_levels.get(chat_id, 1),   # 👈 store level for scoring
     }
 
     board_text = f"<blockquote><b>Game started! Guess the {length}-letter word!</b></blockquote>\n\n"
@@ -226,8 +264,8 @@ async def guess_word(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         user_name = update.effective_user.first_name
 
-        time_taken = time.time() - game.get('start_time', time.time())
-        points = calculate_points(game['length'], time_taken, game['hints_taken'])
+        # 👇 Hush-style scoring
+        points = calculate_points(game.get('level', 1), game['hints_taken'])
 
         await dbase.wordseek_add_score(chat_id, user_id, user_name, points)
 
@@ -292,12 +330,17 @@ async def hint_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     hint_letter = word[hint_index].upper()
     game['hints_taken'] = game.get('hints_taken', 0) + 1
 
+    level = game.get('level', 1)
+    penalty = get_hint_penalty(level)
+
     await ctx.bot.send_message(
         chat_id,
         f"💡 <b>Hint:</b> Letter at position <b>{hint_index + 1}</b> is <b>{hint_letter}</b>.\n"
-        f"<i>(−5 points if you win!)</i>", parse_mode='HTML')
+        f"<i>(−{penalty} pts from your score if you win!)</i>",
+        parse_mode='HTML'
+    )
 
-# ---------- Leaderboard (with time filter) ----------
+# ---------- Leaderboard ----------
 async def leaderboard_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     args = ctx.args or []
@@ -308,7 +351,7 @@ async def leaderboard_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     scores = await dbase.wordseek_get_leaderboard(chat_id, time_key)
 
     if not scores:
-        await ctx.bot.send_message(chat_id, f"🏆 No scores yet ({time_key})! Start with /new5."); return
+        await ctx.bot.send_message(chat_id, f"🏆 No scores yet ({time_key})! Start with /new."); return
 
     label = {
         "today": "Today", "week": "This Week", "month": "This Month",
@@ -336,7 +379,7 @@ async def myscore_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if score == 0:
         await ctx.bot.send_message(
             chat_id,
-            f"📊 <b>{user_name}</b>, no score yet.\n<code>/new5</code> to start!",
+            f"📊 <b>{user_name}</b>, no score yet.\n<code>/new</code> to start!",
             parse_mode='HTML'
         )
         return
@@ -370,7 +413,6 @@ async def suggestword_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Check existing
     normalized = word.lower()
     existing = set()
     for lst in (words.WORDS_4, words.WORDS_5, words.WORDS_6):
@@ -447,7 +489,6 @@ async def stats_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         load_avg = (0, 0, 0)
         cpu_model = platform.processor() or "Unknown"
 
-    # Bot process memory (best effort)
     try:
         import resource
         rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
@@ -516,8 +557,9 @@ async def end_game(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ---------- Register ----------
 def register(app):
-    app.add_handler(CommandHandler(["new4", "new5", "new6"], new_game))
-    app.add_handler(MessageHandler(filters.Regex(r'^[./]new[456]$'), new_game))
+    # /new + /new4 + /new5 + /new6
+    app.add_handler(CommandHandler(["new", "new4", "new5", "new6"], new_game))
+    app.add_handler(MessageHandler(filters.Regex(r'^[./]new[456]?$'), new_game))
 
     app.add_handler(CommandHandler("hint", hint_cmd))
     app.add_handler(MessageHandler(filters.Regex(r'^[./]hint$'), hint_cmd))
