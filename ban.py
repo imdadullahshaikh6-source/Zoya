@@ -133,8 +133,8 @@ async def _handle_anon_admin(update, ctx, action_type: str) -> bool:
     if not target:
         args = list(ctx.args or [])
         if args and args[0].startswith("@"):
-            await say(ctx, chat.id, T("⚠️ @{u} ko detect nahi kar paya. Iski privacy settings strict ho sakti hain. "
-                                      "Kripya user ki Profile se ID copy karke dein ya uske message par Reply karein.", 
+            await say(ctx, chat.id, T("⚠️ Could not detect @{u}. Their privacy settings might be strict. "
+                                      "Please copy their ID from their profile or reply to their message.", 
                                       u=args[0]), reply_to=msg.message_id)
         else:
             await say(ctx, chat.id,
@@ -181,8 +181,8 @@ async def _target_or_complain(update, ctx, cmd):
     if not target:
         args = list(ctx.args or [])
         if args and args[0].startswith("@"):
-            await say(ctx, chat.id, T("⚠️ @{u} ko detect nahi kar paya. Iski privacy settings strict ho sakti hain. "
-                                      "Kripya user ki Profile se ID copy karke dein ya uske message par Reply karein.", 
+            await say(ctx, chat.id, T("⚠️ Could not detect @{u}. Their privacy settings might be strict. "
+                                      "Please copy their ID from their profile or reply to their message.", 
                                       u=args[0]), reply_to=msg.message_id)
         else:
             await say(ctx, chat.id, T("reply to a user, or use /{c} @username | user id [reason]", c=cmd), reply_to=msg.message_id)
