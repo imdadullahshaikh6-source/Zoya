@@ -1,17 +1,9 @@
 """Sticker plugin:
-.q / .qr  — render the replied-to message as a Telegram-style quote sticker
-.kang     — steal a replied sticker/photo into the user's own auto-growing pack
-
-Quote commands:
-  .q              → normal quote sticker
-  .q r / .q reply → quote sticker sent as a reply to the source message
-  .qr             → shortcut for .q r
-
-Nested quotes (.qr / .q r): if the replied-to message was itself a reply, the
-message it was replying to is shown inside the quote sticker.
-NOTE: the Telegram Bot API never includes the parent of a replied message, so
-the bot remembers "message -> parent" for every reply it sees in a group
-(see _parent_cache). Only replies sent while the bot was online can be nested."""
+.q / .qr  — quote sticker
+.kang     — steal media into your pack
+.kangs    — list / delete your sticker packs
+.unkang   — remove a sticker from your pack
+"""
 from __future__ import annotations
 
 import asyncio
@@ -27,13 +19,18 @@ from collections import OrderedDict
 import httpx
 from fontTools.ttLib import TTFont
 from PIL import Image, ImageDraw, ImageFont
-from telegram import InputSticker, MessageEntity
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputSticker,
+    MessageEntity,
+)
 from telegram.error import TelegramError
-from telegram.ext import MessageHandler, filters
+from telegram.ext import CallbackQueryHandler, MessageHandler, filters
 
 import database as dbase
 from common import (
-    T, dual_command, esc, say,
+    T, dual_command, esc, say, q, B,
     QUOTE_API, QUOTE_API_FALLBACKS, QUOTE_BG,
     QUOTE_TIMEOUT, QUOTE_TOTAL_TIMEOUT,
 )
@@ -42,13 +39,18 @@ log = logging.getLogger("sticker")
 
 HELP_TXT = (
     "<b>✦ stickers</b>\n\n"
-    "/q (or .q) — reply to any message to turn it into a quote sticker\n"
-    "/qr (or .qr, /q r) — nested quote: also shows the message that the quoted "
-    "message was replying to, and is sent as a reply to the original message\n"
-    "/kang (or .kang) [emoji] — reply to a sticker or photo to add it to your "
-    "own sticker pack."
+    "/q (or .q) — quote a message as a sticker\n"
+    "/qr (or .qr, /q r) — nested quote\n"
+    "/kang (or .kang) [emoji] — add replied sticker/photo to your pack\n"
+    "/kangs (or .kangs) — list / delete your sticker packs\n"
+    "/unkang (or .unkang) — remove a sticker from your pack"
 )
-COMMANDS = [("q", "Quote a message as a sticker"), ("kang", "Steal a sticker into your pack")]
+COMMANDS = [
+    ("q", "Quote a message as a sticker"),
+    ("kang", "Steal a sticker into your pack"),
+    ("kangs", "List your sticker packs"),
+    ("unkang", "Remove a sticker from your pack"),
+]
 
 MAX_SIDE = 512
 EMOJI_RE = re.compile(r"^[\U0001F000-\U0001FAFF\u2600-\u27BF\u2190-\u21FF\u2B00-\u2BFF]+$")
@@ -81,7 +83,7 @@ _ENTITY_TYPE_STR = {
 }
 
 
-# ───────── Pillow helpers (fallback + .kang) ─────────
+# ───────── Pillow helpers ─────────
 FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 FONT_REGULAR = os.path.join(FONT_DIR, "DejaVuSans.ttf")
 FONT_BOLD = os.path.join(FONT_DIR, "DejaVuSans-Bold.ttf")
@@ -246,9 +248,6 @@ def _from_block(user) -> dict:
 
 
 def _build_reply_block(reply) -> dict | None:
-    """Build the replyMessage sub-object in the shape LyoSU quote-api expects.
-    Needs a top-level `name` field — without it the API silently ignores the
-    nested parent."""
     if reply is None:
         return None
     text = _text_of(reply)
@@ -276,7 +275,7 @@ def _build_message(msg, avatar: str | None = None, reply_override: dict | None =
     reply_block = _build_reply_block(getattr(msg, "reply_to_message", None))
     if reply_block:
         block["replyMessage"] = reply_block
-    if reply_override:                      # nested quote supplied by .qr
+    if reply_override:
         block["replyMessage"] = reply_override
     return block
 
@@ -306,12 +305,10 @@ async def _try_one_api(client: httpx.AsyncClient, url: str, payload: dict) -> by
         if not data or len(data) < 100:
             log.warning("⚠️ %s returned empty body", url)
             return None
-
         try:
             j = json.loads(data)
         except Exception:
             j = None
-
         if isinstance(j, dict):
             img_b64 = None
             if isinstance(j.get("result"), dict):
@@ -327,7 +324,6 @@ async def _try_one_api(client: httpx.AsyncClient, url: str, payload: dict) -> by
                 except Exception as e:
                     log.warning("⚠️ %s base64 decode failed: %s", url, e)
                     return None
-
         log.info("✅ quote built via %s (%d bytes)", url, len(data))
         return data
     except Exception as e:
@@ -339,17 +335,14 @@ async def _build_quote_via_api(ctx, src_msg, sender, reply_override: dict | None
     text = _text_of(src_msg)
     if not text:
         return None
-
     avatar_url = await _avatar_url(ctx, sender.id)
     log.info("[sticker] avatar url: %s", "yes" if avatar_url else "none")
-
     payload = _build_payload(src_msg, avatar_url, reply_override)
     msg0 = payload["messages"][0]
     if "replyMessage" in msg0:
         log.info("[sticker] nested reply: %r", msg0["replyMessage"].get("text", "")[:50])
     else:
         log.info("[sticker] no nested reply")
-
     urls = [QUOTE_API] + _FALLBACKS
     timeout = httpx.Timeout(QUOTE_TIMEOUT)
     async with httpx.AsyncClient(timeout=timeout) as client:
@@ -456,9 +449,6 @@ async def _build_quote_sticker(ctx, src_msg, sender, reply_override: dict | None
 
 
 # ───────── nested-quote parent cache ─────────
-# Bot API never sends "reply_to_message.reply_to_message", so we remember the
-# parent of every reply we see: (chat_id, message_id) -> replyMessage block.
-
 _PARENT_CACHE_MAX = 20000
 _parent_cache: "OrderedDict[tuple[int, int], dict]" = OrderedDict()
 
@@ -486,7 +476,6 @@ def _media_label(m) -> str | None:
 
 
 def _snapshot_parent(parent) -> dict | None:
-    """replyMessage block (LyoSU quote-api shape) for a parent message."""
     if parent is None:
         return None
     text = _text_of(parent)
@@ -494,7 +483,7 @@ def _snapshot_parent(parent) -> dict | None:
     if not text:
         text = _media_label(parent) or ""
     if not text:
-        return None                      # service message / unsupported -> skip
+        return None
     user = getattr(parent, "from_user", None)
     chat_obj = getattr(parent, "sender_chat", None)
     if user is None and chat_obj is not None:
@@ -520,12 +509,11 @@ def _remember_parent(chat_id: int, msg_id: int, block: dict) -> None:
 
 
 async def _cache_reply_watcher(update, ctx):
-    """Silently remembers the parent of every reply in groups."""
     m = update.effective_message
     chat = update.effective_chat
     if not m or not chat or not m.reply_to_message:
         return
-    if not _text_of(m):                  # only text/caption messages can be quoted
+    if not _text_of(m):
         return
     block = _snapshot_parent(m.reply_to_message)
     if block:
@@ -533,7 +521,7 @@ async def _cache_reply_watcher(update, ctx):
 
 
 def _find_parent_block(chat_id: int, src) -> dict | None:
-    live = getattr(src, "reply_to_message", None)       # present on some setups
+    live = getattr(src, "reply_to_message", None)
     if live is not None:
         block = _snapshot_parent(live)
         if block:
@@ -541,20 +529,9 @@ def _find_parent_block(chat_id: int, src) -> dict | None:
     return _parent_cache.get((chat_id, src.message_id))
 
 
-# ───────── parent-message helper ─────────
-
 async def _ensure_parent(ctx, chat_id: int, src):
-    """Make sure src.reply_to_message is populated if src itself is a reply.
-
-    PTB exposes the parent in several possible places depending on version:
-      • src.reply_to_message  (full Message — preferred)
-      • src.external_reply.message_id  (for channel replies)
-      • src.reply_to_message_id  (some forks)
-    If none of them are set, we cannot render a nested quote.
-    """
     if getattr(src, "reply_to_message", None):
         return src.reply_to_message
-
     parent_id = None
     ext = getattr(src, "external_reply", None)
     if ext is not None:
@@ -562,16 +539,12 @@ async def _ensure_parent(ctx, chat_id: int, src):
     if not parent_id:
         parent_id = getattr(src, "reply_to_message_id", None)
     if not parent_id:
-        # Some PTB versions keep the ID under reply_to_message itself (as an
-        # incompletely-populated Message)
         rt = getattr(src, "reply_to_message", None)
         if rt is not None:
             parent_id = getattr(rt, "message_id", None)
-
     log.info("[sticker] parent_id detected: %r", parent_id)
     if not parent_id:
         return None
-
     try:
         fetched = await ctx.bot.get_messages(chat_id=chat_id, message_ids=parent_id)
         if isinstance(fetched, list):
@@ -582,7 +555,7 @@ async def _ensure_parent(ctx, chat_id: int, src):
         return None
 
 
-# ───────── command handler ─────────
+# ───────── quote command handler ─────────
 
 def _cooldown_left(uid: int) -> float:
     return max(0.0, _last_quote.get(uid, 0.0) + COOLDOWN - time.time())
@@ -599,25 +572,18 @@ async def _quote_and_send(update, ctx, as_reply: bool, nested: bool = False):
         await say(ctx, chat.id, T("only text messages can be quoted."), reply_to=msg.message_id)
         return
 
-    # ── Populate parent (for nested quote) ──
-    log.info("[sticker] src.reply_to_message present: %s", bool(getattr(src, "reply_to_message", None)))
     parent = await _ensure_parent(ctx, chat.id, src)
     if parent and parent is not getattr(src, "reply_to_message", None):
         try:
             src.reply_to_message = parent
         except Exception:
             pass
-    if parent:
-        log.info("[sticker] parent text: %r", _text_of(parent)[:60])
-    else:
-        log.info("[sticker] no parent message found")
 
     reply_override = None
     nested_missing = False
     if nested:
         reply_override = _find_parent_block(chat.id, src)
         nested_missing = reply_override is None
-        log.info("[sticker] nested requested, parent block found: %s", not nested_missing)
 
     left = _cooldown_left(user.id)
     if left > 0:
@@ -642,7 +608,6 @@ async def _quote_and_send(update, ctx, as_reply: bool, nested: bool = False):
             _build_quote_sticker(ctx, src, sender, reply_override), timeout=TOTAL_TIMEOUT
         )
     except asyncio.TimeoutError:
-        log.error("[sticker] total timeout reached")
         auto_task.cancel()
         try:
             await status.edit_text(T("❌ quote generation timed out. try again."))
@@ -650,7 +615,6 @@ async def _quote_and_send(update, ctx, as_reply: bool, nested: bool = False):
             pass
         return
     except Exception as e:
-        log.error("[sticker] failed: %s", e, exc_info=True)
         auto_task.cancel()
         try:
             await status.edit_text(T("❌ couldn't build that sticker:") + f" {esc(e)}")
@@ -676,7 +640,6 @@ async def _quote_and_send(update, ctx, as_reply: bool, nested: bool = False):
                 allow_sending_without_reply=True,
             )
             sent = True
-            log.info("[sticker] quote sent as reply to %s", src.message_id)
         except Exception as e:
             log.warning("[sticker] reply-send failed, retrying without reply: %s", e)
             buf.seek(0)
@@ -684,9 +647,7 @@ async def _quote_and_send(update, ctx, as_reply: bool, nested: bool = False):
     if not sent:
         try:
             await ctx.bot.send_sticker(chat.id, buf)
-            log.info("[sticker] quote sent to chat %s", chat.id)
         except Exception as e:
-            log.error("[sticker] send failed: %s", e)
             await say(ctx, chat.id, T("❌ couldn't send that sticker:") + f" {esc(e)}", reply_to=msg.message_id)
 
     if nested and nested_missing:
@@ -765,67 +726,235 @@ async def kang_cmd(update, ctx):
     sticker_obj = InputSticker(sticker=file_arg, emoji_list=[emoji], format=fmt)
 
     async def _create(part: int):
-        name = f"a{part}_{base}_by_{me.username}"
+        name = f"kang{part}_{base}_by_{me.username}"
         title = f"{user.first_name or 'My'}'s Pack" + (f" {part}" if part > 1 else "")
         await ctx.bot.create_new_sticker_set(user.id, name, title[:64], stickers=[sticker_obj])
         return name
 
+    pack_part = 1
     try:
         rec = await dbase.kang_get(user.id)
         if rec and rec.get("name"):
+            pack_part = rec.get("part", 1)
             try:
                 await ctx.bot.add_sticker_to_set(user.id, rec["name"], sticker=sticker_obj)
                 name, count = rec["name"], rec.get("count", 0) + 1
-                await dbase.kang_set(user.id, name, count, part=rec.get("part", 1))
-                
-                # ✨ REFRESH MAGIC: Thumbnail update karne se client refresh ho jata hai
+                pack_part = rec.get("part", 1)
+                await dbase.kang_set(user.id, name, count, part=pack_part, format=rec.get("format", fmt))
                 try:
                     await ctx.bot.set_sticker_set_thumbnail(user.id, name, thumbnail=sticker_obj.sticker)
                     log.info("[sticker] pack refreshed via thumbnail: %s", name)
                 except Exception as e:
                     log.warning("[sticker] thumbnail refresh failed (existing): %s", e)
-                    
             except TelegramError as e:
                 s = str(e).lower()
                 if "invalid" in s or "too much" in s or "too many" in s:
                     part = rec.get("part", 1) + 1
                     name = await _create(part)
                     count = 1
-                    await dbase.kang_set(user.id, name, count, part=part)
-                    
-                    # ✨ REFRESH MAGIC for new part
+                    pack_part = part
+                    await dbase.kang_set(user.id, name, count, part=part, format=fmt)
                     try:
                         await ctx.bot.set_sticker_set_thumbnail(user.id, name, thumbnail=sticker_obj.sticker)
-                        log.info("[sticker] new pack part refreshed: %s", name)
-                    except Exception as e:
-                        log.warning("[sticker] thumbnail refresh failed (new part): %s", e)
+                    except Exception:
+                        pass
                 else:
                     raise
         else:
             name = await _create(1)
             count = 1
-            await dbase.kang_set(user.id, name, count, part=1)
-            
-            # ✨ REFRESH MAGIC for brand new pack
+            pack_part = 1
+            await dbase.kang_set(user.id, name, count, part=1, format=fmt)
             try:
                 await ctx.bot.set_sticker_set_thumbnail(user.id, name, thumbnail=sticker_obj.sticker)
-                log.info("[sticker] brand new pack refreshed: %s", name)
-            except Exception as e:
-                log.warning("[sticker] thumbnail refresh failed (new pack): %s", e)
-                
+            except Exception:
+                pass
     except TelegramError as e:
         await say(ctx, chat.id, T("kang failed:") + f" {esc(e)}", reply_to=msg.message_id)
         return
 
+    # 🔑 Track this pack in the user's pack list (for .kangs)
+    await dbase.kang_upsert_pack(user.id, name, count, pack_part, fmt)
+
+    # 🔑 Blue button instead of plain link
     link = f"https://t.me/addstickers/{name}"
-    await say(ctx, chat.id, T("✅ added to your pack ({c} stickers so far).\n{l}", c=count, l=esc(link)), reply_to=msg.message_id)
+    kb = InlineKeyboardMarkup([[
+        B("📦 𝙑𝙞𝙚𝙬 𝙥𝙖𝙘𝙠", url=link, style="primary")
+    ]])
+    await ctx.bot.send_message(
+        chat.id,
+        q(T("✅ added to your pack ({c} stickers so far).", c=count)),
+        parse_mode="HTML",
+        reply_to_message_id=msg.message_id,
+        allow_sending_without_reply=True,
+        reply_markup=kb,
+    )
+
+
+# ───────── .kangs (list + delete) ─────────
+
+def _pack_icon(fmt: str) -> str:
+    return {"static": "🖼", "video": "🎬", "animated": "✨"}.get(fmt, "📦")
+
+
+def _short_pack_label(pack: dict) -> str:
+    name = pack.get("name", "")
+    m = re.match(r"kang(\d+)_", name)
+    part = m.group(1) if m else "?"
+    icon = _pack_icon(pack.get("format", "static"))
+    return f"{icon} Pack {part}"
+
+
+def _build_kangs_view(packs: list, note: str | None = None) -> tuple[str, InlineKeyboardMarkup | None]:
+    if not packs:
+        return T("you don't have any sticker packs yet.\nuse /kang to create your first one!"), None
+    lines = [T("<b>✦ your sticker packs</b>\n")]
+    rows = []
+    for i, p in enumerate(packs):
+        name = p.get("name", "")
+        count = p.get("count", 0)
+        fmt = p.get("format", "static")
+        icon = _pack_icon(fmt)
+        short = _short_pack_label(p)
+        lines.append(f"{icon} <b>{esc(short)}</b> — {count} stickers")
+        rows.append([
+            B(f"{icon} 𝙑𝙞𝙚𝙬 {short}", url=f"https://t.me/addstickers/{name}", style="primary"),
+            B("🗑 𝘿𝙚𝙡𝙚𝙩𝙚", data=f"kdel:{i}", style="danger"),
+        ])
+    if note:
+        lines.append(f"\n{note}")
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+async def kangs_cmd(update, ctx):
+    msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
+    packs = await dbase.kang_list_packs(user.id)
+
+    # Auto-migrate old single-pack layout into the packs list
+    if not packs:
+        rec = await dbase.kang_get(user.id)
+        if rec and rec.get("name"):
+            await dbase.kang_upsert_pack(
+                user.id, rec["name"], rec.get("count", 0),
+                rec.get("part", 1), rec.get("format", "static"),
+            )
+            packs = await dbase.kang_list_packs(user.id)
+
+    text, kb = _build_kangs_view(packs)
+    await say(ctx, chat.id, text, kb=kb, reply_to=msg.message_id)
+
+
+async def kangs_delete_cb(update, ctx):
+    query = update.callback_query
+    await query.answer()
+    user = query.from_user
+    try:
+        idx = int(query.data.split(":", 1)[1])
+    except Exception:
+        return
+
+    packs = await dbase.kang_list_packs(user.id)
+    if idx < 0 or idx >= len(packs):
+        try:
+            await query.edit_message_text(q(T("❌ that pack no longer exists.")), parse_mode="HTML")
+        except Exception:
+            pass
+        return
+
+    pack = packs[idx]
+    name = pack["name"]
+
+    # Delete all stickers in the pack (set auto-deletes on the last one)
+    deleted = 0
+    failed = 0
+    try:
+        ss = await ctx.bot.get_sticker_set(name)
+        for st in ss.stickers:
+            try:
+                await ctx.bot.delete_sticker_from_set(st.file_id)
+                deleted += 1
+            except TelegramError as e:
+                failed += 1
+                log.debug("[kangs] couldn't delete sticker: %s", e)
+    except TelegramError as e:
+        log.warning("[kangs] couldn't fetch pack %s: %s", name, e)
+
+    await dbase.kang_delete_pack(user.id, name)
+
+    # Refresh the list view
+    packs = await dbase.kang_list_packs(user.id)
+    note = T("🗑 deleted <b>{n}</b> ({c} stickers)", n=esc(_short_pack_label(pack)), c=deleted)
+    if failed:
+        note += T(" — {f} failed", f=failed)
+
+    if not packs:
+        try:
+            await query.edit_message_text(q(note + "\n\n" + T("you have no packs left.")), parse_mode="HTML")
+        except Exception:
+            pass
+        return
+
+    text, kb = _build_kangs_view(packs, note=note)
+    try:
+        await query.edit_message_text(q(text), parse_mode="HTML", reply_markup=kb)
+    except Exception as e:
+        log.debug("[kangs] edit failed: %s", e)
+
+
+# ───────── .unkang ─────────
+
+async def unkang_cmd(update, ctx):
+    msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
+    src = msg.reply_to_message
+    if not src or not src.sticker:
+        await say(ctx, chat.id, T("reply to a sticker to remove it from your pack."), reply_to=msg.message_id)
+        return
+
+    s = src.sticker
+    if not s.set_name:
+        await say(ctx, chat.id, T("that sticker isn't part of any pack."), reply_to=msg.message_id)
+        return
+
+    me = ctx.application.bot_data["me"]
+    base = re.sub(r"[^a-zA-Z0-9_]", "", (user.username or f"u{user.id}")).lower() or f"u{user.id}"
+    if f"_by_{me.username}" not in s.set_name or base not in s.set_name:
+        await say(ctx, chat.id, T("that sticker isn't in your pack."), reply_to=msg.message_id)
+        return
+
+    try:
+        await ctx.bot.delete_sticker_from_set(s.file_id)
+    except TelegramError as e:
+        await say(ctx, chat.id, T("❌ couldn't remove that sticker:") + f" {esc(e)}", reply_to=msg.message_id)
+        return
+
+    # Decrement count in DB if it matches the replied sticker's pack
+    rec = await dbase.kang_get(user.id)
+    if rec and rec.get("name") == s.set_name:
+        new_count = max(0, rec.get("count", 1) - 1)
+        await dbase.kang_set(
+            user.id, rec["name"], new_count,
+            part=rec.get("part", 1), format=rec.get("format"),
+        )
+        # Also update the packs list entry
+        packs = await dbase.kang_list_packs(user.id)
+        for p in packs:
+            if p.get("name") == s.set_name:
+                await dbase.kang_upsert_pack(
+                    user.id, p["name"], new_count,
+                    p.get("part", 1), p.get("format", "static"),
+                )
+                break
+
+    await say(ctx, chat.id, T("✅ sticker removed from your pack."), reply_to=msg.message_id)
 
 
 def register(app):
     dual_command(app, "q", q_cmd)
     dual_command(app, "qr", qr_cmd)
     dual_command(app, "kang", kang_cmd)
-    # runs first (group -100) and never blocks other handlers
+    dual_command(app, "kangs", kangs_cmd)
+    dual_command(app, "unkang", unkang_cmd)
+    app.add_handler(CallbackQueryHandler(kangs_delete_cb, pattern=r"^kdel:"))
     app.add_handler(
         MessageHandler(
             filters.ChatType.GROUPS & filters.REPLY & (filters.TEXT | filters.CAPTION),
@@ -833,4 +962,5 @@ def register(app):
             block=False,
         ),
         group=-100,
-    )
+      )
+  
