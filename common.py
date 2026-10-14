@@ -228,8 +228,16 @@ async def resolve_target(update, ctx):
                 cchat = await ctx.bot.get_chat(a)
                 if cchat.type == ChatType.PRIVATE:
                     uid = cchat.id
-            except TelegramError:
-                pass
+            except TelegramError as e:
+                # Fallback: Check if the user is a member of the current chat using the username
+                try:
+                    member = await ctx.bot.get_chat_member(chat.id, a)
+                    if member and member.user:
+                        uid = member.user.id
+                except TelegramError as e2:
+                    # Both global and local lookups failed
+                    log.warning(f"[Resolve] Failed to resolve {a} globally ({e}) or locally ({e2})")
+                    pass
     if uid is None:
         return None, ""
     m = await get_member(ctx, chat.id, uid)
