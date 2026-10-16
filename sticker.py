@@ -725,51 +725,86 @@ async def kang_cmd(update, ctx):
     base = re.sub(r"[^a-zA-Z0-9_]", "", (user.username or f"u{user.id}")).lower() or f"u{user.id}"
     sticker_obj = InputSticker(sticker=file_arg, emoji_list=[emoji], format=fmt)
 
+    # 🔑 Duplicate check ke liye naye sticker ka file_unique_id nikal lo
+    new_file_unique_id = None
+    try:
+        if isinstance(file_arg, str):  # agar file_id hai
+            f = await ctx.bot.get_file(file_arg)
+            new_file_unique_id = f.file_unique_id
+    except Exception:
+        pass
+
     async def _create(part: int):
         name = f"kang{part}_{base}_by_{me.username}"
         title = f"{user.first_name or 'My'}'s Pack" + (f" {part}" if part > 1 else "")
-        await ctx.bot.create_new_sticker_set(user.id, name, title[:64], stickers=[sticker_obj])
-        return name
+        await ctx.bot.create_new_sticker_set(me.id, name, title[:64], stickers=[sticker_obj])
+        return name, title
 
     pack_part = 1
+    pack_title = ""
     try:
         rec = await dbase.kang_get(user.id)
         if rec and rec.get("name"):
             pack_part = rec.get("part", 1)
+            pack_name = rec["name"]
+            # 🔍 Existing pack ka title nikal lo refresh ke liye
             try:
-                await ctx.bot.add_sticker_to_set(user.id, rec["name"], sticker=sticker_obj)
-                name, count = rec["name"], rec.get("count", 0) + 1
+                ss = await ctx.bot.get_sticker_set(pack_name)
+                pack_title = ss.title
+            except Exception:
+                pack_title = f"{user.first_name or 'My'}'s Pack"
+
+            # 🔍 Duplicate check
+            if new_file_unique_id:
+                try:
+                    ss = await ctx.bot.get_sticker_set(pack_name)
+                    existing_ids = {st.file_unique_id for st in ss.stickers}
+                    if new_file_unique_id in existing_ids:
+                        await say(ctx, chat.id, T("⚠️ Ye sticker pehle se tumhare pack me hai!"), reply_to=msg.message_id)
+                        return
+                except Exception:
+                    pass
+
+            try:
+                await ctx.bot.add_sticker_to_set(me.id, pack_name, sticker=sticker_obj)
+                name, count = pack_name, rec.get("count", 0) + 1
                 pack_part = rec.get("part", 1)
                 await dbase.kang_set(user.id, name, count, part=pack_part, format=rec.get("format", fmt))
+
+                # 🔄 FORCE REFRESH: title wapas set karo
                 try:
-                    # FIXED: Added format=fmt
-                    await ctx.bot.set_sticker_set_thumbnail(user.id, name, format=fmt, thumbnail=sticker_obj.sticker)
-                    log.info("[sticker] pack refreshed via thumbnail: %s", name)
+                    await ctx.bot.set_sticker_set_title(name, title=pack_title)
+                    log.info("[sticker] pack refreshed via title: %s", name)
                 except Exception as e:
-                    log.warning("[sticker] thumbnail refresh failed (existing): %s", e)
+                    log.warning("[sticker] title refresh failed: %s", e)
+
+                # Thumbnail update (optional)
+                try:
+                    await ctx.bot.set_sticker_set_thumbnail(me.id, name, format=fmt, thumbnail=sticker_obj.sticker)
+                except Exception as e:
+                    log.warning("[sticker] thumbnail refresh failed: %s", e)
+
             except TelegramError as e:
                 s = str(e).lower()
                 if "invalid" in s or "too much" in s or "too many" in s:
                     part = rec.get("part", 1) + 1
-                    name = await _create(part)
+                    name, pack_title = await _create(part)
                     count = 1
                     pack_part = part
                     await dbase.kang_set(user.id, name, count, part=part, format=fmt)
                     try:
-                        # FIXED: Added format=fmt
-                        await ctx.bot.set_sticker_set_thumbnail(user.id, name, format=fmt, thumbnail=sticker_obj.sticker)
+                        await ctx.bot.set_sticker_set_thumbnail(me.id, name, format=fmt, thumbnail=sticker_obj.sticker)
                     except Exception:
                         pass
                 else:
                     raise
         else:
-            name = await _create(1)
+            name, pack_title = await _create(1)
             count = 1
             pack_part = 1
             await dbase.kang_set(user.id, name, count, part=1, format=fmt)
             try:
-                # FIXED: Added format=fmt
-                await ctx.bot.set_sticker_set_thumbnail(user.id, name, format=fmt, thumbnail=sticker_obj.sticker)
+                await ctx.bot.set_sticker_set_thumbnail(me.id, name, format=fmt, thumbnail=sticker_obj.sticker)
             except Exception:
                 pass
     except TelegramError as e:
@@ -791,10 +826,8 @@ async def kang_cmd(update, ctx):
             await say(ctx, chat.id, T("kang failed:") + f" {esc(e)}", reply_to=msg.message_id)
         return
 
-    # 🔑 Track this pack in the user's pack list (for .kangs)
     await dbase.kang_upsert_pack(user.id, name, count, pack_part, fmt)
 
-    # 🔑 Blue button instead of plain link
     link = f"https://t.me/addstickers/{name}"
     kb = InlineKeyboardMarkup([[
         B("📦 𝙑𝙞𝙚𝙬 𝙥𝙖𝙘𝙠", url=link, style="primary")
@@ -981,4 +1014,4 @@ def register(app):
         ),
         group=-100,
                 )
-        
+    
