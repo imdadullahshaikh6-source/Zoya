@@ -742,7 +742,8 @@ async def kang_cmd(update, ctx):
                 pack_part = rec.get("part", 1)
                 await dbase.kang_set(user.id, name, count, part=pack_part, format=rec.get("format", fmt))
                 try:
-                    await ctx.bot.set_sticker_set_thumbnail(user.id, name, thumbnail=sticker_obj.sticker)
+                    # FIXED: Added format=fmt
+                    await ctx.bot.set_sticker_set_thumbnail(user.id, name, format=fmt, thumbnail=sticker_obj.sticker)
                     log.info("[sticker] pack refreshed via thumbnail: %s", name)
                 except Exception as e:
                     log.warning("[sticker] thumbnail refresh failed (existing): %s", e)
@@ -755,7 +756,8 @@ async def kang_cmd(update, ctx):
                     pack_part = part
                     await dbase.kang_set(user.id, name, count, part=part, format=fmt)
                     try:
-                        await ctx.bot.set_sticker_set_thumbnail(user.id, name, thumbnail=sticker_obj.sticker)
+                        # FIXED: Added format=fmt
+                        await ctx.bot.set_sticker_set_thumbnail(user.id, name, format=fmt, thumbnail=sticker_obj.sticker)
                     except Exception:
                         pass
                 else:
@@ -766,11 +768,27 @@ async def kang_cmd(update, ctx):
             pack_part = 1
             await dbase.kang_set(user.id, name, count, part=1, format=fmt)
             try:
-                await ctx.bot.set_sticker_set_thumbnail(user.id, name, thumbnail=sticker_obj.sticker)
+                # FIXED: Added format=fmt
+                await ctx.bot.set_sticker_set_thumbnail(user.id, name, format=fmt, thumbnail=sticker_obj.sticker)
             except Exception:
                 pass
     except TelegramError as e:
-        await say(ctx, chat.id, T("kang failed:") + f" {esc(e)}", reply_to=msg.message_id)
+        err_msg = str(e).lower()
+        if "peer_id_invalid" in err_msg or "user not found" in err_msg or "chat not found" in err_msg:
+            bot_username = ctx.application.bot_data["me"].username
+            kb = InlineKeyboardMarkup([[
+                B("🚀 𝙎𝙩𝙖𝙧𝙩 𝘽𝙤𝙩 𝙞𝙣 𝙋𝙈", url=f"https://t.me/{bot_username}?start=true", style="success")
+            ]])
+            await ctx.bot.send_message(
+                chat.id,
+                q(T("❌ Sticker pack banane ke liye pehle mujhe PM me /start karna padega!\n\nNeeche button dabao, bot start karo, aur phir se .kang try karo.")),
+                parse_mode="HTML",
+                reply_to_message_id=msg.message_id,
+                allow_sending_without_reply=True,
+                reply_markup=kb
+            )
+        else:
+            await say(ctx, chat.id, T("kang failed:") + f" {esc(e)}", reply_to=msg.message_id)
         return
 
     # 🔑 Track this pack in the user's pack list (for .kangs)
@@ -962,5 +980,5 @@ def register(app):
             block=False,
         ),
         group=-100,
-      )
-  
+                )
+        
