@@ -33,7 +33,8 @@ import purge
 import sticker
 import welcome
 import mantion
-import wordseek  # ✅ NEW
+import wordseek  
+import promo     
 from common import B, T, log, mention, say, sc
 
 # ✅ LOGGING FIX
@@ -342,6 +343,7 @@ async def _track_usernames(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def post_init(app: Application):
     await dbase.init(MONGO_URI, DB_NAME)
     app.bot_data["me"] = await app.bot.get_me()
+    # Yahan promo add NAHI kiya gaya hai taaki command list (/) me na dikhe
     cmds = [("start", "Start the bot"), ("help", "Show commands")]
     for mod in (welcome, admin, afk, ban, sticker, fun, bot_filters, ping,
                 guardian, cleancommand, logchannel, pin, lock, purge, wordseek):
@@ -393,6 +395,7 @@ def main():
     logs.register(app)
     purge.register(app)
     wordseek.register(app)
+    promo.register(app)
 
     app.add_error_handler(on_error)
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
