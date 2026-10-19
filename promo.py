@@ -1,30 +1,34 @@
 import asyncio
+import logging
 from pyrogram import Client, filters
 from pyrogram.errors import FloodWait, InputUserDeactivated, UserIsBlocked, PeerIdInvalid
-from config import OWNER_ID  # Apne config se OWNER_ID import karein
+from config import OWNER_ID
+from database import db  # Aapki database file se db import kiya
+
+log = logging.getLogger("promo")
 
 # ===================================================================
-# DATABASE FUNCTIONS (Inhe apne database ke hisaab se change karein)
+# DATABASE SE USERS AUR GROUPS MANGWANE KA FUNCTION
 # ===================================================================
-# Agar aapke paas yeh functions pehle se hain toh inhe hata dein, 
-# warna apne database (MongoDB) ke hisaab se inhe likhein.
-
 async def get_all_users():
-    # Yahan apne database se saare users ki IDs ki list return karein
-    # Example: return [12345678, 98765432, ...]
-    return [] 
+    users = []
+    # db.users collection se saari user IDs nikalna
+    async for user in db.users.find({}, {"_id": 1}):
+        users.append(user["_id"])
+    return users
 
 async def get_all_groups():
-    # Yahan apne database se saare groups ki IDs ki list return karein
-    # Example: return [-10012345678, -10098765432, ...]
-    return []
+    groups = []
+    # db.chats collection se sirf groups ki IDs nikalna (negative IDs)
+    async for chat in db.chats.find({"_id": {"$lt": 0}}, {"_id": 1}):
+        groups.append(chat["_id"])
+    return groups
 
 # ===================================================================
-# BACKGROUND BROADCAST ENGINE
+# BACKGROUND BROADCAST ENGINE (Bina ruke kaam karne ke liye)
 # ===================================================================
 async def broadcast_engine(client, message, target_type):
     try:
-        # Targets (Users ya Groups) fetch karna
         if target_type == "users":
             targets = await get_all_users()
             title = "Users (DMs)"
@@ -40,22 +44,19 @@ async def broadcast_engine(client, message, target_type):
         if not targets:
             return await message.reply_text("❌ Database mein koi target nahi mila.")
 
-        # Status Message
         status_msg = await message.reply_text(f"🚀 **Broadcasting Started** to {len(targets)} {title}...")
         
         success = 0
         failed = 0
 
-        # Forward Loop
         for target_id in targets:
             try:
-                # Message ko Forward karna
+                # Message ko exact waisa hi Forward karna
                 await message.reply_to_message.forward(chat_id=target_id)
                 success += 1
                 await asyncio.sleep(0.1) # FloodWait se bachne ke liye chhota delay
                 
             except FloodWait as e:
-                # Agar Telegram block kare (FloodWait), toh wait karo
                 await asyncio.sleep(e.value)
                 try:
                     await message.reply_to_message.forward(chat_id=target_id)
@@ -63,13 +64,14 @@ async def broadcast_engine(client, message, target_type):
                 except:
                     failed += 1
             except (InputUserDeactivated, UserIsBlocked, PeerIdInvalid):
+                # Agar user ne bot block kar diya hai ya account delete hai
                 failed += 1
             except Exception as e:
-                print(f"Error forwarding to {target_id}: {e}")
+                log.error(f"Error forwarding to {target_id}: {e}")
                 failed += 1
 
-            # Live Status Update (Har 20 messages ke baad)
-            if (success + failed) % 20 == 0:
+            # Live Status Update (Har 50 messages ke baad, taaki bot spammy na lage)
+            if (success + failed) % 50 == 0:
                 try:
                     await status_msg.edit(f"⏳ **Broadcasting...**\n\nDone: {success + failed}/{len(targets)}\n✅ Success: {success}\n❌ Failed: {failed}")
                 except:
@@ -86,21 +88,22 @@ async def broadcast_engine(client, message, target_type):
         await status_msg.edit(report)
 
     except Exception as e:
+        log.error(f"Broadcast Error: {e}")
         await message.reply_text(f"❌ **Broadcast Error:** {e}")
 
 # ===================================================================
-# COMMAND HANDLERS (Sirf Owner ke liye)
+# COMMAND HANDLERS (Sirf Bot Owner ke liye)
 # ===================================================================
-# Yahan filters.user(OWNER_ID) laga hua hai. 
-# Sirf aap hi is command ko chala payenge, koi aur nahi.
 
-@Client.on_message(filters.command(["promo-users", "promo_users"], prefixes=["/", "."]) & filters.user(OWNER_ID))
+# User Broadcast
+@Client.on_message(filters.command(["promo-users", "promo_users", "promo-user"], prefixes=["/", "."]) & filters.user(OWNER_ID))
 async def promo_users_handler(client, message):
     if not message.reply_to_message:
         return await message.reply_text("⚠️ Kisi message ko **reply** karke command dein.")
     asyncio.create_task(broadcast_engine(client, message, "users"))
     await message.reply_text("✅ **Users Broadcast Started in Background!**")
 
+# Group Broadcast
 @Client.on_message(filters.command(["promo-gc", "promo_gc"], prefixes=["/", "."]) & filters.user(OWNER_ID))
 async def promo_gc_handler(client, message):
     if not message.reply_to_message:
@@ -108,9 +111,10 @@ async def promo_gc_handler(client, message):
     asyncio.create_task(broadcast_engine(client, message, "gc"))
     await message.reply_text("✅ **Groups Broadcast Started in Background!**")
 
+# All Broadcast
 @Client.on_message(filters.command(["promo-all", "promo_all"], prefixes=["/", "."]) & filters.user(OWNER_ID))
 async def promo_all_handler(client, message):
     if not message.reply_to_message:
         return await message.reply_text("⚠️ Kisi message ko **reply** karke command dein.")
     asyncio.create_task(broadcast_engine(client, message, "all"))
-    await message.reply_text("✅ **All (Users + Groups) Broadcast Started in Background!**")
+    await message.reply_text("✅ **All Broadcast Started in Background!**")
