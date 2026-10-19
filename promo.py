@@ -1,17 +1,15 @@
 import asyncio
 import logging
-import os
 from pyrogram import Client, filters
 from pyrogram.errors import FloodWait, InputUserDeactivated, UserIsBlocked, PeerIdInvalid
 from database import db  # Aapki database file se db import kiya
 
 log = logging.getLogger("promo")
 
-# .env se OWNER_ID uthane ka tarika
-try:
-    OWNER_ID = int(os.getenv("OWNER_ID", 0))
-except ValueError:
-    OWNER_ID = 0
+# ===================================================================
+# AAPKI TELEGRAM ID DIRECT YAHAN DAAL DI HAI
+# ===================================================================
+OWNER_ID = 8373739674 
 
 # ===================================================================
 # DATABASE SE USERS AUR GROUPS MANGWANE KA FUNCTION
@@ -92,7 +90,7 @@ async def broadcast_engine(client, message, target_type):
         await message.reply_text(f"❌ **Broadcast Error:** {e}")
 
 # ===================================================================
-# COMMAND HANDLERS (Sirf Bot Owner ke liye)
+# COMMAND HANDLERS (Sirf Aapke Liye)
 # ===================================================================
 
 @Client.on_message(filters.command(["promo-users", "promo_users", "promo-user"], prefixes=["/", "."]) & filters.user(OWNER_ID))
