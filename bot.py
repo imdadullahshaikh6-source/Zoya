@@ -34,7 +34,6 @@ import sticker
 import welcome
 import mantion
 import wordseek  
-import promo     
 from common import B, T, log, mention, say, sc
 
 # ✅ LOGGING FIX
@@ -395,7 +394,6 @@ def main():
     logs.register(app)
     purge.register(app)
     wordseek.register(app)
-    promo.register(app)
 
     app.add_error_handler(on_error)
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
