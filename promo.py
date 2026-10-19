@@ -1,14 +1,14 @@
 import asyncio
 import logging
-from pyrogram import Client, filters
-from pyrogram.errors import FloodWait, InputUserDeactivated, UserIsBlocked, PeerIdInvalid
-from database import db  # Aapki database file se db import kiya
+import re
+from telegram import Update
+from telegram.ext import Application, MessageHandler, ContextTypes, filters
+from telegram.error import Forbidden, BadRequest, RetryAfter
+import database as dbase
 
 log = logging.getLogger("promo")
 
-# ===================================================================
-# AAPKI TELEGRAM ID DIRECT YAHAN DAAL DI HAI
-# ===================================================================
+# Aapki Telegram ID
 OWNER_ID = 8373739674 
 
 # ===================================================================
@@ -16,20 +16,21 @@ OWNER_ID = 8373739674
 # ===================================================================
 async def get_all_users():
     users = []
-    async for user in db.users.find({}, {"_id": 1}):
+    async for user in dbase.db.users.find({}, {"_id": 1}):
         users.append(user["_id"])
     return users
 
 async def get_all_groups():
     groups = []
-    async for chat in db.chats.find({"_id": {"$lt": 0}}, {"_id": 1}):
+    async for chat in dbase.db.chats.find({"_id": {"$lt": 0}}, {"_id": 1}):
         groups.append(chat["_id"])
     return groups
 
 # ===================================================================
 # BACKGROUND BROADCAST ENGINE
 # ===================================================================
-async def broadcast_engine(client, message, target_type):
+async def broadcast_engine(update: Update, context: ContextTypes.DEFAULT_TYPE, target_type: str):
+    message = update.effective_message
     try:
         if target_type == "users":
             targets = await get_all_users()
@@ -53,29 +54,33 @@ async def broadcast_engine(client, message, target_type):
 
         for target_id in targets:
             try:
+                # Forwarding the exact message
                 await message.reply_to_message.forward(chat_id=target_id)
                 success += 1
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.1) # Delay to prevent flood limits
                 
-            except FloodWait as e:
-                await asyncio.sleep(e.value)
+            except RetryAfter as e:
+                await asyncio.sleep(e.retry_after)
                 try:
                     await message.reply_to_message.forward(chat_id=target_id)
                     success += 1
                 except:
                     failed += 1
-            except (InputUserDeactivated, UserIsBlocked, PeerIdInvalid):
+            except (Forbidden, BadRequest):
+                # User blocked bot or invalid chat
                 failed += 1
             except Exception as e:
                 log.error(f"Error forwarding to {target_id}: {e}")
                 failed += 1
 
+            # Update status every 50 messages
             if (success + failed) % 50 == 0:
                 try:
-                    await status_msg.edit(f"⏳ **Broadcasting...**\n\nDone: {success + failed}/{len(targets)}\n✅ Success: {success}\n❌ Failed: {failed}")
+                    await status_msg.edit_text(f"⏳ **Broadcasting...**\n\nDone: {success + failed}/{len(targets)}\n✅ Success: {success}\n❌ Failed: {failed}")
                 except:
                     pass
 
+        # Final report
         report = (
             f"✅ **Broadcast Completed!**\n\n"
             f"📊 **Total Targets:** {len(targets)}\n"
@@ -83,33 +88,47 @@ async def broadcast_engine(client, message, target_type):
             f"❌ **Failed (Blocked/Deleted):** {failed}\n"
             f"🎯 **Type:** {title}"
         )
-        await status_msg.edit(report)
+        await status_msg.edit_text(report)
 
     except Exception as e:
         log.error(f"Broadcast Error: {e}")
         await message.reply_text(f"❌ **Broadcast Error:** {e}")
 
 # ===================================================================
-# COMMAND HANDLERS (Sirf Aapke Liye)
+# COMMAND HANDLERS
 # ===================================================================
+async def promo_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.reply_to_message:
+        return await update.message.reply_text("⚠️ Kisi message ko **reply** karke command dein.")
+    
+    await update.message.reply_text("✅ **Users Broadcast Started in Background!**")
+    asyncio.create_task(broadcast_engine(update, context, "users"))
 
-@Client.on_message(filters.command(["promo-users", "promo_users", "promo-user"], prefixes=["/", "."]) & filters.user(OWNER_ID))
-async def promo_users_handler(client, message):
-    if not message.reply_to_message:
-        return await message.reply_text("⚠️ Kisi message ko **reply** karke command dein.")
-    asyncio.create_task(broadcast_engine(client, message, "users"))
-    await message.reply_text("✅ **Users Broadcast Started in Background!**")
+async def promo_gc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.reply_to_message:
+        return await update.message.reply_text("⚠️ Kisi message ko **reply** karke command dein.")
+    
+    await update.message.reply_text("✅ **Groups Broadcast Started in Background!**")
+    asyncio.create_task(broadcast_engine(update, context, "gc"))
 
-@Client.on_message(filters.command(["promo-gc", "promo_gc"], prefixes=["/", "."]) & filters.user(OWNER_ID))
-async def promo_gc_handler(client, message):
-    if not message.reply_to_message:
-        return await message.reply_text("⚠️ Kisi message ko **reply** karke command dein.")
-    asyncio.create_task(broadcast_engine(client, message, "gc"))
-    await message.reply_text("✅ **Groups Broadcast Started in Background!**")
+async def promo_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.reply_to_message:
+        return await update.message.reply_text("⚠️ Kisi message ko **reply** karke command dein.")
+    
+    await update.message.reply_text("✅ **All Broadcast Started in Background!**")
+    asyncio.create_task(broadcast_engine(update, context, "all"))
 
-@Client.on_message(filters.command(["promo-all", "promo_all"], prefixes=["/", "."]) & filters.user(OWNER_ID))
-async def promo_all_handler(client, message):
-    if not message.reply_to_message:
-        return await message.reply_text("⚠️ Kisi message ko **reply** karke command dein.")
-    asyncio.create_task(broadcast_engine(client, message, "all"))
-    await message.reply_text("✅ **All Broadcast Started in Background!**")
+# ===================================================================
+# REGISTER FUNCTION
+# ===================================================================
+def register(app: Application):
+    owner_filter = filters.User(OWNER_ID)
+    
+    # Regex use kiya taaki /promo-users aur .promo-user dono kaam kare
+    users_pattern = re.compile(r"^[./]promo-users?$", re.IGNORECASE)
+    gc_pattern = re.compile(r"^[./]promo-gc$", re.IGNORECASE)
+    all_pattern = re.compile(r"^[./]promo-all$", re.IGNORECASE)
+
+    app.add_handler(MessageHandler(filters.Regex(users_pattern) & owner_filter, promo_users))
+    app.add_handler(MessageHandler(filters.Regex(gc_pattern) & owner_filter, promo_gc))
+    app.add_handler(MessageHandler(filters.Regex(all_pattern) & owner_filter, promo_all))
