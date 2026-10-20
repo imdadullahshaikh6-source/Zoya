@@ -29,6 +29,7 @@ import logchannel
 import logs
 import pin
 import ping
+import promo
 import purge
 import sticker
 import welcome
@@ -394,6 +395,7 @@ def main():
     logs.register(app)
     purge.register(app)
     wordseek.register(app)
+    promo.register(app)
 
     app.add_error_handler(on_error)
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
