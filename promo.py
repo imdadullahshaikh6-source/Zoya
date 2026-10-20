@@ -1,11 +1,12 @@
 """promo.py — owner-only promo broadcasting (background, slow & safe).
 
 Commands (owner only, "/" or "." both work, NOT shown in the "/" menu):
-  .promo-users  -> sirf un users ko jinhone bot ko DM me start kiya
-  .promo-gc     -> sirf un groups me jaha bot hai
+  .promo-users  -> SIRF un users ko jinhone bot ko DM me jake start kiya (group members nahi)
+  .promo-gc     -> un sabhi groups me jaha bot admin ya member hai
   .promo-all    -> DM + groups dono
   .promo-stop   -> chalta hua broadcast rok do
-  .promo-sync   -> purane users/groups ko promo list me import karo (auto bhi hota hai 1 baar)
+  .promo-sync   -> purane GROUPS import karo + galat user entries saaf karo (auto bhi 1 baar)
+  .promo-status -> list ka size + broadcast ka progress dekho
 
 Message kaise do:
   1) Kisi message ko REPLY karke command do  -> wo message forward hoga
@@ -31,10 +32,10 @@ SEND_MODE = "forward"   # "forward" = "Forwarded from" ke sath | "copy" = bina f
 DELAY = 0.15            # har message ke baad pause (sec) -> load kam rahega
 COMMANDS: list = []     # JAAN BUJH KE KHALI — "/" menu me promo nahi dikhega
 
-_CMD_RE = re.compile(r"^[/.]promo-(users|gc|all|stop|sync)(?:@(\w+))?(?=\s|$)", re.I)
+_CMD_RE = re.compile(r"^[/.]promo-(users|gc|all|stop|sync|status)(?:@(\w+))?(?=\s|$)", re.I)
 
 _known: set = set()                 # DB writes kam karne ke liye cache
-_state: dict = {"task": None, "stop": None}
+_state: dict = {"task": None, "stop": None, "progress": None}
 
 
 # ───────────────────────── tracking (sirf DM users + groups) ─────────────────────────
@@ -81,7 +82,10 @@ async def _my_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     try:
         if active:
-            await coll.update_one({"_id": chat.id}, {"$set": {"t": time.time()}}, upsert=True)
+            await coll.update_one(
+                {"_id": chat.id},
+                {"$set": {"t": time.time(), "name": chat.first_name or chat.title or ""}},
+                upsert=True)
             _known.add(chat.id)
         else:
             await coll.delete_one({"_id": chat.id})
@@ -102,18 +106,10 @@ async def _bulk_add(coll, ids):
 
 
 async def _backfill() -> tuple:
-    """Purane `users` aur group-ids ko promo list me daalo.
-    Jo user kabhi DM me start nahi kiya wo broadcast ke time Forbidden aayega
-    aur list se apne aap hat jayega."""
+    """Sirf GROUPS import hote hain (jaha bot ho sakta hai).
+    USERS kabhi import nahi hote: promo_users me sirf wahi aate hain jo bot ko DM me
+    message/start karte hain. Purani galat entries (name field nahi) yaha saaf hoti hain."""
     db = dbase.db
-    user_ids = set()
-    try:
-        async for d in db.users.find({}, {"_id": 1}):
-            if isinstance(d["_id"], int) and d["_id"] > 0:
-                user_ids.add(d["_id"])
-    except Exception as e:
-        log.warning("[promo] backfill users failed: %s", e)
-
     chat_ids = set()
     for coll, field in (("members", "chat_id"), ("wordseek_scores", "chat_id"),
                         ("guardian", "chat_id"), ("locks", "chat_id"),
@@ -125,14 +121,17 @@ async def _backfill() -> tuple:
         except Exception as e:
             log.warning("[promo] backfill %s failed: %s", coll, e)
 
-    nu = await _bulk_add(db.promo_users, user_ids) if user_ids else 0
     nc = await _bulk_add(db.promo_chats, chat_ids) if chat_ids else 0
-    await db.promo_meta.update_one({"_id": "sync"}, {"$set": {"done": True, "t": time.time()}}, upsert=True)
-    return nu, nc
+    try:
+        await db.promo_users.delete_many({"name": {"$exists": False}})
+    except Exception as e:
+        log.warning("[promo] user cleanup failed: %s", e)
+    await db.promo_meta.update_one({"_id": "sync2"}, {"$set": {"done": True, "t": time.time()}}, upsert=True)
+    return await db.promo_users.count_documents({}), nc
 
 
 async def _ensure_synced():
-    if not await dbase.db.promo_meta.find_one({"_id": "sync"}):
+    if not await dbase.db.promo_meta.find_one({"_id": "sync2"}):
         await _backfill()
 
 
@@ -185,17 +184,21 @@ async def _send_one(bot, target: int, job: dict) -> str:
     return "fail"
 
 
-async def _part(bot, coll_name: str, job: dict, stop: asyncio.Event) -> tuple:
+async def _part(bot, coll_name: str, job: dict, stop: asyncio.Event, label: str) -> tuple:
     """Ek ek karke DB se fetch -> ek ek ko bhejo (memory/load kam)."""
     coll = dbase.db[coll_name]
     sent = failed = 0
-    async for d in coll.find({}, {"_id": 1}).batch_size(100):
+    prog = _state["progress"] = {"part": label, "i": 0, "n": await coll.count_documents({}), "sent": 0}
+    cur = coll.find({}, {"_id": 1})
+    async for d in cur.batch_size(100):
         if stop.is_set():
             break
         tid = d["_id"]
+        prog["i"] += 1
         res = await _send_one(bot, tid, job)
         if res == "ok":
             sent += 1
+            prog["sent"] = sent
         else:
             failed += 1
             if res == "dead":
@@ -204,23 +207,25 @@ async def _part(bot, coll_name: str, job: dict, stop: asyncio.Event) -> tuple:
                 except Exception:
                     pass
                 _known.discard(tid)
-        await asyncio.sleep(DELAY)
+        await asyncio.sleep(0.05 if res == "dead" else DELAY)
     return sent, failed
 
 
 async def _runner(bot, scope: str, job: dict, chat_id: int, msg_id: int):
     stop = asyncio.Event()
     _state["stop"] = stop
+    log.warning("[promo] broadcast started (scope=%s)", scope)
     try:
         await _ensure_synced()
         lines = []
         if scope in ("users", "all"):
-            s, f = await _part(bot, "promo_users", job, stop)
+            s, f = await _part(bot, "promo_users", job, stop, "USERS")
             lines.append(f"» USERS : {s} SENT | {f} FAILED")
         if scope in ("gc", "all") and not stop.is_set():
-            s, f = await _part(bot, "promo_chats", job, stop)
+            s, f = await _part(bot, "promo_chats", job, stop, "GROUPS")
             lines.append(f"» GROUPS : {s} SENT | {f} FAILED")
         status = "STOPPED" if stop.is_set() else "COMPLETED"
+        log.warning("[promo] broadcast %s", status.lower())
         await bot.send_message(
             chat_id, f"» BROADCAST {status}\n\n" + "\n".join(lines),
             reply_parameters=ReplyParameters(message_id=msg_id, allow_sending_without_message=True))
@@ -229,6 +234,7 @@ async def _runner(bot, scope: str, job: dict, chat_id: int, msg_id: int):
     finally:
         _state["task"] = None
         _state["stop"] = None
+        _state["progress"] = None
 
 
 # ───────────────────────── command handler ─────────────────────────
@@ -254,9 +260,18 @@ async def promo_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("» NO BROADCAST RUNNING")
         return
 
+    if scope == "status":
+        db = dbase.db
+        nu = await db.promo_users.count_documents({})
+        nc = await db.promo_chats.count_documents({})
+        pr = _state["progress"]
+        run = f"YES ({pr['part']} {pr['i']}/{pr['n']} | {pr['sent']} SENT)" if running and pr else ("YES" if running else "NO")
+        await msg.reply_text(f"» PROMO STATUS\n\n» RUNNING : {run}\n» USERS LIST : {nu}\n» GROUPS LIST : {nc}")
+        return
+
     if scope == "sync":
         nu, nc = await _backfill()
-        await msg.reply_text(f"» SYNC DONE\n\n» USERS : {nu}\n» GROUPS : {nc}")
+        await msg.reply_text(f"» SYNC DONE\n\n» DM USERS : {nu}\n» GROUPS : {nc}")
         return
 
     if running:
@@ -297,3 +312,4 @@ def register(app):
         ),
         group=-3,
     )
+  
