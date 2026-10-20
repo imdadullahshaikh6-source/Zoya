@@ -19,6 +19,7 @@ from telegram.ext import (
 import admin
 import afk
 import ban
+import blocklist
 import cleancommand
 import database as dbase
 import filters as bot_filters
@@ -62,6 +63,7 @@ START_TXT = (
     "➤ locks — auto-delete spam type messages\n"
     "➤ log channel — activity logs\n"
     "➤ clean command & pin tools\n"
+    "➤ blocklist — auto-delete banned words\n"
     "➤ every command works with / or . in groups\n\n"
     "tap <b>command</b> below to see everything i can do."
 )
@@ -123,6 +125,7 @@ PAGES = {
     "logchannel": ("📋 𝙇𝙤𝙜 𝘾𝙝𝙖𝙣𝙣𝙚𝙡", logchannel.HELP_TXT),
     "locks": ("🔒 𝙇𝙤𝙘𝙠𝙨", LOCKS_TXT),
     "purge": ("🧹 𝙋𝙪𝙧𝙜𝙚", PURGE_TXT),
+    "blocklist": ("🚫 𝘽𝙡𝙤𝙘𝙠𝙡𝙞𝙨𝙩", blocklist.HELP_TXT),
     "wordseek": ("🔍 𝙒𝙤𝙧𝙙𝙎𝙚𝙚𝙠", wordseek.HELP_TXT),
 }
 
@@ -142,6 +145,8 @@ ALIASES = {
     "locks": "locks", "locktypes": "locks",
     "purge": "purge", "spurge": "purge", "del": "purge",
     "wordseek": "wordseek",
+    "blocklist": "blocklist", "blacklist": "blocklist", "addblocklist": "blocklist",
+    "rmblocklist": "blocklist", "blocklistmode": "blocklist", "unblocklistall": "blocklist",
 }
 
 
@@ -176,7 +181,7 @@ def main_page(page: int = 1):
             [B("🎉 𝙂𝙧𝙚𝙚𝙩𝙞𝙣𝙜𝙨", "help:greet", style="success"), B("👮 𝘼𝙙𝙢𝙞𝙣", "help:admin", style="success")],
             [B("💤 𝘼𝙁𝙆", "help:afk", style="success"), B("🛡 𝙈𝙤𝙙𝙚𝙧𝙖𝙩𝙞𝙤𝙣", "help:mod", style="success")],
             [B("🔍 𝙁𝙞𝙡𝙩𝙚𝙧𝙨", "help:filters", style="success"), B("🛡 𝙂𝙪𝙖𝙧𝙙𝙞𝙖𝙣", "help:guardian", style="success")],
-            [B("🧹 𝘾𝙡𝙚𝙖𝙣 𝘾𝙤𝙢𝙢𝙖𝙣𝙙", "help:cleancommand", style="success")],
+            [B("🧹 𝘾𝙡𝙚𝙖𝙣 𝘾𝙤𝙢𝙢𝙖𝙣𝙙", "help:cleancommand", style="success"), B("🚫 𝘽𝙡𝙤𝙘𝙠𝙡𝙞𝙨𝙩", "help:blocklist", style="success")],
             [B("⬅ 𝙋𝙧𝙚𝙫𝙞𝙤𝙪𝙨", "help:page2", style="primary"), B("𝙉𝙚𝙭𝙩 ➡", "help:page2", style="primary")],
             [B("⬅ 𝘽𝙖𝙘𝙠", "help:home"), B("✖ 𝘾𝙡𝙤𝙨𝙚", "help:close", style="danger")],
         ]
@@ -345,7 +350,7 @@ async def post_init(app: Application):
     # Yahan promo add NAHI kiya gaya hai taaki command list (/) me na dikhe
     cmds = [("start", "Start the bot"), ("help", "Show commands")]
     for mod in (welcome, admin, afk, ban, sticker, fun, bot_filters, ping,
-                guardian, cleancommand, logchannel, pin, lock, purge, wordseek):
+                guardian, cleancommand, logchannel, pin, lock, purge, wordseek, blocklist):
         cmds += mod.COMMANDS
     await app.bot.set_my_commands(cmds)
     log.info("Started as @%s", app.bot_data["me"].username)
@@ -394,6 +399,7 @@ def main():
     logs.register(app)
     purge.register(app)
     wordseek.register(app)
+    blocklist.register(app)
 
     app.add_error_handler(on_error)
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
@@ -401,4 +407,5 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+
+            
