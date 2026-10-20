@@ -2,8 +2,11 @@
 
 • Admin adds words  → bot saves them in MongoDB.
 • Anyone (member OR admin) says a blocklisted word → message is deleted.
-• If /blocklistmode is mute / ban / kick → the user also gets that action
+• If /blocklistmode is warn / mute / ban / kick → the user also gets that action
   (admins can't be punished by Telegram, so for them it's delete only).
+• warn mode uses the SAME warn system as /warn (database.warn_add) — each
+  blocklisted word = 1 warn, reason says it was a blocklisted word. When the
+  chat's warn limit is reached the user is muted.
 • Works with "/" and "." prefix, groups only.
 """
 import asyncio
@@ -30,8 +33,9 @@ HELP_TXT = (
     "that has a list (one word per line) and the bot saves every word of it.\n"
     "• <code>/rmblocklist</code> (or <code>.rmblocklist</code>) &lt;word(s)&gt; — remove words.\n"
     "• <code>/blocklist</code> (or <code>.blocklist</code>) — list all blocklisted words.\n"
-    "• <code>/blocklistmode</code> (or <code>.blocklistmode</code>) &lt;nothing/mute/ban/kick&gt; — "
-    "action to take with the delete. Default: nothing (only delete).\n"
+    "• <code>/blocklistmode</code> (or <code>.blocklistmode</code>) &lt;nothing/warn/mute/ban/kick&gt; — "
+    "action to take with the delete. Default: nothing (only delete). "
+    "<b>warn</b> = each use adds a warn (same system as /warn); when the warn limit is reached the user is muted.\n"
     "• <code>/unblocklistall</code> (or <code>.unblocklistall</code>) — remove all words — chat creator only.\n\n"
     "<b>Top tip:</b>\n"
     "• <code>*</code> works as a wildcard: <code>porn*</code> matches porn, porno, pornhub.\n"
@@ -60,7 +64,7 @@ CMD_RE = re.compile(
 )
 
 MODES = {"nothing": "nothing", "none": "nothing", "off": "nothing",
-         "mute": "mute", "ban": "ban", "kick": "kick"}
+         "warn": "warn", "mute": "mute", "ban": "ban", "kick": "kick"}
 
 MAX_WORDS = 1000
 MIN_LEN, MAX_LEN = 2, 64
@@ -142,6 +146,24 @@ async def _load(chat_id: int) -> dict:
 
 def _refresh(data: dict):
     data["rx"] = build_rx(data["words"])
+
+
+async def _warn_limit(chat_id: int) -> int:
+    """Reads the chat's warn limit from the same config the /warn module uses (default 3).
+    If your warn module stores it under another key, add it to the tuple below."""
+    try:
+        cfg = await dbase.cfg_get(chat_id)
+    except Exception:
+        cfg = {}
+    for k in ("warn_limit", "warnlimit", "warns_limit"):
+        v = cfg.get(k)
+        if isinstance(v, int) and v > 0:
+            return v
+    return 3
+
+
+async def _mute(ctx, chat_id: int, user_id: int):
+    await ctx.bot.restrict_chat_member(chat_id, user_id, ChatPermissions(can_send_messages=False))
 
 
 async def _status(ctx, chat_id: int, user_id: int):
@@ -229,13 +251,14 @@ async def _cmd(update, ctx):
             await _reply(
                 msg,
                 f"<b>current mode:</b> {data['mode']}\n\n"
-                "usage: <code>/blocklistmode nothing/mute/ban/kick</code>\n"
+                "usage: <code>/blocklistmode nothing/warn/mute/ban/kick</code>\n"
                 "<i>nothing = only delete the message.</i>",
             )
             return
         data["mode"] = MODES[arg]
         await dbase.blocklist_set_mode(chat.id, data["mode"])
         extra = "only the message will be deleted." if data["mode"] == "nothing" \
+            else "message will be deleted and the user gets a warn (muted when the warn limit is reached)." if data["mode"] == "warn" \
             else f"message will be deleted and the user will be {'muted' if data['mode']=='mute' else 'banned' if data['mode']=='ban' else 'kicked'}."
         await _reply(msg, f"<b>✅ blocklist mode set to:</b> {data['mode']}\n{extra}")
         return
@@ -329,7 +352,8 @@ async def _scan(update, ctx):
 
     data = await _load(chat.id)
     rx = data["rx"]
-    if not rx or not rx.search(norm(text)):
+    hit = rx.search(norm(text)) if rx else None
+    if not hit:
         return
 
     status = None
@@ -350,9 +374,42 @@ async def _scan(update, ctx):
     if mode == "nothing" or is_admin or not user or msg.sender_chat:
         return
 
+    if mode == "warn":
+        word = hit.group(0)[:64]
+        reason = f"used blocklisted word: {word}"
+        me = ctx.application.bot_data.get("me")
+        try:
+            count = await dbase.warn_add(chat.id, user.id, me.id if me else 0, reason)
+            limit = await _warn_limit(chat.id)
+        except Exception as e:
+            log.warning("[blocklist] warn_add failed in %s: %s", chat.id, e)
+            return
+        if count >= limit:
+            try:
+                await _mute(ctx, chat.id, user.id)
+            except TelegramError as e:
+                log.warning("[blocklist] warn-limit mute failed in %s: %s", chat.id, e)
+                return
+            try:
+                await dbase.mod_set(chat.id, user.id, "mute", me.id if me else 0, reason)
+                await dbase.warn_clear(chat.id, user.id)  # reset after punishment
+            except Exception as e:
+                log.warning("[blocklist] post-mute db update failed: %s", e)
+            txt = (f"<b>🚫 blocklist</b>\n{mention(user)} reached the warn limit ({count}/{limit}) "
+                   f"and has been muted.\n<b>reason:</b> {_esc(reason)}")
+        else:
+            txt = (f"<b>⚠️ blocklist warn</b>\n{mention(user)} warned ({count}/{limit}).\n"
+                   f"<b>reason:</b> {_esc(reason)}")
+        try:
+            note = await ctx.bot.send_message(chat.id, _fmt(txt))
+            _later_delete(note, 15)
+        except TelegramError:
+            pass
+        return
+
     try:
         if mode == "mute":
-            await ctx.bot.restrict_chat_member(chat.id, user.id, ChatPermissions(can_send_messages=False))
+            await _mute(ctx, chat.id, user.id)
             done = "muted"
         elif mode == "ban":
             await ctx.bot.ban_chat_member(chat.id, user.id)
@@ -390,4 +447,5 @@ def register(app):
             _scan,
         ),
         group=31,
-    )
+      )
+              
