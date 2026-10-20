@@ -85,20 +85,49 @@ def _html_mention(user_id: int, name: str) -> str:
 
 
 # ───────── profile photo fetcher ─────────
-async def _fetch_profile_photo(ctx, user_id: int):
-    """Fetch user's real Telegram profile photo as PIL Image. Returns None if none."""
+async def _download_photo_bytes(ctx, user_id: int):
+    """Download the user's real profile photo (raw bytes). None if unavailable.
+
+    Tries: 1) getUserProfilePhotos  2) getChat(user).photo (fallback).
+    """
+    file_ids = []
     try:
         photos = await ctx.bot.get_user_profile_photos(user_id, limit=1)
-        if photos.total_count == 0:
-            return None
-        file_id = photos.photos[0][-1].file_id
-        tg_file = await ctx.bot.get_file(file_id)
-        bio = io.BytesIO()
-        await tg_file.download_to_memory(bio)
-        bio.seek(0)
-        return Image.open(bio).convert("RGBA")
+        log.info("profile photos for %s: total=%s", user_id, photos.total_count)
+        if photos.total_count > 0 and photos.photos:
+            file_ids.append(photos.photos[0][-1].file_id)
     except Exception as e:
-        log.warning("profile photo fetch failed for %s: %s", user_id, e)
+        log.warning("get_user_profile_photos failed for %s: %s", user_id, e)
+
+    try:
+        chat_obj = await ctx.bot.get_chat(user_id)
+        if getattr(chat_obj, "photo", None):
+            file_ids.append(chat_obj.photo.big_file_id)
+    except Exception as e:
+        log.warning("get_chat photo failed for %s: %s", user_id, e)
+
+    for fid in file_ids:
+        try:
+            tg_file = await ctx.bot.get_file(fid)
+            bio = io.BytesIO()
+            await tg_file.download_to_memory(bio)
+            data = bio.getvalue()
+            if data:
+                return data
+        except Exception as e:
+            log.warning("photo download failed for %s: %s", user_id, e)
+    return None
+
+
+async def _fetch_profile_photo(ctx, user_id: int):
+    """Real Telegram profile photo as PIL Image, or None."""
+    data = await _download_photo_bytes(ctx, user_id)
+    if not data:
+        return None
+    try:
+        return Image.open(io.BytesIO(data)).convert("RGBA")
+    except Exception as e:
+        log.warning("photo decode failed for %s: %s", user_id, e)
         return None
 
 
@@ -241,20 +270,21 @@ async def waifu_cmd(update, ctx):
             sender=sender_mention, waifu=waifu_mention,
         ))
 
-    # Try direct file_id send (fastest) — spoiler
-    try:
-        photos = await ctx.bot.get_user_profile_photos(target_id, limit=1)
-        if photos.total_count > 0:
-            file_id = photos.photos[0][-1].file_id
-            await ctx.bot.send_photo(chat.id, file_id, caption=cap,
+    # Real profile photo of the chosen user -> send as-is (spoiler)
+    data = await _download_photo_bytes(ctx, target_id)
+    if data:
+        try:
+            bio = io.BytesIO(data)
+            bio.name = "waifu.jpg"
+            await ctx.bot.send_photo(chat.id, bio, caption=cap,
                                      parse_mode=ParseMode.HTML, reply_parameters=reply_params,
                                      has_spoiler=True)
             return
-    except Exception as e:
-        log.warning("send via file_id failed: %s", e)
+        except Exception as e:
+            log.warning("sending real photo failed: %s", e)
 
-    # Fallback placeholder — spoiler
-    img = await _get_avatar(ctx, target_id, target_name, 512)
+    # No photo (or hidden by privacy) -> letter placeholder
+    img = _placeholder_avatar(target_name, 512)
     out = io.BytesIO()
     out.name = "waifu.png"
     img.save(out, "PNG")
@@ -414,3 +444,4 @@ async def couple_cmd(update, ctx):
 def register(app):
     dual_command(app, "waifu", waifu_cmd, group_only=False)
     dual_command(app, "couple", couple_cmd, group_only=False)
+    
