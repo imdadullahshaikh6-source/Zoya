@@ -73,6 +73,12 @@ async def init(uri: str, name: str):
     except Exception as e:
         log.warning("[db] kangs index creation failed: %s", e)
 
+    try:
+        await _db.blocklist.create_index("chat_id", unique=True)
+        log.info("[db] blocklist index ready ✅")
+    except Exception as e:
+        log.warning("[db] blocklist index creation failed: %s", e)
+
     log.info("MongoDB connected (db: %s)", name)
 
 
@@ -535,3 +541,55 @@ async def wordseek_reset_history(chat_id: int, keep_recent: list = None):
         )
     else:
         await _db.wordseek_history.delete_one({"chat_id": chat_id})
+
+
+# ─────────────── blocklist ───────────────
+
+def _bl_cid(chat_id):
+    if isinstance(chat_id, int):
+        return chat_id
+    try:
+        return int(chat_id)
+    except (TypeError, ValueError):
+        return None
+
+
+async def blocklist_get(chat_id: int) -> dict:
+    chat_id = _bl_cid(chat_id)
+    if chat_id is None: return {"words": [], "mode": "nothing"}
+    doc = await _db.blocklist.find_one({"chat_id": chat_id}) or {}
+    return {"words": list(doc.get("words", [])), "mode": doc.get("mode", "nothing")}
+
+
+async def blocklist_add(chat_id: int, words: list):
+    chat_id = _bl_cid(chat_id)
+    if chat_id is None or not words: return
+    await _db.blocklist.update_one(
+        {"chat_id": chat_id},
+        {"$addToSet": {"words": {"$each": words}}, "$set": {"chat_id": chat_id, "updated": time.time()}},
+        upsert=True,
+    )
+
+
+async def blocklist_remove(chat_id: int, words: list) -> int:
+    chat_id = _bl_cid(chat_id)
+    if chat_id is None or not words: return 0
+    res = await _db.blocklist.update_one({"chat_id": chat_id}, {"$pull": {"words": {"$in": words}}})
+    return res.modified_count
+
+
+async def blocklist_clear(chat_id: int) -> int:
+    """Remove every word of this chat (mode is kept). Returns how many words were removed."""
+    chat_id = _bl_cid(chat_id)
+    if chat_id is None: return 0
+    doc = await _db.blocklist.find_one({"chat_id": chat_id}) or {}
+    n = len(doc.get("words", []))
+    await _db.blocklist.update_one({"chat_id": chat_id}, {"$set": {"words": []}})
+    return n
+
+
+async def blocklist_set_mode(chat_id: int, mode: str):
+    chat_id = _bl_cid(chat_id)
+    if chat_id is None: return
+    await _db.blocklist.update_one({"chat_id": chat_id}, {"$set": {"chat_id": chat_id, "mode": mode}}, upsert=True)
+    
