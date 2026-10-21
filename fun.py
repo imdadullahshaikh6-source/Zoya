@@ -438,10 +438,12 @@ async def couple_cmd(update, ctx):
 
 
 # ───────── fun actions (hug / kiss / slap / kill ...) ─────────
-WAIFU_API = "https://api.waifu.pics/sfw/"
+# OtakuGIFs API (waifu.pics is blocked on this server)
+OTAKUGIFS_API = "https://api.otakugifs.xyz/gif?reaction="
+WAIFU_API = "https://api.waifu.pics/sfw/" # Fallback
 
 # Optional: paste your own media here (list of URLs or Telegram file_ids) to use it
-# instead of the waifu.pics API for that command. Empty = API is used.
+# instead of the API for that command. Empty = API is used.
 # Example: "hug": ["https://.../1.gif", "https://.../2.gif"],
 LOCAL_MEDIA = {
     "hug": [],
@@ -538,20 +540,33 @@ ANIM_EXT = {"gif", "mp4", "webm"}
 
 
 async def _get_media_url(action: str, category: str):
-    """Own media (LOCAL_MEDIA) first, else waifu.pics API. None on failure."""
+    """Own media (LOCAL_MEDIA) first, else OtakuGIFs API, then waifu.pics."""
     local = LOCAL_MEDIA.get(action)
     if local:
         return random.choice(local)
-    for _ in range(2):
-        try:
-            async with httpx.AsyncClient(timeout=10) as c:
-                r = await c.get(WAIFU_API + category)
-                r.raise_for_status()
+    
+    # 1. Try OtakuGIFs
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(OTAKUGIFS_API + category)
+            if r.status_code == 200:
                 url = r.json().get("url")
                 if url:
                     return url
-        except Exception as e:
-            log.warning("waifu.pics fetch failed for %s: %s", category, e)
+    except Exception as e:
+        log.warning("otakugifs fetch failed for %s: %s", category, e)
+
+    # 2. Fallback to waifu.pics (for neko, shinobu, etc.)
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(WAIFU_API + category)
+            if r.status_code == 200:
+                url = r.json().get("url")
+                if url:
+                    return url
+    except Exception as e:
+        log.warning("waifu.pics fetch failed for %s: %s", category, e)
+
     return None
 
 
@@ -761,3 +776,4 @@ def register(app):
         dual_command(app, name, _make_image_only(name), group_only=False)
 
     app.add_handler(CallbackQueryHandler(_accept_cb, pattern=r"^funacc:"))
+        
