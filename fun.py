@@ -425,10 +425,9 @@ async def couple_cmd(update, ctx):
 # ───────── fun actions (hug / kiss / slap / kill ...) ─────────
 OTAKUGIFS_API = "https://api.otakugifs.xyz/gif?reaction="
 NEKOSBEST_API = "https://nekos.best/api/v2/"
+PURRBOT_API = "https://purrbot.site/api/img/sfw/"
 WAIFU_API = "https://api.waifu.pics/sfw/"
 
-# 🔥 YAHAN APNA TELEGRAM FILE ID DALEIN (jo @getidsbot se mila tha)
-# Example: "kill": ["AgADBAADr6cxG0..."]
 LOCAL_MEDIA = {
     "hug": [],
     "kiss": [],
@@ -438,14 +437,8 @@ LOCAL_MEDIA = {
     "pat": [],
     "bite": [],
     "poke": [],
-    "kill": [
-        # "YOUR_FILE_ID_FOR_KILL_1",
-        # "YOUR_FILE_ID_FOR_KILL_2"
-    ],
-    "bonk": [
-        # "YOUR_FILE_ID_FOR_BONK_1",
-        # "YOUR_FILE_ID_FOR_BONK_2"
-    ],
+    "kill": [],
+    "bonk": [],
 }
 
 TARGETED = {
@@ -531,14 +524,27 @@ ANIM_EXT = {"gif", "mp4", "webm"}
 
 
 async def _get_media_url(action: str, category: str):
-    """Own media (LOCAL_MEDIA) first, else Nekos.best, OtakuGIFs, then waifu.pics."""
+    """Own media (LOCAL_MEDIA) first, else Purrbot, Nekos.best, OtakuGIFs, then waifu.pics."""
     local = LOCAL_MEDIA.get(action)
-    if local:
-        # Agar list khali nahi hai, toh pehla element return karo
-        if len(local) > 0:
-            return random.choice(local)
+    if local and len(local) > 0:
+        return random.choice(local)
     
-    # 1. Try Nekos.best (Fast and reliable)
+    # 1. Try Purrbot API (Highly reliable for anime GIFs)
+    purrbot_cats = ["hug", "kiss", "cuddle", "pat", "slap", "kill", "poke", "bite"]
+    if category in purrbot_cats:
+        try:
+            async with httpx.AsyncClient(timeout=10) as c:
+                # Purrbot uses 'punch' for 'bonk', and has direct 'kill', 'slap', etc.
+                endpoint = "punch" if category == "bonk" else category
+                r = await c.get(f"{PURRBOT_API}{endpoint}/gif")
+                if r.status_code == 200:
+                    data = r.json()
+                    if not data.get("error"):
+                        return data.get("link")
+        except Exception as e:
+            log.warning("purrbot fetch failed for %s: %s", category, e)
+
+    # 2. Try Nekos.best
     try:
         async with httpx.AsyncClient(timeout=10) as c:
             r = await c.get(NEKOSBEST_API + category)
@@ -549,7 +555,7 @@ async def _get_media_url(action: str, category: str):
     except Exception as e:
         log.warning("nekos.best fetch failed for %s: %s", category, e)
 
-    # 2. Try OtakuGIFs
+    # 3. Try OtakuGIFs
     try:
         async with httpx.AsyncClient(timeout=10) as c:
             r = await c.get(OTAKUGIFS_API + category)
@@ -560,7 +566,7 @@ async def _get_media_url(action: str, category: str):
     except Exception as e:
         log.warning("otakugifs fetch failed for %s: %s", category, e)
 
-    # 3. Fallback to waifu.pics
+    # 4. Fallback to waifu.pics
     try:
         async with httpx.AsyncClient(timeout=10) as c:
             r = await c.get(WAIFU_API + category)
@@ -788,3 +794,4 @@ def register(app):
 
     app.add_handler(CallbackQueryHandler(_accept_cb, pattern=r"^funacc:"))
     
+       
