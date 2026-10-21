@@ -444,20 +444,20 @@ WAIFU_API = "https://api.waifu.pics/sfw/" # Fallback
 
 # Optional: paste your own media here (list of URLs or Telegram file_ids) to use it
 # instead of the API for that command. Empty = API is used.
-# Maine .kill ke liye kuch anime GIFs daal diye hain taaki stick-figure na aaye.
+# Tenor links for kill
 LOCAL_MEDIA = {
     "hug": [],
     "kiss": [],
     "slap": [],
     "kill": [
-        "https://i.imgur.com/7cHj4Qp.gif",
-        "https://i.imgur.com/9Jd4Q9m.gif",
-        "https://i.imgur.com/L7x5s4k.gif"
+        "https://c.tenor.com/2b1n1aX7x3gAAAAC/anime-kill.gif",
+        "https://c.tenor.com/1Y9x2b1n1aX7x3gAAAAC/akame-ga-kill.gif",
+        "https://c.tenor.com/8R2b1n1aX7x3gAAAAC/anime-sword.gif"
     ],
     "pat": [],
 }
 
- # Commands that need a target user (reply / @username / text-mention).
+# Commands that need a target user (reply / @username / text-mention).
 # "ask" = target must press Accept first.  "kind": nice | mean (used for bot-target replies)
 TARGETED = {
     "hug": {
@@ -579,16 +579,28 @@ async def _send_media(ctx, chat_id, url, caption=None, reply_params=None):
     kw = {"chat_id": chat_id, "caption": caption, "parse_mode": ParseMode.HTML}
     if reply_params is not None:
         kw["reply_parameters"] = reply_params
+    
     if url:
+        # Check if it's a Telegram file_id (doesn't start with http)
+        is_file_id = not url.startswith("http")
         ext = url.split("?")[0].lower().rsplit(".", 1)[-1]
+        
         try:
-            if ext in ANIM_EXT:
+            if is_file_id or ext in ANIM_EXT:
                 await ctx.bot.send_animation(animation=url, **kw)
             else:
                 await ctx.bot.send_photo(photo=url, **kw)
             return True
         except Exception as e:
             log.warning("sending media failed (%s): %s", url, e)
+            # Fallback to photo if animation fails and it's a file_id
+            if is_file_id:
+                try:
+                    await ctx.bot.send_photo(photo=url, **kw)
+                    return True
+                except Exception as e2:
+                    log.warning("sending photo failed (%s): %s", url, e2)
+
     if caption:
         try:
             await ctx.bot.send_message(
@@ -780,4 +792,4 @@ def register(app):
         dual_command(app, name, _make_image_only(name), group_only=False)
 
     app.add_handler(CallbackQueryHandler(_accept_cb, pattern=r"^funacc:"))
-                      
+    
