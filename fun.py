@@ -444,15 +444,17 @@ WAIFU_API = "https://api.waifu.pics/sfw/" # Fallback
 
 # Optional: paste your own media here (list of URLs or Telegram file_ids) to use it
 # instead of the API for that command. Empty = API is used.
-# Tenor links for kill
 LOCAL_MEDIA = {
     "hug": [],
     "kiss": [],
     "slap": [],
     "kill": [
-        "https://c.tenor.com/2b1n1aX7x3gAAAAC/anime-kill.gif",
-        "https://c.tenor.com/1Y9x2b1n1aX7x3gAAAAC/akame-ga-kill.gif",
-        "https://c.tenor.com/8R2b1n1aX7x3gAAAAC/anime-sword.gif"
+        # Naye Tenor links (agar Telegram inhe bhi block kare, toh neeche wala File ID tarika use karein)
+        "https://media1.tenor.com/m/y3yTVx2GP90AAAAC/akame-ga-kill-sword-clash-anime-sword-clash-akame-ga-kill-bulat-gif-14662756489178267613.gif",
+        "https://media1.tenor.com/m/B5HY66Qs0x4AAAAC/anime-kill-la-kill.gif",
+        "https://media1.tenor.com/m/G-k1ZB8mjRIAAAAC/kawaki-slash-blast.gif",
+        "https://media1.tenor.com/m/Mi8G_EMu9SQAAAAC/kill-anime.gif",
+        # Aap yahan apne Telegram File ID bhi daal sakte hain (jaise: "AgADBAADr6cxG0...")
     ],
     "pat": [],
 }
