@@ -14,7 +14,7 @@ from telegram.error import BadRequest, TelegramError
 from telegram.ext import CallbackQueryHandler, ChatJoinRequestHandler, ContextTypes
 
 from admin import _edit_rich_message, _fancy, _send_rich_message
-from common import B, dual_command, esc
+from common import B, dual_command, esc, log
 
 # Telegram's official Anonymous Admin Bot ID
 ANON_ADMIN_ID = 1087968824
@@ -55,7 +55,7 @@ async def _is_enabled(chat_id: int) -> bool:
     try:
         doc = await _collection().find_one({"chat_id": chat_id})
     except Exception as e:
-        print(f"[request] db read failed: {e}")
+        log.warning("[request] db read failed: %s", e)
         return False
     val = bool(doc and doc.get("enabled"))
     _cache[chat_id] = val
@@ -69,7 +69,7 @@ async def _set_enabled(chat_id: int, value: bool) -> None:
             {"chat_id": chat_id}, {"$set": {"enabled": value}}, upsert=True
         )
     except Exception as e:
-        print(f"[request] db write failed: {e}")
+        log.warning("[request] db write failed: %s", e)
 
 
 # ───────────────────── HELPERS ─────────────────────
@@ -122,13 +122,15 @@ async def on_join_request(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not req:
         return
     chat, user = req.chat, req.from_user
-    if user.is_bot or not await _is_enabled(chat.id):
+    enabled = await _is_enabled(chat.id)
+    log.warning("[request] join request: chat=%s user=%s enabled=%s", chat.id, user.id, enabled)
+    if user.is_bot or not enabled:
         return
     try:
         await _send_rich_message(ctx.bot, chat.id, _request_panel(user))
     except Exception as e:
         # fallback: normal message with normal inline buttons
-        print(f"[request] rich send failed, using fallback: {e}")
+        log.warning("[request] rich send failed, using fallback: %s", e)
         kb = InlineKeyboardMarkup([[
             B("𝘼𝙘𝙘𝙚𝙥𝙩", f"rq:a:{user.id}", style="success"),
             B("𝘿𝙚𝙘𝙡𝙞𝙣𝙚", f"rq:d:{user.id}", style="danger"),
@@ -141,7 +143,7 @@ async def on_join_request(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
             await ctx.bot.send_message(chat.id, txt, parse_mode=ParseMode.HTML, reply_markup=kb)
         except TelegramError as e2:
-            print(f"[request] fallback send failed: {e2}")
+            log.error("[request] fallback send failed: %s", e2)
 
 
 # ───────────────────── ACCEPT / DECLINE BUTTONS ─────────────────────
@@ -258,6 +260,7 @@ async def request_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 def register(app):
     dual_command(app, "request", request_cmd)
-    app.add_handler(ChatJoinRequestHandler(on_join_request))
+    # separate group so no other module's handler can swallow the update
+    app.add_handler(ChatJoinRequestHandler(on_join_request), group=5)
     app.add_handler(CallbackQueryHandler(request_cb, pattern=r"^rq:"))
     
