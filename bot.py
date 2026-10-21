@@ -31,6 +31,7 @@ import logs
 import pin
 import ping
 import purge
+import request
 import sticker
 import welcome
 import mantion
@@ -127,6 +128,7 @@ PAGES = {
     "purge": ("🧹 𝙋𝙪𝙧𝙜𝙚", PURGE_TXT),
     "blocklist": ("🚫 𝘽𝙡𝙤𝙘𝙠𝙡𝙞𝙨𝙩", blocklist.HELP_TXT),
     "wordseek": ("🔍 𝙒𝙤𝙧𝙙𝙎𝙚𝙚𝙠", wordseek.HELP_TXT),
+    "request": ("📨 𝙍𝙚𝙦𝙪𝙚𝙨𝙩", request.HELP_TXT),
 }
 
 ALIASES = {
@@ -145,6 +147,7 @@ ALIASES = {
     "locks": "locks", "locktypes": "locks",
     "purge": "purge", "spurge": "purge", "del": "purge",
     "wordseek": "wordseek",
+    "request": "request", "joinrequest": "request",
     "blocklist": "blocklist", "blacklist": "blocklist", "addblocklist": "blocklist",
     "rmblocklist": "blocklist", "blocklistmode": "blocklist", "unblocklistall": "blocklist",
 }
@@ -190,7 +193,7 @@ def main_page(page: int = 1):
             [B("📋 𝙇𝙤𝙜 𝘾𝙝𝙖𝙣𝙣𝙚𝙡", "help:logchannel", style="success"), B("🔒 𝙇𝙤𝙘𝙠𝙨", "help:locks", style="success")],
             [B("📌 𝙋𝙞𝙣", "help:pin", style="success"), B("🧹 𝙋𝙪𝙧𝙜𝙚", "help:purge", style="success")],
             [B("📝 𝙌𝙪𝙤𝙩𝙡𝙮", "help:quotly", style="success"), B("🎁 𝙁𝙪𝙣", "help:fun", style="success")],
-            [B("𝙒𝙤𝙧𝙙𝙎𝙚𝙚𝙠", "help:wordseek", style="success")],
+            [B("𝙒𝙤𝙧𝙙𝙎𝙚𝙚𝙠", "help:wordseek", style="success"), B("📨 𝙍𝙚𝙦𝙪𝙚𝙨𝙩", "help:request", style="success")],
             [B("⬅ 𝙋𝙧𝙚𝙫𝙞𝙤𝙪𝙨", "help:page1", style="primary"), B("𝙉𝙚𝙭𝙩 ➡", "help:page1", style="primary")],
             [B("⬅ 𝘽𝙖𝙘𝙠", "help:home"), B("✖ 𝘾𝙡𝙤𝙨𝙚", "help:close", style="danger")],
         ]
@@ -350,7 +353,7 @@ async def post_init(app: Application):
     # Yahan promo add NAHI kiya gaya hai taaki command list (/) me na dikhe
     cmds = [("start", "Start the bot"), ("help", "Show commands")]
     for mod in (welcome, admin, afk, ban, sticker, fun, bot_filters, ping,
-                guardian, cleancommand, logchannel, pin, lock, purge, wordseek, blocklist):
+                guardian, cleancommand, logchannel, pin, lock, purge, wordseek, blocklist, request):
         cmds += mod.COMMANDS
     await app.bot.set_my_commands(cmds)
     log.info("Started as @%s", app.bot_data["me"].username)
@@ -400,6 +403,7 @@ def main():
     purge.register(app)
     wordseek.register(app)
     blocklist.register(app)
+    request.register(app)
 
     app.add_error_handler(on_error)
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
@@ -408,4 +412,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-            
+
