@@ -75,7 +75,6 @@ def _guess_gender(name: str) -> str:
 
 
 def _html_mention(user_id: int, name: str) -> str:
-    """Build a clickable Telegram user mention."""
     safe_name = esc(name or "Someone")
     return f'<a href="tg://user?id={user_id}">{safe_name}</a>'
 
@@ -428,6 +427,8 @@ OTAKUGIFS_API = "https://api.otakugifs.xyz/gif?reaction="
 NEKOSBEST_API = "https://nekos.best/api/v2/"
 WAIFU_API = "https://api.waifu.pics/sfw/"
 
+# 🔥 YAHAN APNA TELEGRAM FILE ID DALEIN (jo @getidsbot se mila tha)
+# Example: "kill": ["AgADBAADr6cxG0..."]
 LOCAL_MEDIA = {
     "hug": [],
     "kiss": [],
@@ -438,12 +439,12 @@ LOCAL_MEDIA = {
     "bite": [],
     "poke": [],
     "kill": [
-        "https://media.giphy.com/media/3o7TKr3xTic28v7VSw/giphy.gif",
-        "https://media.giphy.com/media/l3q2RhXMWvB30XzW0/giphy.gif"
+        # "YOUR_FILE_ID_FOR_KILL_1",
+        # "YOUR_FILE_ID_FOR_KILL_2"
     ],
     "bonk": [
-        "https://media.giphy.com/media/3o7TKu8qS1V27XWvYA/giphy.gif",
-        "https://media.giphy.com/media/xT0xeJpnrWC4XWblEk/giphy.gif"
+        # "YOUR_FILE_ID_FOR_BONK_1",
+        # "YOUR_FILE_ID_FOR_BONK_2"
     ],
 }
 
@@ -533,7 +534,9 @@ async def _get_media_url(action: str, category: str):
     """Own media (LOCAL_MEDIA) first, else Nekos.best, OtakuGIFs, then waifu.pics."""
     local = LOCAL_MEDIA.get(action)
     if local:
-        return random.choice(local)
+        # Agar list khali nahi hai, toh pehla element return karo
+        if len(local) > 0:
+            return random.choice(local)
     
     # 1. Try Nekos.best (Fast and reliable)
     try:
