@@ -82,10 +82,6 @@ def _html_mention(user_id: int, name: str) -> str:
 
 # ───────── profile photo fetcher ─────────
 async def _download_photo_bytes(ctx, user_id: int):
-    """Download the user's real profile photo (raw bytes). None if unavailable.
-
-    Tries: 1) getUserProfilePhotos  2) getChat(user).photo (fallback).
-    """
     file_ids = []
     try:
         photos = await ctx.bot.get_user_profile_photos(user_id, limit=1)
@@ -116,7 +112,6 @@ async def _download_photo_bytes(ctx, user_id: int):
 
 
 async def _fetch_profile_photo(ctx, user_id: int):
-    """Real Telegram profile photo as PIL Image, or None."""
     data = await _download_photo_bytes(ctx, user_id)
     if not data:
         return None
@@ -128,7 +123,6 @@ async def _fetch_profile_photo(ctx, user_id: int):
 
 
 def _placeholder_avatar(name: str, size: int) -> Image.Image:
-    """Pretty fallback: colored circle + big initial."""
     import colorsys
     hue = hash(name or "x") % 360
     r, g, b = colorsys.hsv_to_rgb(hue / 360, 0.65, 0.85)
@@ -148,7 +142,6 @@ def _placeholder_avatar(name: str, size: int) -> Image.Image:
 
 
 async def _get_avatar(ctx, user_id: int, name: str, size: int) -> Image.Image:
-    """Real photo if available, else pretty placeholder."""
     img = await _fetch_profile_photo(ctx, user_id)
     if img is None:
         return _placeholder_avatar(name, size)
@@ -164,7 +157,6 @@ async def _get_waifu(chat_id, user_id):
 
 
 async def _find_mutual_waifu(chat_id, target_id):
-    """Find someone whose waifu is `target_id` (within 24h)."""
     cutoff = time.time() - WAIFU_24H
     return await dbase.db.waifu.find_one({
         "chat_id": chat_id,
@@ -203,7 +195,6 @@ async def waifu_cmd(update, ctx):
     target_id = None
     is_mutual = False
 
-    # 1. User's existing waifu (within 24h)
     existing = await _get_waifu(chat.id, user.id)
     if existing and (time.time() - existing.get("assigned_at", 0)) < WAIFU_24H:
         try:
@@ -212,7 +203,6 @@ async def waifu_cmd(update, ctx):
         except Exception:
             target_id = None
 
-    # 2. Mutual check: someone already has THIS user as their waifu?
     if not target_id:
         mutual = await _find_mutual_waifu(chat.id, user.id)
         if mutual and mutual["user_id"] != user.id:
@@ -224,7 +214,6 @@ async def waifu_cmd(update, ctx):
             except Exception:
                 target_id = None
 
-    # 3. Fresh assignment
     if not target_id:
         members = await dbase.random_members(chat.id, 30)
         members = [m for m in members if m.get("user_id") and m["user_id"] != user.id]
@@ -250,7 +239,6 @@ async def waifu_cmd(update, ctx):
 
     reply_params = ReplyParameters(message_id=msg.message_id, allow_sending_without_reply=True)
 
-    # ✅ BOTH mentions — the command sender AND the waifu
     sender_name = user.first_name or "Someone"
     sender_mention = _html_mention(user.id, sender_name)
     waifu_mention = _html_mention(target_id, target_name)
@@ -266,7 +254,6 @@ async def waifu_cmd(update, ctx):
             sender=sender_mention, waifu=waifu_mention,
         ))
 
-    # Real profile photo of the chosen user -> send as-is (spoiler)
     data = await _download_photo_bytes(ctx, target_id)
     if data:
         try:
@@ -279,7 +266,6 @@ async def waifu_cmd(update, ctx):
         except Exception as e:
             log.warning("sending real photo failed: %s", e)
 
-    # No photo (or hidden by privacy) -> letter placeholder
     img = _placeholder_avatar(target_name, 512)
     out = io.BytesIO()
     out.name = "waifu.png"
@@ -438,29 +424,29 @@ async def couple_cmd(update, ctx):
 
 
 # ───────── fun actions (hug / kiss / slap / kill ...) ─────────
-# OtakuGIFs API (waifu.pics is blocked on this server)
 OTAKUGIFS_API = "https://api.otakugifs.xyz/gif?reaction="
-WAIFU_API = "https://api.waifu.pics/sfw/" # Fallback
+NEKOSBEST_API = "https://nekos.best/api/v2/"
+WAIFU_API = "https://api.waifu.pics/sfw/"
 
-# Optional: paste your own media here (list of URLs or Telegram file_ids) to use it
-# instead of the API for that command. Empty = API is used.
 LOCAL_MEDIA = {
     "hug": [],
     "kiss": [],
     "slap": [],
-    "kill": [
-        # Naye Tenor links (agar Telegram inhe bhi block kare, toh neeche wala File ID tarika use karein)
-        "https://media1.tenor.com/m/y3yTVx2GP90AAAAC/akame-ga-kill-sword-clash-anime-sword-clash-akame-ga-kill-bulat-gif-14662756489178267613.gif",
-        "https://media1.tenor.com/m/B5HY66Qs0x4AAAAC/anime-kill-la-kill.gif",
-        "https://media1.tenor.com/m/G-k1ZB8mjRIAAAAC/kawaki-slash-blast.gif",
-        "https://media1.tenor.com/m/Mi8G_EMu9SQAAAAC/kill-anime.gif",
-        # Aap yahan apne Telegram File ID bhi daal sakte hain (jaise: "AgADBAADr6cxG0...")
-    ],
+    "cuddle": [],
+    "highfive": [],
     "pat": [],
+    "bite": [],
+    "poke": [],
+    "kill": [
+        "https://media.giphy.com/media/3o7TKr3xTic28v7VSw/giphy.gif",
+        "https://media.giphy.com/media/l3q2RhXMWvB30XzW0/giphy.gif"
+    ],
+    "bonk": [
+        "https://media.giphy.com/media/3o7TKu8qS1V27XWvYA/giphy.gif",
+        "https://media.giphy.com/media/xT0xeJpnrWC4XWblEk/giphy.gif"
+    ],
 }
 
-# Commands that need a target user (reply / @username / text-mention).
-# "ask" = target must press Accept first.  "kind": nice | mean (used for bot-target replies)
 TARGETED = {
     "hug": {
         "cat": "hug", "kind": "nice",
@@ -522,7 +508,6 @@ TARGETED = {
     },
 }
 
-# Solo reactions (no target needed)
 SOLO = {
     "smile": ("😊 {a} is smiling!", "Smile"),
     "blush": ("😳 {a} is blushing!", "Blush"),
@@ -535,7 +520,6 @@ SOLO = {
     "cringe": ("😬 {a} is cringing...", "Cringe"),
 }
 
-# Plain random anime images (no caption)
 IMAGE_ONLY = {
     "neko": "Random neko image",
     "shinobu": "Random Shinobu image",
@@ -546,12 +530,23 @@ ANIM_EXT = {"gif", "mp4", "webm"}
 
 
 async def _get_media_url(action: str, category: str):
-    """Own media (LOCAL_MEDIA) first, else OtakuGIFs API, then waifu.pics."""
+    """Own media (LOCAL_MEDIA) first, else Nekos.best, OtakuGIFs, then waifu.pics."""
     local = LOCAL_MEDIA.get(action)
     if local:
         return random.choice(local)
     
-    # 1. Try OtakuGIFs
+    # 1. Try Nekos.best (Fast and reliable)
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(NEKOSBEST_API + category)
+            if r.status_code == 200:
+                results = r.json().get("results", [])
+                if results and results[0].get("url"):
+                    return results[0]["url"]
+    except Exception as e:
+        log.warning("nekos.best fetch failed for %s: %s", category, e)
+
+    # 2. Try OtakuGIFs
     try:
         async with httpx.AsyncClient(timeout=10) as c:
             r = await c.get(OTAKUGIFS_API + category)
@@ -562,7 +557,7 @@ async def _get_media_url(action: str, category: str):
     except Exception as e:
         log.warning("otakugifs fetch failed for %s: %s", category, e)
 
-    # 2. Fallback to waifu.pics (for neko, shinobu, etc.)
+    # 3. Fallback to waifu.pics
     try:
         async with httpx.AsyncClient(timeout=10) as c:
             r = await c.get(WAIFU_API + category)
@@ -577,13 +572,11 @@ async def _get_media_url(action: str, category: str):
 
 
 async def _send_media(ctx, chat_id, url, caption=None, reply_params=None):
-    """Send gif/mp4 as animation, everything else as photo. Falls back to text."""
     kw = {"chat_id": chat_id, "caption": caption, "parse_mode": ParseMode.HTML}
     if reply_params is not None:
         kw["reply_parameters"] = reply_params
     
     if url:
-        # Check if it's a Telegram file_id (doesn't start with http)
         is_file_id = not url.startswith("http")
         ext = url.split("?")[0].lower().rsplit(".", 1)[-1]
         
@@ -595,7 +588,6 @@ async def _send_media(ctx, chat_id, url, caption=None, reply_params=None):
             return True
         except Exception as e:
             log.warning("sending media failed (%s): %s", url, e)
-            # Fallback to photo if animation fails and it's a file_id
             if is_file_id:
                 try:
                     await ctx.bot.send_photo(photo=url, **kw)
@@ -615,7 +607,6 @@ async def _send_media(ctx, chat_id, url, caption=None, reply_params=None):
 
 
 async def _resolve_target(msg, chat_id):
-    """Return (user_id, name) from reply / text-mention / @username / numeric id, else None."""
     if msg.reply_to_message and msg.reply_to_message.from_user:
         u = msg.reply_to_message.from_user
         return u.id, (u.first_name or "Someone")
@@ -762,7 +753,6 @@ def _make_image_only(name):
     return handler
 
 
-# ───────── help + command menu (built from the tables above) ─────────
 COMMANDS = [("waifu", "Find a waifu from this group"), ("couple", "Ship two members")]
 COMMANDS += [(n, c["desc"]) for n, c in TARGETED.items()]
 COMMANDS += [(n, d) for n, (_, d) in SOLO.items()]
