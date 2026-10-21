@@ -444,16 +444,20 @@ WAIFU_API = "https://api.waifu.pics/sfw/" # Fallback
 
 # Optional: paste your own media here (list of URLs or Telegram file_ids) to use it
 # instead of the API for that command. Empty = API is used.
-# Example: "hug": ["https://.../1.gif", "https://.../2.gif"],
+# Maine .kill ke liye kuch anime GIFs daal diye hain taaki stick-figure na aaye.
 LOCAL_MEDIA = {
     "hug": [],
     "kiss": [],
     "slap": [],
-    "kill": [],
+    "kill": [
+        "https://i.imgur.com/7cHj4Qp.gif",
+        "https://i.imgur.com/9Jd4Q9m.gif",
+        "https://i.imgur.com/L7x5s4k.gif"
+    ],
     "pat": [],
 }
 
-# Commands that need a target user (reply / @username / text-mention).
+ # Commands that need a target user (reply / @username / text-mention).
 # "ask" = target must press Accept first.  "kind": nice | mean (used for bot-target replies)
 TARGETED = {
     "hug": {
@@ -776,4 +780,4 @@ def register(app):
         dual_command(app, name, _make_image_only(name), group_only=False)
 
     app.add_handler(CallbackQueryHandler(_accept_cb, pattern=r"^funacc:"))
-        
+                      
