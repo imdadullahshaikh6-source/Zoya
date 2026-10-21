@@ -83,7 +83,7 @@ async def _can_invite(ctx, chat_id: int, user_id: int) -> bool:
         return False
     if m.status == ChatMemberStatus.OWNER:
         return True
-    return m.status == ChatMemberStatus.ADMIN and bool(getattr(m, "can_invite_users", False))
+    return m.status == ChatMemberStatus.ADMINISTRATOR and bool(getattr(m, "can_invite_users", False))
 
 
 def _request_panel(user) -> dict:
@@ -240,7 +240,7 @@ async def request_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             bm = await ctx.bot.get_chat_member(chat.id, ctx.bot.id)
         except TelegramError:
             pass
-        if not bm or bm.status != ChatMemberStatus.ADMIN or not getattr(bm, "can_invite_users", False):
+        if not bm or bm.status != ChatMemberStatus.ADMINISTRATOR or not getattr(bm, "can_invite_users", False):
             await reply("𝙞 𝙢𝙪𝙨𝙩 𝙗𝙚 𝙖𝙙𝙢𝙞𝙣 𝙬𝙞𝙩𝙝 <b>Invite Users</b> 𝙥𝙤𝙬𝙚𝙧 𝙛𝙞𝙧𝙨𝙩, 𝙩𝙝𝙚𝙣 𝙚𝙣𝙖𝙗𝙡𝙚 𝙖𝙜𝙖𝙞𝙣.")
             return
         await _set_enabled(chat.id, True)
@@ -260,4 +260,4 @@ def register(app):
     dual_command(app, "request", request_cmd)
     app.add_handler(ChatJoinRequestHandler(on_join_request))
     app.add_handler(CallbackQueryHandler(request_cb, pattern=r"^rq:"))
-  
+    
