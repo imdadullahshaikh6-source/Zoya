@@ -566,29 +566,37 @@ async def _get_media_url(action: str, category: str):
 
 
 async def _send_media(ctx, chat_id, url, caption=None, reply_params=None):
+    """Send gif/mp4 as animation, everything else as photo. Falls back to text."""
     kw = {"chat_id": chat_id, "caption": caption, "parse_mode": ParseMode.HTML}
     if reply_params is not None:
         kw["reply_parameters"] = reply_params
     
     if url:
         is_file_id = not url.startswith("http")
-        ext = url.split("?")[0].lower().rsplit(".", 1)[-1]
         
         try:
-            if is_file_id or ext in ANIM_EXT:
+            if is_file_id:
+                # If it's a file_id, send directly
                 await ctx.bot.send_animation(animation=url, **kw)
+                return True
             else:
-                await ctx.bot.send_photo(photo=url, **kw)
-            return True
+                # It's a URL, download it first to bypass Telegram fetch issues
+                async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+                    resp = await client.get(url)
+                    resp.raise_for_status()
+                    bio = io.BytesIO(resp.content)
+                    
+                    ext = url.split("?")[0].lower().rsplit(".", 1)[-1]
+                    if ext in ANIM_EXT or "gif" in url:
+                        bio.name = "animation.gif"
+                        await ctx.bot.send_animation(animation=bio, **kw)
+                    else:
+                        bio.name = "image.jpg"
+                        await ctx.bot.send_photo(photo=bio, **kw)
+                return True
         except Exception as e:
             log.warning("sending media failed (%s): %s", url, e)
-            if is_file_id:
-                try:
-                    await ctx.bot.send_photo(photo=url, **kw)
-                    return True
-                except Exception as e2:
-                    log.warning("sending photo failed (%s): %s", url, e2)
-
+            
     if caption:
         try:
             await ctx.bot.send_message(
