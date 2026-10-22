@@ -7,7 +7,7 @@ from telegram import (
 )
 from telegram.constants import ChatType, ParseMode
 from telegram.ext import (
-    Application, ContextTypes, MessageHandler,
+    Application, CallbackQueryHandler, ContextTypes, MessageHandler,
     filters as tg_filters,
 )
 
@@ -21,7 +21,7 @@ COMMANDS = [
     ("filter", "Set a new filter (reply to a message)"),
     ("unfilter", "Remove a filter by keyword"),
     ("filters", "List all filters in this chat"),
-    ("stop", "Delete all filters in this chat"),
+    ("unfilterall", "Delete ALL filters in this chat (with confirmation)"),
 ]
 
 HELP_TXT = (
@@ -31,7 +31,7 @@ HELP_TXT = (
     "• <code>/filter &lt;keyword&gt;</code> — reply to any message to set it\n"
     "• <code>/unfilter &lt;keyword&gt;</code> — delete one filter\n"
     "• <code>/filters</code> — list all filters\n"
-    "• <code>/stop</code> — delete every filter\n\n"
+    "• <code>/unfilterall</code> — delete every filter (asks for confirmation)\n\n"
     "<b>Supported content</b>\n"
     "Text, stickers, GIFs, audio, video, photos — anything you can reply to.\n\n"
     "<b>Inline buttons</b>\n"
@@ -47,14 +47,13 @@ def _extract_native_buttons(reply_msg):
     markup = reply_msg.reply_markup
     if not hasattr(markup, 'inline_keyboard') or not markup.inline_keyboard:
         return None
-    
+
     rows = []
     for row in markup.inline_keyboard:
         btn_row = []
         for btn in row:
             if btn.url:  # Only save URL buttons
                 btn_data = {"text": btn.text, "url": btn.url}
-                # Native buttons might have a style attribute
                 if hasattr(btn, 'style') and btn.style:
                     btn_data["style"] = btn.style
                 btn_row.append(btn_data)
@@ -67,7 +66,7 @@ def _kb_from_stored(rows):
     """Build InlineKeyboardMarkup safely, handling older PTB versions without style support."""
     if not rows:
         return None
-    
+
     kb_rows = []
     for row in rows:
         kb_row = []
@@ -78,12 +77,20 @@ def _kb_from_stored(rows):
                 else:
                     btn = InlineKeyboardButton(text=b["text"], url=b["url"])
             except TypeError:
-                # If PTB version is old, fallback to normal button
                 btn = InlineKeyboardButton(text=b["text"], url=b["url"])
             kb_row.append(btn)
         kb_rows.append(kb_row)
-        
+
     return InlineKeyboardMarkup(kb_rows)
+
+
+def _make_button(text, **kwargs):
+    """Create an InlineKeyboardButton, gracefully dropping style if unsupported."""
+    try:
+        return InlineKeyboardButton(text=text, **kwargs)
+    except TypeError:
+        kwargs.pop("style", None)
+        return InlineKeyboardButton(text=text, **kwargs)
 
 
 def _get_args(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -135,29 +142,22 @@ async def filter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if reply.text:
         data.update(type="text", content=reply.text_html, buttons=native_btns)
-        
     elif reply.sticker:
         data.update(type="sticker", content=reply.sticker.file_id, buttons=native_btns)
-        
     elif reply.photo:
         data.update(type="photo", content=reply.photo[-1].file_id, caption=reply.caption_html or "", buttons=native_btns)
-        
     elif reply.video:
         data.update(type="video", content=reply.video.file_id, caption=reply.caption_html or "", buttons=native_btns)
-        
     elif reply.animation:
         data.update(type="animation", content=reply.animation.file_id, caption=reply.caption_html or "", buttons=native_btns)
-        
     elif reply.audio:
         data.update(type="audio", content=reply.audio.file_id, caption=reply.caption_html or "", buttons=native_btns)
-        
     else:
         await msg.reply_text("⚠️ Unsupported message type.")
         return
 
     await dbase.filter_set(chat.id, keyword, data)
 
-    # ✅ Verify the save actually persisted in MongoDB
     verify = await dbase.filter_get(chat.id, keyword)
     if verify:
         await msg.reply_text(f"<blockquote>✅ Filter <b>{keyword}</b> saved with formatting and buttons.</blockquote>")
@@ -194,16 +194,79 @@ async def list_filters_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text(f"<blockquote>{header}{text_body}</blockquote>")
 
 
-async def stop_filters_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def unfilterall_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/unfilterall & .unfilterall — asks for a red confirmation button."""
     msg, chat = update.effective_message, update.effective_chat
     if not await _is_admin(update):
         await msg.reply_text("❌ Only admins can wipe filters.")
         return
-    n = await dbase.filter_delete_all(chat.id)
-    if n:
-        await msg.reply_text(f"<blockquote>🗑 Deleted <b>{n}</b> filter(s) from this chat.</blockquote>")
-    else:
-        await msg.reply_text("<blockquote>There were no filters to delete.</blockquote>")
+
+    rows = await dbase.filter_list(chat.id)
+    if not rows:
+        await msg.reply_text("<blockquote>There are no filters to delete.</blockquote>")
+        return
+
+    text = (
+        f"<blockquote>⚠️ <b>Delete ALL {len(rows)} filter(s)?</b>\n"
+        f"This action cannot be undone.</blockquote>"
+    )
+
+    yes_btn = _make_button("🗑 Yes, delete all", callback_data="unfilterall_yes", style="danger")
+    no_btn  = _make_button("❌ Cancel", callback_data="unfilterall_no")
+
+    kb = InlineKeyboardMarkup([[yes_btn, no_btn]])
+    await msg.reply_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
+
+
+async def unfilterall_confirm_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/unfilterall confirmation callback — only admins can confirm."""
+    query = update.callback_query
+    if not query:
+        return
+
+    user = update.effective_user
+    chat = update.effective_chat
+
+    # Admin check on click (in case a non-admin taps the button)
+    if chat.type != ChatType.PRIVATE:
+        try:
+            member = await chat.get_member(user.id)
+            is_admin = member.status in (ChatMember.ADMINISTRATOR, ChatMember.OWNER)
+        except Exception:
+            is_admin = False
+        if not is_admin:
+            await query.answer("❌ Only admins can confirm this.", show_alert=True)
+            return
+
+    data = query.data or ""
+
+    if data == "unfilterall_no":
+        await query.answer("Cancelled.")
+        try:
+            await query.edit_message_text(
+                "<blockquote>❎ Cancelled — no filters were deleted.</blockquote>",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+        return
+
+    if data == "unfilterall_yes":
+        await query.answer("Deleting…")
+        n = await dbase.filter_delete_all(chat.id)
+        try:
+            await query.edit_message_text(
+                f"<blockquote>🗑 Deleted <b>{n}</b> filter(s) from this chat.</blockquote>",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            try:
+                await query.message.reply_text(
+                    f"<blockquote>🗑 Deleted <b>{n}</b> filter(s) from this chat.</blockquote>",
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                pass
 
 
 async def trigger_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -218,20 +281,16 @@ async def trigger_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if text.startswith(("/", ".")):
         return
 
-    # Extract words including @mentions
     words = set(re.findall(r"@?\w+", text.lower()))
     if not words:
         return
 
     for word in words:
-        # Try matching exactly as it is
         row = await dbase.filter_get(chat.id, word)
-        
-        # If not found and word has @, try without @
+
         if not row and word.startswith("@"):
             row = await dbase.filter_get(chat.id, word[1:])
-        
-        # If not found and word has no @, try with @
+
         if not row and not word.startswith("@"):
             row = await dbase.filter_get(chat.id, f"@{word}")
 
@@ -242,14 +301,12 @@ async def trigger_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         content = row.get("content", "")
         caption = row.get("caption", "")
 
-        # Yahan common.py wala parse_buttons use hoga!
         custom_kb = None
         if ftype == "text" and content:
             content, custom_kb = parse_buttons(content)
         elif caption:
             caption, custom_kb = parse_buttons(caption)
-            
-        # Combine native buttons with custom colour buttons
+
         final_kb = custom_kb
         saved_btns = row.get("buttons")
         if saved_btns:
@@ -260,7 +317,6 @@ async def trigger_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 else:
                     final_kb = n_kb
 
-        # ✅ NEW: Wrap text and captions in <blockquote> for a nice quote UI
         if ftype == "text":
             content = f"<blockquote>{content}</blockquote>" if content else ""
         else:
@@ -295,20 +351,26 @@ def register(app: Application):
         tg_filters.Regex(r"^[./]filter(?:\s+(.+))?$") & tg_filters.ChatType.GROUPS,
         filter_cmd
     ), group=0)
-    
+
+    app.add_handler(MessageHandler(
+        tg_filters.Regex(r"^[./]unfilterall$") & tg_filters.ChatType.GROUPS,
+        unfilterall_cmd
+    ), group=0)
+
     app.add_handler(MessageHandler(
         tg_filters.Regex(r"^[./]unfilter(?:\s+(.+))?$") & tg_filters.ChatType.GROUPS,
         unfilter_cmd
     ), group=0)
-    
+
     app.add_handler(MessageHandler(
         tg_filters.Regex(r"^[./]filters$") & tg_filters.ChatType.GROUPS,
         list_filters_cmd
     ), group=0)
-    
-    app.add_handler(MessageHandler(
-        tg_filters.Regex(r"^[./]stop$") & tg_filters.ChatType.GROUPS,
-        stop_filters_cmd
+
+    # ⚠️ Confirmation buttons for /unfilterall
+    app.add_handler(CallbackQueryHandler(
+        unfilterall_confirm_cb,
+        pattern=r"^unfilterall_(yes|no)$"
     ), group=0)
 
     app.add_handler(MessageHandler(
