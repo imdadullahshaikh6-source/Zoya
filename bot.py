@@ -20,6 +20,7 @@ import admin
 import afk
 import ban
 import blocklist
+import broadcast
 import cleancommand
 import database as dbase
 import filters as bot_filters
@@ -409,6 +410,7 @@ def main():
     blocklist.register(app)
     request.register(app)
     info.register(app)
+    broadcast.register(app)
 
     app.add_error_handler(on_error)
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
