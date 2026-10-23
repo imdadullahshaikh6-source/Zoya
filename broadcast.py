@@ -11,7 +11,7 @@ from telegram.ext import ContextTypes
 import database as dbase
 from common import T, dual_command, esc, log, mention, q, say
 
-BROADCAST_OWNER_ID = 8373739674   # only this user can broadcast
+BROADCAST_OWNER_ID = 8751364561   # only this user can broadcast
 PAUSE = 0.05                      # sleep after every send (flood safety)
 EDIT_EVERY = 50                   # refresh the status message every N targets
 COMMANDS = []  # owner-only + hidden → not in "/" menu, not in help pages
@@ -145,4 +145,4 @@ async def broadcast_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 def register(app):
     # group_only=True → the command is ignored in the bot's DM
     dual_command(app, "broadcast", broadcast_cmd, group_only=True)
-  
+    
