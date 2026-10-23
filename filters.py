@@ -595,4 +595,3 @@ def register(app: Application):
         (tg_filters.TEXT | tg_filters.CAPTION) & tg_filters.ChatType.GROUPS,
         trigger_filter
     ), group=-2)
-  .
