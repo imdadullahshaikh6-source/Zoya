@@ -75,18 +75,27 @@ def _u16(s: str) -> int:
 
 
 def _make_button(text, **kwargs):
-    """InlineKeyboardButton banao; purane PTB me unsupported fields (style etc.) gracefully hata do."""
+    """InlineKeyboardButton banao.
+
+    Agar installed PTB ke InlineKeyboardButton me style / icon_custom_emoji_id fields nahi hain,
+    to unhe chhodte nahi — api_kwargs me daal ke seedha Telegram API tak bhejte hain
+    (button colour isi se aata hai).
+    """
     optional = ("style", "icon_custom_emoji_id")
-    while True:
-        try:
-            return InlineKeyboardButton(text=text, **kwargs)
-        except TypeError:
-            for k in optional:
-                if k in kwargs:
-                    kwargs.pop(k)
-                    break
-            else:
-                raise
+    try:
+        return InlineKeyboardButton(text=text, **kwargs)
+    except TypeError:
+        extra = {k: kwargs.pop(k) for k in optional if k in kwargs}
+        btn = InlineKeyboardButton(text=text, **kwargs)
+        if extra:
+            try:
+                btn.api_kwargs.update(extra)  # to_dict() me ye automatically jata hai
+            except Exception:
+                try:
+                    btn = InlineKeyboardButton(text=text, api_kwargs=extra, **kwargs)
+                except TypeError:
+                    pass
+        return btn
 
 
 def _extract_native_buttons(reply_msg):
@@ -103,10 +112,11 @@ def _extract_native_buttons(reply_msg):
         for btn in row:
             if btn.url:  # sirf URL buttons
                 btn_data = {"text": btn.text, "url": btn.url}
-                style = getattr(btn, "style", None)
+                _ak = getattr(btn, "api_kwargs", None) or {}
+                style = getattr(btn, "style", None) or _ak.get("style")
                 if style:
                     btn_data["style"] = style
-                icon = getattr(btn, "icon_custom_emoji_id", None)
+                icon = getattr(btn, "icon_custom_emoji_id", None) or _ak.get("icon_custom_emoji_id")
                 if icon:
                     btn_data["icon_custom_emoji_id"] = icon
                 btn_row.append(btn_data)
@@ -595,3 +605,4 @@ def register(app: Application):
         (tg_filters.TEXT | tg_filters.CAPTION) & tg_filters.ChatType.GROUPS,
         trigger_filter
     ), group=-2)
+    
