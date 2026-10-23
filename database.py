@@ -593,3 +593,47 @@ async def blocklist_set_mode(chat_id: int, mode: str):
     if chat_id is None: return
     await _db.blocklist.update_one({"chat_id": chat_id}, {"$set": {"chat_id": chat_id, "mode": mode}}, upsert=True)
     
+
+
+# ─────────────── broadcast ───────────────
+# Both collections key their documents by _id (user_id / chat_id).
+# A doc with {"active": False} was marked dead by a previous broadcast and is skipped.
+# Docs that never had the "active" field count as active ($ne False matches them).
+
+_BROADCAST_COLS = ("users", "chats")
+
+
+async def _broadcast_ids(col_name: str) -> list:
+    """All non-dead _ids of a collection, de-duplicated, as ints."""
+    try:
+        cur = _db[col_name].find({"active": {"$ne": False}}, {"_id": 1})
+        ids = [d["_id"] async for d in cur if isinstance(d.get("_id"), int)]
+        return list(dict.fromkeys(ids))
+    except Exception as e:
+        log.warning("[broadcast] fetching %s failed: %s", col_name, e)
+        return []
+
+
+async def get_broadcast_users() -> list:
+    """Every user id that is still reachable (active is not False)."""
+    return await _broadcast_ids("users")
+
+
+async def get_broadcast_chats() -> list:
+    """Every chat id that is still reachable (active is not False)."""
+    return await _broadcast_ids("chats")
+
+
+async def mark_broadcast_dead(col_name: str, chat_id: int) -> bool:
+    """Set {"active": False} on one doc of 'users' or 'chats' so the next broadcast skips it."""
+    if col_name not in _BROADCAST_COLS:
+        log.warning("[broadcast] mark_dead: bad collection %r", col_name)
+        return False
+    try:
+        # no upsert — we never want to create a doc just to mark it dead
+        res = await _db[col_name].update_one({"_id": chat_id}, {"$set": {"active": False}})
+        return res.matched_count > 0
+    except Exception as e:
+        log.warning("[broadcast] mark_dead %s/%s failed: %s", col_name, chat_id, e)
+        return False
+        
