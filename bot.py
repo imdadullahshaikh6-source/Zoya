@@ -198,7 +198,6 @@ def main_page(page: int = 1):
             [B("📌 𝙋𝙞𝙣", "help:pin", style="success"), B("🧹 𝙋𝙪𝙧𝙜𝙚", "help:purge", style="success")],
             [B("📝 𝙌𝙪𝙤𝙩𝙡𝙮", "help:quotly", style="success"), B("🎁 𝙁𝙪𝙣", "help:fun", style="success")],
             [B("𝙒𝙤𝙧𝙙𝙎𝙚𝙚𝙠", "help:wordseek", style="success"), B("📨 𝙍𝙚𝙦𝙪𝙚𝙨𝙩", "help:request", style="success")],
-            [B("🆔 𝙄𝙣𝙛𝙤", "help:info", style="success")],
             [B("⬅ 𝙋𝙧𝙚𝙫𝙞𝙤𝙪𝙨", "help:page1", style="primary"), B("𝙉𝙚𝙭𝙩 ➡", "help:page1", style="primary")],
             [B("⬅ 𝘽𝙖𝙘𝙠", "help:home"), B("✖ 𝘾𝙡𝙤𝙨𝙚", "help:close", style="danger")],
         ]
