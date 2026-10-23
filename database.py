@@ -222,7 +222,21 @@ async def filter_set(chat_id: int, keyword: str, data: dict):
         except (TypeError, ValueError): return
     if not keyword: return
     keyword = keyword.lower().strip()
-    doc = {"chat_id": chat_id, "keyword": keyword, "type": data.get("type", "text"), "content": data.get("content", ""), "caption": data.get("caption", ""), "buttons": data.get("buttons"), "set_by": data.get("set_by"), "since": time.time()}
+    doc = {
+        "chat_id": chat_id,
+        "keyword": keyword,
+        "v": data.get("v", 1),
+        "type": data.get("type", "text"),
+        "content": data.get("content", ""),
+        "caption": data.get("caption", ""),
+        "entities": data.get("entities") or [],
+        "buttons": data.get("buttons"),
+        "no_preview": bool(data.get("no_preview", False)),
+        "spoiler": bool(data.get("spoiler", False)),
+        "caption_above": bool(data.get("caption_above", False)),
+        "set_by": data.get("set_by"),
+        "since": time.time(),
+    }
     await _db.filters.update_one({"chat_id": chat_id, "keyword": keyword}, {"$set": doc}, upsert=True)
 
 
@@ -636,4 +650,4 @@ async def mark_broadcast_dead(col_name: str, chat_id: int) -> bool:
     except Exception as e:
         log.warning("[broadcast] mark_dead %s/%s failed: %s", col_name, chat_id, e)
         return False
-        
+
