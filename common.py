@@ -16,14 +16,12 @@ import database as dbase
 log = logging.getLogger("bot")
 OWNER, ADMIN = ChatMemberStatus.OWNER, ChatMemberStatus.ADMINISTRATOR
 
-# ───────────────────── QUOTE / STICKER CONFIG ─────────────────────
 QUOTE_API = os.getenv("QUOTE_API", "http://127.0.0.1:3000/generate")
 QUOTE_API_FALLBACKS = os.getenv("QUOTE_API_FALLBACKS", "https://bot.lyo.su/quote/generate")
 QUOTE_BG = os.getenv("QUOTE_BG", "#1b1429")
 QUOTE_TIMEOUT = float(os.getenv("QUOTE_TIMEOUT", "10"))
 QUOTE_TOTAL_TIMEOUT = float(os.getenv("QUOTE_TOTAL_TIMEOUT", "22"))
 
-# ───────────────────── FONT / STYLE ─────────────────────
 _SC = dict(zip("abcdefghijklmnopqrstuvwxyz", "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘǫʀꜱᴛᴜᴠᴡxʏᴢ"))
 assert len(_SC) == 26
 _SKIP = re.compile(r"(<[^>]+>|\{[^}]*\}|(?<![\w./])[./][a-zA-Z_]+|@\w+)")
@@ -102,6 +100,7 @@ _FILLER = {"icon", "emoji", "color", "colour", "id"}
 _STYLE_KV_RE = re.compile(r"^(?:style|color|colour)\s*=\s*(\w+)$", re.I)
 _ICON_KV_RE = re.compile(r"^(?:icon|emoji|icon_custom_emoji_id|custom_emoji_id|id)\s*=\s*(\d+)$", re.I)
 _ICON_BARE_RE = re.compile(r"^\d{10,25}$")
+_TG_EMOJI_RE = re.compile(r'<tg-emoji\s+emoji-id="(\d+)">', re.I)
 
 
 def normalize_url(url: str) -> str:
@@ -158,13 +157,19 @@ def parse_button_tail(tail: str) -> dict:
     }
 
 
-def parse_button_match(label: str, tail: str, from_html: bool = True):
+def parse_button_match(label: str, tail: str, from_html: bool = True, icon_override: str = None):
+    # 1. HTML me se tg-emoji ki ID nikaalo (welcome/rules ke liye)
     if from_html:
+        m = _TG_EMOJI_RE.search(label)
+        if m and not icon_override:
+            icon_override = m.group(1)
         label = html.unescape(re.sub(r"<[^>]*>", "", label))
         tail = html.unescape(tail)
+    
     label = label.strip()
     if not label:
         return None, False
+    
     spec = parse_button_tail(tail)
     d = {"text": label}
     if spec["disabled"]:
@@ -174,12 +179,18 @@ def parse_button_match(label: str, tail: str, from_html: bool = True):
         if not url_ok(url):
             return None, False
         d["url"] = url
+    
     if spec["style"]:
         d["style"] = spec["style"]
-    if spec["icon"]:
-        d["icon_custom_emoji_id"] = spec["icon"]
+    
+    # 2. Icon: tail se mile ya label se mile (custom emoji) -> dono me se ek use karo
+    icon = spec["icon"] or icon_override
+    if icon:
+        d["icon_custom_emoji_id"] = icon
+    
     if spec["rich"]:
         d["rich"] = True
+        
     return d, spec["same"]
 
 
@@ -269,6 +280,7 @@ def html_to_plain(text: str) -> str:
 
 
 RICH_BLANK = "⚡"
+
 
 def ensure_rich_nonempty(rich: dict) -> dict:
     rich = dict(rich or {})
@@ -554,7 +566,6 @@ async def send_rich(bot, chat_id, row, kb=None, reply_to=None, thread_id=None,
     )
 
 
-# ───────────────────── PERMISSIONS ─────────────────────
 RIGHTS = [
     ("change_info", "Change Info"),
     ("delete_messages", "Delete Messages"),
@@ -642,7 +653,6 @@ def explain(e: Exception) -> str:
     return f"Telegram said: {esc(e)}"
 
 
-# ───────────────────── TARGET RESOLUTION ─────────────────────
 async def resolve_target(update, ctx):
     msg, chat = update.effective_message, update.effective_chat
     args = list(ctx.args or [])
@@ -679,7 +689,6 @@ async def resolve_target(update, ctx):
     return (m.user if m else None), title
 
 
-# ───────────────────── DUAL /command AND .command SUPPORT ─────────────────────
 def _dotify(callback):
     async def wrapper(update, ctx):
         msg = update.effective_message
