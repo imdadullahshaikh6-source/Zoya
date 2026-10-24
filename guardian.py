@@ -192,21 +192,13 @@ async def _apply_delay(ctx, update: Update, mode: str):
     if mode == "both":
         if delay == 0:
             await dbase.guardian_set(
-                chat.id,
-                edit_delay_seconds=0,
-                media_delay_seconds=0,
-                delay_seconds=0,
-                enabled=False,
+                chat.id, edit_delay_seconds=0, media_delay_seconds=0, delay_seconds=0, enabled=False,
             )
             _invalidate_cache(chat.id)
             await say(ctx, chat.id, T("<blockquote>✅ Guardian turned <b>OFF</b> — neither edits nor media will be deleted.</blockquote>"), reply_to=msg.message_id)
         else:
             await dbase.guardian_set(
-                chat.id,
-                edit_delay_seconds=delay,
-                media_delay_seconds=delay,
-                delay_seconds=delay,
-                enabled=True,
+                chat.id, edit_delay_seconds=delay, media_delay_seconds=delay, delay_seconds=delay, enabled=True,
             )
             _invalidate_cache(chat.id)
             log.info("[guardian] setdelay both=%ds for chat %s", delay, chat.id)
@@ -216,11 +208,7 @@ async def _apply_delay(ctx, update: Update, mode: str):
 
     elif mode == "edit":
         new_enabled = (delay > 0) or (cur_media > 0)
-        await dbase.guardian_set(
-            chat.id,
-            edit_delay_seconds=delay,
-            enabled=new_enabled,
-        )
+        await dbase.guardian_set(chat.id, edit_delay_seconds=delay, enabled=new_enabled)
         _invalidate_cache(chat.id)
         if delay == 0:
             await say(ctx, chat.id, T("<blockquote>✅ Edit deletion turned <b>OFF</b>.</blockquote>"), reply_to=msg.message_id)
@@ -232,11 +220,7 @@ async def _apply_delay(ctx, update: Update, mode: str):
 
     elif mode == "media":
         new_enabled = (delay > 0) or (cur_edit > 0)
-        await dbase.guardian_set(
-            chat.id,
-            media_delay_seconds=delay,
-            enabled=new_enabled,
-        )
+        await dbase.guardian_set(chat.id, media_delay_seconds=delay, enabled=new_enabled)
         _invalidate_cache(chat.id)
         if delay == 0:
             await say(ctx, chat.id, T("<blockquote>✅ Media deletion turned <b>OFF</b>.</blockquote>"), reply_to=msg.message_id)
@@ -309,9 +293,7 @@ async def permit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(
             chat.id,
             q(T("<b>⚠️ Anonymous Admin detected.</b>\nOnly the real group owner can approve permits. Please tap the button below to verify.")),
-            parse_mode=ParseMode.HTML,
-            reply_to_message_id=msg.message_id,
-            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id, reply_markup=keyboard,
         )
         return
 
@@ -349,9 +331,7 @@ async def unpermit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(
             chat.id,
             q(T("<b>⚠️ Anonymous Admin detected.</b>\nOnly the real group owner can approve. Tap the button below to verify.")),
-            parse_mode=ParseMode.HTML,
-            reply_to_message_id=msg.message_id,
-            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id, reply_markup=keyboard,
         )
         return
 
@@ -383,9 +363,7 @@ async def permitlist_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(
             chat.id,
             q(T("<b>⚠️ Anonymous Admin detected.</b>\nOnly the real group owner can view the permit list. Tap to verify.")),
-            parse_mode=ParseMode.HTML,
-            reply_to_message_id=msg.message_id,
-            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id, reply_markup=keyboard,
         )
         return
 
@@ -450,38 +428,6 @@ def _msg_has_media(msg) -> bool:
         or msg.voice or msg.audio or msg.document
         or msg.animation or msg.sticker
     )
-
-
-# FIXED: Track background tasks properly using PTB's internal `create_task` mechanism
-_BG_TASKS: set = set()
-
-
-def _task_done(task: "asyncio.Task"):
-    _BG_TASKS.discard(task)
-    if task.cancelled():
-        return
-    exc = task.exception()
-    if exc:
-        log.error("[guardian] background task failed: %r", exc)
-
-
-def _spawn(app, coro) -> "asyncio.Task":
-    # ptb Application.create_task handles cancellation on shutdown automatically
-    task = app.create_task(coro)
-    _BG_TASKS.add(task)
-    task.add_done_callback(_task_done)
-    return task
-
-
-async def cancel_background_tasks(application=None):
-    tasks = [t for t in list(_BG_TASKS) if not t.done()]
-    if tasks:
-        log.info("[guardian] cancelling %d pending delete task(s) on shutdown", len(tasks))
-    for t in tasks:
-        t.cancel()
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
-    _BG_TASKS.clear()
 
 
 async def _delete_after(ctx, chat_id: int, message_id: int, delay: int, note_text: str):
@@ -598,21 +544,13 @@ async def _guardian_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if is_edit:
             note = f"<blockquote>🗑️ {_safe_name(user)}'s <b>edited message</b> was deleted.</blockquote>"
 
-        _spawn(ctx.application, _delete_after(ctx, chat.id, msg.message_id, delay, note))
+        # FIXED: Use PTB's app.create_task to automatically handle shutdown
+        ctx.application.create_task(_delete_after(ctx, chat.id, msg.message_id, delay, note))
     except Exception as e:
         log.exception("[guardian] watcher error: %s", e)
 
 
 def register(app):
-    _prev_post_shutdown = getattr(app, "post_shutdown", None)
-
-    async def _post_shutdown(application):
-        await cancel_background_tasks(application)
-        if _prev_post_shutdown:
-            await _prev_post_shutdown(application)
-
-    app.post_shutdown = _post_shutdown
-
     dual_command(app, "setdelay", setdelay_cmd)
     dual_command(app, "editdelay", editdelay_cmd)
     dual_command(app, "mediadelay", mediadelay_cmd)
