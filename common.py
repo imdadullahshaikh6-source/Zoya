@@ -16,12 +16,14 @@ import database as dbase
 log = logging.getLogger("bot")
 OWNER, ADMIN = ChatMemberStatus.OWNER, ChatMemberStatus.ADMINISTRATOR
 
+# ───────────────────── QUOTE / STICKER CONFIG ─────────────────────
 QUOTE_API = os.getenv("QUOTE_API", "http://127.0.0.1:3000/generate")
 QUOTE_API_FALLBACKS = os.getenv("QUOTE_API_FALLBACKS", "https://bot.lyo.su/quote/generate")
 QUOTE_BG = os.getenv("QUOTE_BG", "#1b1429")
 QUOTE_TIMEOUT = float(os.getenv("QUOTE_TIMEOUT", "10"))
 QUOTE_TOTAL_TIMEOUT = float(os.getenv("QUOTE_TOTAL_TIMEOUT", "22"))
 
+# ───────────────────── FONT / STYLE ─────────────────────
 _SC = dict(zip("abcdefghijklmnopqrstuvwxyz", "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘǫʀꜱᴛᴜᴠᴡxʏᴢ"))
 assert len(_SC) == 26
 _SKIP = re.compile(r"(<[^>]+>|\{[^}]*\}|(?<![\w./])[./][a-zA-Z_]+|@\w+)")
@@ -88,6 +90,7 @@ async def say(ctx, chat_id, text, kb=None, reply_to=None):
     )
 
 
+# ───────────────────── ROSE-STYLE BUTTON PARSER ─────────────────────
 BTN_RE = re.compile(r"\[([^\[\]\n]+?)\]\(\s*buttonurl:\s*/{0,2}\s*([^)]+?)\s*\)", re.I | re.S)
 
 _STYLE_ALIASES = {
@@ -265,14 +268,13 @@ def html_to_plain(text: str) -> str:
     return html.unescape(re.sub(r"<[^>]*>", "", text)).strip()
 
 
-RICH_BLANK = "⚡"  # FIXED: Use visible char
+RICH_BLANK = "⚡"
 
 def ensure_rich_nonempty(rich: dict) -> dict:
     rich = dict(rich or {})
     if not rich.get("blocks"):
         rich["blocks"] = [{"type": "paragraph", "text": RICH_BLANK}]
     else:
-        # FIXED: Check if text block exists, if not append one
         has_text = False
         def check_text(blocks):
             nonlocal has_text
@@ -363,7 +365,7 @@ def _rt_extract(container, key, rows) -> bool:
         par[k] = t
     pruned = _rt_prune(container[key])
     if pruned is None:
-        container[key] = RICH_BLANK  # FIXED: Don't delete block, use blank
+        container[key] = RICH_BLANK
     else:
         container[key] = pruned
     return True
@@ -549,4 +551,168 @@ async def send_rich(bot, chat_id, row, kb=None, reply_to=None, thread_id=None,
     txt = (rich_plain_text(row.get("rich")) or "✦")[:4096]
     return await bot.send_message(
         chat_id, txt, reply_markup=fb_kb, reply_parameters=rp, message_thread_id=thread_id,
-          )
+    )
+
+
+# ───────────────────── PERMISSIONS ─────────────────────
+RIGHTS = [
+    ("change_info", "Change Info"),
+    ("delete_messages", "Delete Messages"),
+    ("restrict_members", "Ban Users"),
+    ("invite_users", "Invite Users"),
+    ("pin_messages", "Pin Messages"),
+    ("manage_video_chats", "Video Chats"),
+    ("manage_topics", "Topics"),
+    ("promote_members", "Add Admins"),
+]
+RL = dict(RIGHTS)
+
+
+async def get_member(ctx, chat_id, user_id):
+    try:
+        return await ctx.bot.get_chat_member(chat_id, user_id)
+    except TelegramError:
+        return None
+
+
+def rights_of(m) -> dict:
+    if m is None:
+        return {k: False for k, _ in RIGHTS}
+    if m.status == OWNER:
+        return {k: True for k, _ in RIGHTS}
+    if m.status == ADMIN:
+        return {k: bool(getattr(m, f"can_{k}", False)) for k, _ in RIGHTS}
+    return {k: False for k, _ in RIGHTS}
+
+
+async def perm_report(ctx, chat) -> str:
+    m = await get_member(ctx, chat.id, ctx.bot.id)
+    if not m or m.status not in (ADMIN, OWNER):
+        return T("<b>bot status:</b> not admin ❌\nmake me admin so every feature works.")
+    r = rights_of(m)
+    lines = [T("<b>bot status:</b> admin ✅")]
+    for k, label in RIGHTS:
+        if k == "manage_topics" and not chat.is_forum:
+            continue
+        lines.append(f"{'✅' if r[k] else '❌'} {label}")
+    return "\n".join(lines)
+
+
+async def require_admin(update, ctx, right=None) -> bool:
+    msg, chat = update.effective_message, update.effective_chat
+    if chat.type == ChatType.PRIVATE:
+        await say(ctx, chat.id, T("this command works only in groups."))
+        return False
+    if msg.sender_chat and msg.sender_chat.id == chat.id:
+        return True
+    user = update.effective_user
+    m = await get_member(ctx, chat.id, user.id)
+    if not m or m.status not in (OWNER, ADMIN):
+        await say(ctx, chat.id, T("only group admins can use this command."), reply_to=msg.message_id)
+        return False
+    if right and m.status == ADMIN and not getattr(m, f"can_{right}", False):
+        await say(
+            ctx, chat.id,
+            T("{m}, you don't have the {l} right.", m=mention(user), l=f"<b>{RL[right]}</b>"),
+            reply_to=msg.message_id,
+        )
+        return False
+    return True
+
+
+async def tag_missing(ctx, chat_id, user, labels, reply_to=None):
+    await say(
+        ctx, chat_id,
+        T(
+            "{m}, i don't have the {l} power. please give it to me and try again.",
+            m=mention(user), l="<b>" + esc(", ".join(labels)) + "</b>",
+        ),
+        reply_to=reply_to,
+    )
+
+
+def explain(e: Exception) -> str:
+    s = str(e).lower()
+    if "not enough rights" in s or "chat_admin_required" in s or "right_forbidden" in s:
+        return "I don't have enough rights for this."
+    if "user_creator" in s or "chat owner" in s or "can't remove chat owner" in s:
+        return "This user is the group owner. Nothing can be changed."
+    if "user_not_participant" in s or "participant_id_invalid" in s:
+        return "This user is not in the group."
+    return f"Telegram said: {esc(e)}"
+
+
+# ───────────────────── TARGET RESOLUTION ─────────────────────
+async def resolve_target(update, ctx):
+    msg, chat = update.effective_message, update.effective_chat
+    args = list(ctx.args or [])
+    rep = msg.reply_to_message
+    if rep and rep.from_user and not rep.sender_chat:
+        return rep.from_user, " ".join(args).strip()
+    if not args:
+        return None, ""
+    title = " ".join(args[1:]).strip()
+    for ent in msg.entities or []:
+        if ent.type == "text_mention" and ent.user:
+            return ent.user, title
+    a, uid = args[0], None
+    if a.lstrip("-").isdigit():
+        uid = int(a)
+    elif a.startswith("@"):
+        uid = await dbase.get_user_id_by_username(a)
+        if uid is None:
+            try:
+                cchat = await ctx.bot.get_chat(a)
+                if cchat.type == ChatType.PRIVATE:
+                    uid = cchat.id
+            except TelegramError as e:
+                try:
+                    member = await ctx.bot.get_chat_member(chat.id, a)
+                    if member and member.user:
+                        uid = member.user.id
+                except TelegramError as e2:
+                    log.warning(f"[Resolve] Failed to resolve {a} globally ({e}) or locally ({e2})")
+                    pass
+    if uid is None:
+        return None, ""
+    m = await get_member(ctx, chat.id, uid)
+    return (m.user if m else None), title
+
+
+# ───────────────────── DUAL /command AND .command SUPPORT ─────────────────────
+def _dotify(callback):
+    async def wrapper(update, ctx):
+        msg = update.effective_message
+        text = msg.text or msg.caption or ""
+        ctx.args = text.split()[1:]
+        await callback(update, ctx)
+    return wrapper
+
+
+def dual_command(app, names, callback, group_only=True):
+    if isinstance(names, str):
+        names = [names]
+    f = filters.ChatType.GROUPS if group_only else filters.ALL
+    app.add_handler(CommandHandler(names, callback, filters=f))
+    pattern = re.compile(
+        r"^\.(?:%s)(?:@\w+)?(?:\s|$)" % "|".join(re.escape(n) for n in names), re.I
+    )
+    app.add_handler(MessageHandler(filters.Regex(pattern) & f, _dotify(callback)))
+
+
+def human_delta(seconds: float) -> str:
+    seconds = int(seconds)
+    d, seconds = divmod(seconds, 86400)
+    h, seconds = divmod(seconds, 3600)
+    m, seconds = divmod(seconds, 60)
+    parts = []
+    if d:
+        parts.append(f"{d}d")
+    if h:
+        parts.append(f"{h}h")
+    if m:
+        parts.append(f"{m}m")
+    if not parts:
+        parts.append(f"{seconds}s")
+    return " ".join(parts[:2])
+    
