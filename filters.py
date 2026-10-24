@@ -29,7 +29,7 @@ import database as dbase
 from common import (
     BTN_RE, BUTTON_LADDER, add_to_rows, extract_rich_buttons, get_rich_message, html_to_plain,
     is_button_extra_error, make_button, markup_from_rows, parse_button_match, parse_button_rows,
-    send_rich, split_button_rows, text_to_rich,
+    send_rich, split_button_rows, text_to_rich, truncate_text_entities, _u16,
 )
 
 log = logging.getLogger("filters")
@@ -62,8 +62,6 @@ HELP_TXT = (
     "Colored: <code>[Join](buttonurl://https://t.me/x:success)</code>\n"
     "Custom emoji: <code>[Join](buttonurl://https://t.me/x:5368324170671202286)</code>\n"
     "Both: <code>[Join](buttonurl://https://t.me/x:success:5368324170671202286)</code>\n"
-    "<b>Rich panel button</b> (like /promote): add the word <code>:style:</code>\n"
-    "<code>[Join](buttonurl://https://t.me/x:primary:style:5368324170671202286)</code>\n"
     "Disabled button: <code>[Soon](buttonurl://disabled)</code>\n\n"
     "<b>Rich messages</b>\n"
     "Replying to a Rich Message (dividers, pull-quotes, expandable quotes) with "
@@ -80,11 +78,6 @@ _TILDE_BTN_RE = re.compile(r"\[([^\[\]\n~]+?)\s*~\s*((?:https?|tg)://[^\s\]]+)\s
 
 
 # ───────────────────────── helpers ─────────────────────────
-
-def _u16(s: str) -> int:
-    """Length in UTF-16 code units (Telegram entity offsets yahi use karta hai)."""
-    return len(s.encode("utf-16-le")) // 2
-
 
 def _make_button(text, **kw):
     """Thin wrapper -> common.make_button (style / icon_custom_emoji_id / disabled via api_kwargs)."""
@@ -571,12 +564,33 @@ async def _send_filter(msg, bot, row, icons=True, styles=True):
         api_kwargs["has_spoiler"] = True
     if row.get("caption_above") and text_part and ftype in ("photo", "video", "animation"):
         api_kwargs["show_caption_above_media"] = True
+    
+    # Fix Media_caption_too_long
+    if text_part and _u16(text_part) > 1024:
+        text_part, entities = truncate_text_entities(text_part, entities, 1024)
+        if modern:
+            ents = _to_entities(entities, bot)
+        else:
+            text_part = text_part[:1024]
+
     kw = dict(base, caption=text_part or None, parse_mode=parse_mode)
     if ents and text_part:
         kw["caption_entities"] = ents
     if api_kwargs:
         kw["api_kwargs"] = api_kwargs
-    await getattr(msg, method)(content, **kw)
+    
+    try:
+        await getattr(msg, method)(content, **kw)
+    except BadRequest as e:
+        if "caption" in str(e).lower() and "long" in str(e).lower():
+            # Fallback truncate
+            text_part = re.sub(r'<[^>]+>', '', text_part or "")[:1000] + "..."
+            kw["caption"] = text_part
+            kw.pop("caption_entities", None)
+            kw["parse_mode"] = None
+            await getattr(msg, method)(content, **kw)
+        else:
+            raise
 
 
 async def trigger_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
