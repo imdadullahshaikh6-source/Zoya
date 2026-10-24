@@ -146,8 +146,6 @@ async def _bot_can_guard(ctx, chat_id: int) -> bool:
     return ok
 
 
-# ─────────────────── DELAY COMMANDS ───────────────────
-
 async def _apply_delay(ctx, update: Update, mode: str):
     msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
     if chat.type == ChatType.PRIVATE:
@@ -180,7 +178,6 @@ async def _apply_delay(ctx, update: Update, mode: str):
             await say(ctx, chat.id, T("<blockquote>❌ invalid delay — use <code>1m</code> to <code>6h</code> or <code>off</code></blockquote>"), reply_to=msg.message_id)
             return
 
-    # 🔥 UNIVERSAL: har mode sirf apna field update kare, dusre ko touch na kare
     cfg = await _cached_guardian_get(chat.id, use_cache=False) or {}
 
     def _eff(key):
@@ -294,8 +291,6 @@ async def guard_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     _invalidate_cache(chat.id)
     await say(ctx, chat.id, T(f"<blockquote>✅ Guardian turned <b>{'ON' if enabled else 'OFF'}</b>.</blockquote>"), reply_to=msg.message_id)
 
-
-# ─────────────────── PERMIT COMMANDS ───────────────────
 
 async def permit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
@@ -457,11 +452,7 @@ def _msg_has_media(msg) -> bool:
     )
 
 
-# ───────── background task bookkeeping ─────────
-# asyncio only keeps a WEAK reference to tasks, so a bare `asyncio.create_task(...)` can be
-# garbage-collected mid-sleep, and any task still sleeping when the bot stops is destroyed with
-# "Task was destroyed but it is pending!". We keep a strong reference, log failures, and cancel +
-# await everything on shutdown.
+# FIXED: Track background tasks properly using PTB's internal `create_task` mechanism
 _BG_TASKS: set = set()
 
 
@@ -474,15 +465,15 @@ def _task_done(task: "asyncio.Task"):
         log.error("[guardian] background task failed: %r", exc)
 
 
-def _spawn(coro) -> "asyncio.Task":
-    task = asyncio.create_task(coro)
+def _spawn(app, coro) -> "asyncio.Task":
+    # ptb Application.create_task handles cancellation on shutdown automatically
+    task = app.create_task(coro)
     _BG_TASKS.add(task)
     task.add_done_callback(_task_done)
     return task
 
 
 async def cancel_background_tasks(application=None):
-    """Called from Application.post_shutdown (wired up in register())."""
     tasks = [t for t in list(_BG_TASKS) if not t.done()]
     if tasks:
         log.info("[guardian] cancelling %d pending delete task(s) on shutdown", len(tasks))
@@ -535,7 +526,6 @@ async def _delete_after(ctx, chat_id: int, message_id: int, delay: int, note_tex
 
 
 async def _get_guard_delay(ctx, chat, user, is_edit: bool, is_media: bool) -> int:
-    """Returns delay in seconds (0 = don't delete)."""
     if not chat or chat.type == ChatType.PRIVATE:
         return 0
     me = ctx.application.bot_data.get("me")
@@ -560,7 +550,6 @@ async def _get_guard_delay(ctx, chat, user, is_edit: bool, is_media: bool) -> in
     edit_delay  = int(edit_delay)
     media_delay = int(media_delay)
 
-    # Permitted user check
     permitted = cfg.get("permitted_users", [])
     for u in permitted:
         if u.get("id") and u.get("id") == user.id:
@@ -573,7 +562,6 @@ async def _get_guard_delay(ctx, chat, user, is_edit: bool, is_media: bool) -> in
     if not await _bot_can_guard(ctx, chat.id):
         return 0
 
-    # 🔥 Dono applicable delays me se MIN use karo
     applicable = []
     if is_edit and edit_delay >= MIN_DELAY:
         applicable.append(edit_delay)
@@ -610,14 +598,12 @@ async def _guardian_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if is_edit:
             note = f"<blockquote>🗑️ {_safe_name(user)}'s <b>edited message</b> was deleted.</blockquote>"
 
-        _spawn(_delete_after(ctx, chat.id, msg.message_id, delay, note))
+        _spawn(ctx.application, _delete_after(ctx, chat.id, msg.message_id, delay, note))
     except Exception as e:
         log.exception("[guardian] watcher error: %s", e)
 
 
 def register(app):
-    # cancel pending delayed-delete tasks cleanly when the bot stops (no more
-    # "Task was destroyed but it is pending!"); keeps any post_shutdown hook that already exists
     _prev_post_shutdown = getattr(app, "post_shutdown", None)
 
     async def _post_shutdown(application):
