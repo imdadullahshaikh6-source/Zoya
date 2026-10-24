@@ -159,12 +159,22 @@ def parse_button_tail(tail: str) -> dict:
 
 
 def parse_button_match(label: str, tail: str, from_html: bool = True):
+    emoji_id = None
     if from_html:
+        # Extract custom emoji ID from label if present
+        emoji_match = re.search(r'<tg-emoji[^>]+emoji-id=["\']?(\d+)["\']?', label)
+        if not emoji_match:
+            emoji_match = re.search(r'<emoji[^>]+id=["\']?(\d+)["\']?', label)
+        if emoji_match:
+            emoji_id = emoji_match.group(1)
+        
         label = html.unescape(re.sub(r"<[^>]*>", "", label))
         tail = html.unescape(tail)
+    
     label = label.strip()
     if not label:
         return None, False
+    
     spec = parse_button_tail(tail)
     d = {"text": label}
     if spec["disabled"]:
@@ -174,10 +184,16 @@ def parse_button_match(label: str, tail: str, from_html: bool = True):
         if not url_ok(url):
             return None, False
         d["url"] = url
+    
     if spec["style"]:
         d["style"] = spec["style"]
+    
+    # Use explicit icon from tail, else use extracted from label
     if spec["icon"]:
         d["icon_custom_emoji_id"] = spec["icon"]
+    elif emoji_id:
+        d["icon_custom_emoji_id"] = emoji_id
+        
     if spec["rich"]:
         d["rich"] = True
     return d, spec["same"]
@@ -715,4 +731,35 @@ def human_delta(seconds: float) -> str:
     if not parts:
         parts.append(f"{seconds}s")
     return " ".join(parts[:2])
+
+
+# ───────────────────── TEXT TRUNCATION ─────────────────────
+def _u16(s: str) -> int:
+    return len(s.encode("utf-16-le")) // 2
+
+
+def truncate_text_entities(text: str, entities: list, max_len: int = 1024):
+    if _u16(text) <= max_len:
+        return text, entities
+    
+    out = []
+    u16_len = 0
+    for ch in text:
+        ch_len = _u16(ch)
+        if u16_len + ch_len > max_len:
+            break
+        out.append(ch)
+        u16_len += ch_len
+    truncated = "".join(out)
+    
+    new_ents = []
+    for ent in entities or []:
+        if ent["offset"] >= max_len:
+            continue
+        ent_len = min(ent["length"], max_len - ent["offset"])
+        if ent_len > 0:
+            d = dict(ent)
+            d["length"] = ent_len
+            new_ents.append(d)
+    return truncated, new_ents
     
