@@ -93,10 +93,6 @@ DEFAULT_WELCOME = {
 # --------------------------------------------------
 
 def is_member_status(status):
-    """
-    Returns True when Telegram reports that the user
-    is currently a member of the group.
-    """
     return status in (
         "member",
         "administrator",
@@ -105,11 +101,6 @@ def is_member_status(status):
 
 
 def is_inside_chat(member) -> bool:
-    """
-    True if this ChatMember object is currently INSIDE the group.
-    A muted/restricted user can still be inside (is_member=True),
-    which the plain status check would miss.
-    """
     status = member.status
     if is_member_status(status):
         return True
@@ -119,9 +110,6 @@ def is_inside_chat(member) -> bool:
 
 
 # Duplicate protection: Telegram can deliver the same join twice
-# (NEW_CHAT_MEMBERS service message + CHAT_MEMBER update).
-# Entries expire quickly so a user who leaves and joins again
-# later still gets a fresh welcome.
 _DEDUP_SECONDS = 60
 
 
@@ -178,8 +166,6 @@ def extract(msg, cmd: str):
     src = msg.reply_to_message
 
     if src:
-        # Bot API 10.1+ Rich Message (pull-quote / divider post): koi .text/.caption nahi hota,
-        # isliye pehle "reply to a message..." usage aa jata tha. Poora raw object save karo.
         rich = get_rich_message(src)
         if rich:
             return {
@@ -222,8 +208,6 @@ def extract(msg, cmd: str):
 
 
 def render_plain(tpl: str, user, chat, count, botuser) -> str:
-    """Same fillings as render(), but plain text (rich messages are not HTML).
-    {mention} becomes the plain full name - rich text has no <a> tags."""
     rep = {
         "{first}": user.first_name or "",
         "{last}": user.last_name or "",
@@ -284,7 +268,6 @@ async def send_welcome(ctx, chat, user, cfg):
             w.get("rich") or {},
             lambda t: render_plain(t, user, chat, count, me.username if me else ""),
         )
-        # scan the text inside the rich blocks for [Btn](buttonurl://...) and take it out
         rich_obj, found = extract_rich_buttons(row["rich"])
         std_rows, rich_rows = split_button_rows(found)
         row["rich"] = rich_obj
@@ -309,8 +292,6 @@ async def send_welcome(ctx, chat, user, cfg):
 
     std_rows, rich_rows = split_button_rows(rows)
     if rich_rows and kind == "text":
-        # ":style:" buttons -> Rich Message + {"type": "buttons"} block (like /promote).
-        # Rich paragraphs are plain text, so HTML formatting of the welcome text is not kept.
         return await send_rich(
             ctx.bot, chat.id, {"rich": text_to_rich(text, html_mode=True)},
             markup_from_rows(std_rows), rich_rows=rich_rows,
@@ -1070,4 +1051,5 @@ def register(app):
             ChatMemberHandler.MY_CHAT_MEMBER,
         )
     )
+    
     
