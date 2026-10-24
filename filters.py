@@ -1,17 +1,4 @@
-"""Filters module — Rose-style auto replies.
-
-Ab filters ENTITY-based save hote hain (text + entities), HTML round-trip nahi.
-Isse Telegram ka har format as-it-is save/send hota hai:
-bold, italic, underline, strike, spoiler, code, pre (language), links, mentions,
-hashtags, CUSTOM EMOJI, normal + EXPANDABLE blockquote, date/time, etc.
-Media: photo, video, animation(GIF), audio, voice, video note, document, sticker
-(spoiler media + caption-above-media bhi preserved).
-Rich Messages (Bot API 10.1+, jaise "Meet Zoya" wala divider/pull-quote post) bhi save hote hain.
-Buttons: native inline buttons + Rose-style (parser lives in common.py, shared with welcome.py)
-[Text](buttonurl://URL[:same][:danger|:success|:primary][:custom_emoji_id])
-+ [Text](buttonurl://disabled) + [Text ~ URL].
-Purane (HTML wale) saved filters bhi chalte rahenge.
-"""
+"""Filters module — Rose-style auto replies."""
 import logging
 import re
 
@@ -52,42 +39,32 @@ HELP_TXT = (
     "• <code>/unfilterall</code> — delete every filter (asks for confirmation)\n\n"
     "<b>Supported content</b>\n"
     "Text, photo, video, GIF, audio, voice, video note, document, sticker.\n"
-    "Every Telegram format is kept exactly as you wrote it: bold, italic, underline, "
-    "strike, spoiler, code, pre, links, custom emoji, quote &amp; expandable quote.\n\n"
+    "Every Telegram format is kept exactly as you wrote it.\n\n"
     "<b>Inline buttons</b>\n"
     "Native Telegram buttons, <code>[Text ~ URL]</code>, and Rose-style "
     "<code>[Text](buttonurl://URL)</code>\n"
     "Same row: <code>:same</code> — Colors: <code>:danger</code> (Red), "
     "<code>:success</code> (Green), <code>:primary</code> (Blue)\n"
-    "Colored: <code>[Join](buttonurl://https://t.me/x:success)</code>\n"
-    "Custom emoji: <code>[Join](buttonurl://https://t.me/x:5368324170671202286)</code>\n"
-    "Both: <code>[Join](buttonurl://https://t.me/x:success:5368324170671202286)</code>\n"
+    "Custom emoji: Add premium emoji inside the button text, e.g. <code>[Join 🔥](buttonurl://...)</code>\n"
     "<b>Rich panel button</b> (like /promote): add the word <code>:style:</code>\n"
-    "<code>[Join](buttonurl://https://t.me/x:primary:style:5368324170671202286)</code>\n"
+    "<code>[Join 🔥](buttonurl://https://t.me/x:primary:style)</code>\n"
     "Disabled button: <code>[Soon](buttonurl://disabled)</code>\n\n"
     "<b>Rich messages</b>\n"
     "Replying to a Rich Message (dividers, pull-quotes, expandable quotes) with "
     "<code>/filter keyword</code> works too."
 )
 
-# True karoge to jo plain filter me koi quote nahi hai use poora blockquote me wrap kar dega.
-# Default False => jaisa user ne bheja bilkul waisa hi jayega.
 WRAP_PLAIN_IN_QUOTE = False
-
-BLANK = "\u3164"  # sirf buttons wale filter ke liye invisible text
+BLANK = "\u3164"
 
 _TILDE_BTN_RE = re.compile(r"\[([^\[\]\n~]+?)\s*~\s*((?:https?|tg)://[^\s\]]+)\s*\]", re.I)
 
 
-# ───────────────────────── helpers ─────────────────────────
-
 def _u16(s: str) -> int:
-    """Length in UTF-16 code units (Telegram entity offsets yahi use karta hai)."""
     return len(s.encode("utf-16-le")) // 2
 
 
 def _make_button(text, **kw):
-    """Thin wrapper -> common.make_button (style / icon_custom_emoji_id / disabled via api_kwargs)."""
     return make_button(
         text,
         url=kw.get("url"),
@@ -99,7 +76,6 @@ def _make_button(text, **kw):
 
 
 def _btn_to_dict(btn):
-    """InlineKeyboardButton -> storable dict. URL buttons and disabled buttons only."""
     ak = getattr(btn, "api_kwargs", None) or {}
     d = {"text": btn.text}
     if btn.url:
@@ -118,7 +94,6 @@ def _btn_to_dict(btn):
 
 
 def _extract_native_buttons(reply_msg):
-    """Telegram ke native inline URL buttons (JOIN wale etc.) save karo."""
     if not reply_msg or not reply_msg.reply_markup:
         return None
     markup = reply_msg.reply_markup
@@ -134,15 +109,15 @@ def _extract_native_buttons(reply_msg):
 
 
 def _kb_from_stored(rows, icons=True, styles=True):
-    """Stored button rows -> InlineKeyboardMarkup (style / icon_custom_emoji_id via api_kwargs)."""
     return markup_from_rows(rows, icons, styles)
 
 
-def _extract_buttons(text: str, entities: list):
-    """Text me se button syntax nikalo AUR entities ke offsets sahi shift karo.
+def _u16_to_str(s, u16_idx):
+    return len(s.encode("utf-16-le")[:u16_idx*2].decode("utf-16-le", "ignore"))
 
-    Returns (clean_text, clean_entities(list of dict), rows(list of list of dict)).
-    """
+
+def _extract_buttons(text: str, entities: list):
+    """Text me se button syntax nikalo AUR entities ke offsets sahi shift karo."""
     entities = entities or []
     if not text:
         return text, entities, []
@@ -154,22 +129,39 @@ def _extract_buttons(text: str, entities: list):
         matches.append(("tilde", m))
     matches.sort(key=lambda x: x[1].start())
 
-    rows, ranges_c = [], []   # ranges_c = removal ranges (char index)
+    rows, ranges_c = [], []
     last_end = 0
     for kind, m in matches:
         if m.start() < last_end:
             continue
+        
+        icon_override = None
         if kind == "rose":
-            # plain text (not HTML) -> from_html=False so literal "&amp;" etc. is left alone
-            btn, same = parse_button_match(m.group(1), m.group(2), from_html=False)
+            label = m.group(1)
+            label_start = m.start(1)
+            label_end = m.end(1)
+            
+            # 🔥 NAYA LOGIC: Button text ke andar custom emoji ID dhoondo
+            for ent in entities:
+                if ent.get("type") == "custom_emoji":
+                    ent_start_u16 = ent["offset"]
+                    ent_end_u16 = ent_start_u16 + ent["length"]
+                    ent_start = _u16_to_str(text, ent_start_u16)
+                    ent_end = _u16_to_str(text, ent_end_u16)
+                    if ent_start >= label_start and ent_end <= label_end:
+                        icon_override = ent.get("custom_emoji_id")
+                        break
+            
+            btn, same = parse_button_match(label, m.group(2), from_html=False, icon_override=icon_override)
         else:
             btn, same = parse_button_match(m.group(1), m.group(2).strip(), from_html=False)
+            
         if not btn:
-            continue          # invalid link -> leave the text as it is, never break the whole filter
-        add_to_rows(rows, btn, same)      # ":same" only joins a row of the same kind
+            continue
+        add_to_rows(rows, btn, same)
 
         s, e = m.start(), m.end()
-        if s > last_end and text[s - 1] == "\n":   # button se pehle ka newline bhi hata do
+        if s > last_end and text[s - 1] == "\n":
             s -= 1
         ranges_c.append((s, e))
         last_end = e
@@ -177,7 +169,6 @@ def _extract_buttons(text: str, entities: list):
     if not ranges_c:
         return text, entities, []
 
-    # naya text
     parts, pos = [], 0
     for s, e in ranges_c:
         parts.append(text[pos:s])
@@ -249,8 +240,6 @@ async def _is_admin(update: Update) -> bool:
         return False
 
 
-# ───────────────────────── commands ─────────────────────────
-
 async def filter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg, chat = update.effective_message, update.effective_chat
 
@@ -285,13 +274,9 @@ async def filter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     rich = get_rich_message(reply)
 
     if rich:
-        # Bot API 10.1+ Rich Message (dividers, pull-quotes, expandable quotes, ...).
-        # Isme .text / .caption nahi hota - isi wajah se pehle "Unsupported message type" aata tha.
-        # Poora raw object save karte hain + source message ka pointer (copy fallback ke liye).
         data.update(type="rich", content="", rich=rich,
                     src_chat=reply.chat_id, src_msg=reply.message_id)
     elif reply.text:
-        # Normal text, expandable blockquote ke saath bhi: entity "expandable_blockquote" as-it-is jati hai.
         data.update(type="text", content=reply.text, entities=ents_of(reply.entities))
         lpo = getattr(reply, "link_preview_options", None)
         if lpo is not None and getattr(lpo, "is_disabled", False):
@@ -313,10 +298,6 @@ async def filter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif reply.document:
         data.update(type="document", content=reply.document.file_id)
     else:
-        try:
-            log.warning("filter: unsupported reply, message fields = %s", sorted(reply.to_dict().keys()))
-        except Exception:
-            pass
         await msg.reply_text("⚠️ Unsupported message type.")
         return
 
@@ -329,14 +310,6 @@ async def filter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             data["caption_above"] = True
 
     await dbase.filter_set(chat.id, keyword, data)
-    if data["type"] == "rich":
-        import json as _json
-        log.warning(
-            "[rich-buttons] saved rich filter %r: buttonurl syntax inside rich text=%s, native inline buttons=%s",
-            keyword,
-            "buttonurl" in _json.dumps(data.get("rich"), ensure_ascii=False).lower(),
-            sum(len(r) for r in (data.get("buttons") or [])),
-        )
 
     verify = await dbase.filter_get(chat.id, keyword)
     if verify:
@@ -375,7 +348,6 @@ async def list_filters_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def unfilterall_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """/unfilterall & .unfilterall — asks for a red confirmation button."""
     msg, chat = update.effective_message, update.effective_chat
     if not await _is_admin(update):
         await msg.reply_text("❌ Only admins can wipe filters.")
@@ -399,7 +371,6 @@ async def unfilterall_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def unfilterall_confirm_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """/unfilterall confirmation callback — only admins can confirm."""
     query = update.callback_query
     if not query:
         return
@@ -448,8 +419,6 @@ async def unfilterall_confirm_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
                 pass
 
 
-# ───────────────────────── trigger ─────────────────────────
-
 _CAPTION_METHODS = {
     "photo": "reply_photo",
     "video": "reply_video",
@@ -458,14 +427,11 @@ _CAPTION_METHODS = {
     "voice": "reply_voice",
     "document": "reply_document",
 }
-_PLAIN_METHODS = {          # caption support nahi
+_PLAIN_METHODS = {
     "sticker": "reply_sticker",
     "video_note": "reply_video_note",
 }
 
-
-# ───────────────────────── rich messages (Bot API 10.1+) ─────────────────────────
-# helpers common.py me hain (welcome.py bhi use karta hai)
 
 async def _send_rich(msg, bot, row, kb, rich_rows=None, fallback_kb=None):
     thread = msg.message_thread_id if getattr(msg, "is_topic_message", False) else None
@@ -476,13 +442,8 @@ async def _send_rich(msg, bot, row, kb, rich_rows=None, fallback_kb=None):
 async def _send_filter(msg, bot, row, icons=True, styles=True):
     ftype = row.get("type", "text")
     if ftype == "rich":
-        # Scan the text INSIDE the rich blocks for [Btn](buttonurl://...) -> remove it from the text.
-        #   ":style:" buttons -> {"type": "buttons"} block appended at the end (like admin.py)
-        #   other buttons     -> normal inline keyboard under the message
         rich_obj, found = extract_rich_buttons(row.get("rich") or {})
         std_rows, rich_rows = split_button_rows(found)
-        log.warning("[rich-buttons] filter: found %d standard row(s), %d rich row(s) in rich text",
-                    len(std_rows), len(rich_rows))
         kb = _merge_kb(
             markup_from_rows(std_rows, icons, styles),
             _kb_from_stored(row.get("buttons"), icons, styles),
@@ -509,11 +470,10 @@ async def _send_filter(msg, bot, row, icons=True, styles=True):
             entities = list(entities) + [{"type": "blockquote", "offset": 0, "length": _u16(text_part)}]
         ents = _to_entities(entities, bot)
     else:
-        # ---- legacy (HTML) filters ----
         ents = None
         parse_mode = ParseMode.HTML
         if text_part:
-            text_part, custom_rows = parse_button_rows(text_part)     # same parser as welcome.py
+            text_part, custom_rows = parse_button_rows(text_part)
         if text_part and "<blockquote" not in text_part:
             text_part = f"<blockquote>{text_part}</blockquote>"
 
@@ -521,15 +481,13 @@ async def _send_filter(msg, bot, row, icons=True, styles=True):
     native_kb = _kb_from_stored(row.get("buttons"), icons, styles)
 
     if rich_rows and ftype == "text":
-        # ":style:" buttons in a plain text filter -> turn it into a Rich Message + buttons block.
-        # (Rich paragraphs are plain text, so bold/italic/custom emoji of the source are not kept.)
         rich_obj = text_to_rich(text_part, html_mode=not modern)
         kb = _merge_kb(markup_from_rows(std_rows, icons, styles), native_kb)
         fb = _merge_kb(kb, markup_from_rows(rich_rows, icons, styles))
         await _send_rich(msg, bot, {"rich": rich_obj}, kb, rich_rows, fb)
         return
     if rich_rows:
-        std_rows = std_rows + rich_rows       # media filters can't be rich messages -> normal buttons
+        std_rows = std_rows + rich_rows
 
     custom_kb = _kb_from_stored(std_rows, icons, styles)
     final_kb = _merge_kb(custom_kb, native_kb)
@@ -541,7 +499,6 @@ async def _send_filter(msg, bot, row, icons=True, styles=True):
 
     if ftype == "text":
         if not (text_part or "").strip():
-            # buttons-only / emoji-only filter: Telegram refuses an empty text ("Message_empty")
             text_part, ents = BLANK, None
         if row.get("no_preview"):
             api_kwargs["link_preview_options"] = {"is_disabled": True}
@@ -553,7 +510,6 @@ async def _send_filter(msg, bot, row, icons=True, styles=True):
         try:
             await msg.reply_text(text_part, **kw)
         except BadRequest as e:
-            # Kuch clients/servers U+3164 ko empty maante hain (buttons-only filter) -> braille blank try karo.
             if text_part == BLANK and "empty" in str(e).lower():
                 await msg.reply_text("\u2800", **kw)
             else:
@@ -608,7 +564,6 @@ async def trigger_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             continue
 
         try:
-            # full buttons -> without custom-emoji icons -> without icons/colours (never fail silently)
             for i, (icons, styles) in enumerate(BUTTON_LADDER):
                 try:
                     await _send_filter(msg, ctx.bot, row, icons=icons, styles=styles)
