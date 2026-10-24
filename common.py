@@ -158,8 +158,8 @@ def parse_button_tail(tail: str) -> dict:
 
 
 def parse_button_match(label: str, tail: str, from_html: bool = True, icon_override: str = None):
-    # 1. HTML me se tg-emoji ki ID nikaalo (welcome/rules ke liye)
     if from_html:
+        # HTML mode (welcome/rules) me tg-emoji tag se ID nikaalo
         m = _TG_EMOJI_RE.search(label)
         if m and not icon_override:
             icon_override = m.group(1)
@@ -179,15 +179,14 @@ def parse_button_match(label: str, tail: str, from_html: bool = True, icon_overr
         if not url_ok(url):
             return None, False
         d["url"] = url
-    
+        
     if spec["style"]:
         d["style"] = spec["style"]
-    
-    # 2. Icon: tail se mile ya label se mile (custom emoji) -> dono me se ek use karo
+        
     icon = spec["icon"] or icon_override
     if icon:
         d["icon_custom_emoji_id"] = icon
-    
+        
     if spec["rich"]:
         d["rich"] = True
         
