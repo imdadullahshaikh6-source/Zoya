@@ -359,7 +359,13 @@ async def send_welcome(ctx, chat, user, cfg):
         try:
             return await _send(ParseMode.HTML, kb)
         except BadRequest as e:
-            if "parse" in str(e).lower() or "entities" in str(e).lower():
+            err = str(e).lower()
+            if "caption" in err and "long" in err:
+                nonlocal text
+                # Fallback to plain text truncated if caption is too long
+                text = re.sub(r'<[^>]+>', '', text)[:1000] + "..."
+                return await _send(None, kb)
+            if "parse" in err or "entities" in err:
                 return await _send(None, kb)
             raise
 
