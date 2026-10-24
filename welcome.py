@@ -1,19 +1,6 @@
 """
 ZOYA Welcome Plugin
-Features:
-- Rose-style welcome buttons
-- Text, photo, video, GIF, sticker, document welcomes
-- Direct member add detection (manual admin add)
-- Link join detection
-- Join request detection
-- Approved join request detection
-- Bot itself added detection
-- ALL members (humans + bots) get welcome when welcome is ON
-- Clean welcome
-- Group rules
-- Admin permission checks
 """
-
 import re
 import time
 
@@ -21,10 +8,7 @@ from telegram import ReplyParameters
 from telegram.constants import ChatType, ParseMode
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
-    MessageHandler,
-    filters,
-    ChatJoinRequestHandler,
-    ChatMemberHandler,
+    MessageHandler, filters, ChatJoinRequestHandler, ChatMemberHandler,
 )
 
 import database as dbase
@@ -37,7 +21,6 @@ from common import (
 
 cfg_get = dbase.cfg_get
 cfg_set = dbase.cfg_set
-
 
 HELP_TXT = (
     "<b>✦ greetings — welcome system</b>\n\n"
@@ -52,16 +35,13 @@ HELP_TXT = (
     "[Label](buttonurl://https://link.com)\n"
     "[A](buttonurl://https://a.com:same) "
     "[B](buttonurl://https://b.com:same)\n\n"
-    "colored: [Join](buttonurl://https://t.me/chan:success)\n"
+    "colored: [Join 🔥](buttonurl://https://t.me/chan:success)\n"
     "(colors: :primary blue • :success green • :danger red)\n"
-    "custom emoji: [Join](buttonurl://https://t.me/chan:5368324170671202286)\n"
-    "both: [Join](buttonurl://https://t.me/chan:success:5368324170671202286)\n"
     "rich panel button (like /promote): add :style:\n"
-    "[Join](buttonurl://https://t.me/chan:primary:style:5368324170671202286)\n"
+    "[Join 🔥](buttonurl://https://t.me/chan:primary:style)\n"
     "disabled button: [Soon](buttonurl://disabled)\n"
     "only admins with change info can set these."
 )
-
 
 COMMANDS = [
     ("setwelcome", "Set welcome message"),
@@ -71,7 +51,6 @@ COMMANDS = [
     ("setrules", "Set group rules"),
     ("rules", "Show group rules"),
 ]
-
 
 DEFAULT_WELCOME = {
     "type": "text",
@@ -88,28 +67,11 @@ DEFAULT_WELCOME = {
 }
 
 
-# --------------------------------------------------
-# MEMBER DETECTION HELPERS
-# --------------------------------------------------
-
 def is_member_status(status):
-    """
-    Returns True when Telegram reports that the user
-    is currently a member of the group.
-    """
-    return status in (
-        "member",
-        "administrator",
-        "creator",
-    )
+    return status in ("member", "administrator", "creator")
 
 
 def is_inside_chat(member) -> bool:
-    """
-    True if this ChatMember object is currently INSIDE the group.
-    A muted/restricted user can still be inside (is_member=True),
-    which the plain status check would miss.
-    """
     status = member.status
     if is_member_status(status):
         return True
@@ -118,18 +80,12 @@ def is_inside_chat(member) -> bool:
     return False
 
 
-# Duplicate protection: Telegram can deliver the same join twice
-# (NEW_CHAT_MEMBERS service message + CHAT_MEMBER update).
-# Entries expire quickly so a user who leaves and joins again
-# later still gets a fresh welcome.
 _DEDUP_SECONDS = 60
 
 
 def already_processed(ctx, chat_id, user_id):
-    seen = ctx.application.bot_data.setdefault(
-        "welcome_processed_members", {}
-    )
-    if not isinstance(seen, dict):          # old set from a previous version
+    seen = ctx.application.bot_data.setdefault("welcome_processed_members", {})
+    if not isinstance(seen, dict):
         seen = ctx.application.bot_data["welcome_processed_members"] = {}
 
     now = time.time()
@@ -139,7 +95,6 @@ def already_processed(ctx, chat_id, user_id):
     if last is not None and now - last < _DEDUP_SECONDS:
         return True
 
-    # Drop expired entries so memory never grows.
     if len(seen) >= 2000:
         for k in [k for k, t in seen.items() if now - t >= _DEDUP_SECONDS]:
             seen.pop(k, None)
@@ -149,7 +104,6 @@ def already_processed(ctx, chat_id, user_id):
 
 
 def forget_processed(ctx, chat_id, user_id):
-    """Allow a retry (e.g. other update path) if sending failed."""
     seen = ctx.application.bot_data.get("welcome_processed_members")
     if isinstance(seen, dict):
         seen.pop((chat_id, user_id), None)
@@ -158,19 +112,14 @@ def forget_processed(ctx, chat_id, user_id):
 def media_of(m):
     if m.photo:
         return "photo", m.photo[-1].file_id
-
     if m.video:
         return "video", m.video.file_id
-
     if m.animation:
         return "animation", m.animation.file_id
-
     if m.sticker:
         return "sticker", m.sticker.file_id
-
     if m.document:
         return "document", m.document.file_id
-
     return "text", None
 
 
@@ -178,8 +127,6 @@ def extract(msg, cmd: str):
     src = msg.reply_to_message
 
     if src:
-        # Bot API 10.1+ Rich Message (pull-quote / divider post): koi .text/.caption nahi hota,
-        # isliye pehle "reply to a message..." usage aa jata tha. Poora raw object save karo.
         rich = get_rich_message(src)
         if rich:
             return {
@@ -192,38 +139,21 @@ def extract(msg, cmd: str):
             }
 
         kind, fid = media_of(src)
-        text = src.text_html if src.text else (
-            src.caption_html or ""
-        )
+        text = src.text_html if src.text else (src.caption_html or "")
     else:
         kind, fid = media_of(msg)
-
-        raw = msg.text_html if msg.text else (
-            msg.caption_html or ""
-        )
-
-        text = re.sub(
-            rf"^[/.]{cmd}(@\w+)?\s*",
-            "",
-            raw or "",
-            flags=re.I,
-        )
+        raw = msg.text_html if msg.text else (msg.caption_html or "")
+        text = re.sub(rf"^[/.]{cmd}(@\w+)?\s*", "", raw or "", flags=re.I)
 
     text = (text or "").strip()
 
     if kind == "text" and not text:
         return None
 
-    return {
-        "type": kind,
-        "file_id": fid,
-        "text": text,
-    }
+    return {"type": kind, "file_id": fid, "text": text}
 
 
 def render_plain(tpl: str, user, chat, count, botuser) -> str:
-    """Same fillings as render(), but plain text (rich messages are not HTML).
-    {mention} becomes the plain full name - rich text has no <a> tags."""
     rep = {
         "{first}": user.first_name or "",
         "{last}": user.last_name or "",
@@ -246,10 +176,7 @@ def render(tpl: str, user, chat, count, botuser) -> str:
         "{first}": esc(user.first_name or ""),
         "{last}": esc(user.last_name or ""),
         "{fullname}": esc(user.full_name or ""),
-        "{username}": (
-            f"@{esc(user.username)}"
-            if user.username else mention(user)
-        ),
+        "{username}": f"@{esc(user.username)}" if user.username else mention(user),
         "{mention}": mention(user),
         "{id}": str(user.id),
         "{chatname}": esc(chat.title or ""),
@@ -257,16 +184,10 @@ def render(tpl: str, user, chat, count, botuser) -> str:
         "{chatid}": str(chat.id),
         "{botuser}": botuser or "",
     }
-
     for k, v in rep.items():
         tpl = tpl.replace(k, v)
-
     return tpl
 
-
-# --------------------------------------------------
-# SEND WELCOME
-# --------------------------------------------------
 
 async def send_welcome(ctx, chat, user, cfg):
     w = cfg.get("welcome") or DEFAULT_WELCOME
@@ -284,7 +205,6 @@ async def send_welcome(ctx, chat, user, cfg):
             w.get("rich") or {},
             lambda t: render_plain(t, user, chat, count, me.username if me else ""),
         )
-        # scan the text inside the rich blocks for [Btn](buttonurl://...) and take it out
         rich_obj, found = extract_rich_buttons(row["rich"])
         std_rows, rich_rows = split_button_rows(found)
         row["rich"] = rich_obj
@@ -293,15 +213,8 @@ async def send_welcome(ctx, chat, user, cfg):
             rich_rows=rich_rows, fallback_kb=markup_from_rows(rich_rows),
         )
 
-    raw = render(
-        w.get("text") or "",
-        user,
-        chat,
-        count,
-        me.username if me else "",
-    )
-
-    text, rows = parse_button_rows(raw)       # shared parser (common.py)
+    raw = render(w.get("text") or "", user, chat, count, me.username if me else "")
+    text, rows = parse_button_rows(raw)
 
     kind = w.get("type", "text")
     fid = w.get("file_id")
@@ -309,51 +222,31 @@ async def send_welcome(ctx, chat, user, cfg):
 
     std_rows, rich_rows = split_button_rows(rows)
     if rich_rows and kind == "text":
-        # ":style:" buttons -> Rich Message + {"type": "buttons"} block (like /promote).
-        # Rich paragraphs are plain text, so HTML formatting of the welcome text is not kept.
         return await send_rich(
             ctx.bot, chat.id, {"rich": text_to_rich(text, html_mode=True)},
             markup_from_rows(std_rows), rich_rows=rich_rows,
             fallback_kb=markup_from_rows(rich_rows),
         )
-    rows = std_rows + rich_rows               # media welcomes can't be rich -> normal buttons
+    rows = std_rows + rich_rows
 
     async def _send(parse_mode, kb):
         nonlocal sticker_msg
         cap = text or None
-
         if kind == "photo":
-            return await ctx.bot.send_photo(
-                chat.id, fid, caption=cap, parse_mode=parse_mode, reply_markup=kb,
-            )
-
+            return await ctx.bot.send_photo(chat.id, fid, caption=cap, parse_mode=parse_mode, reply_markup=kb)
         if kind == "video":
-            return await ctx.bot.send_video(
-                chat.id, fid, caption=cap, parse_mode=parse_mode, reply_markup=kb,
-            )
-
+            return await ctx.bot.send_video(chat.id, fid, caption=cap, parse_mode=parse_mode, reply_markup=kb)
         if kind == "animation":
-            return await ctx.bot.send_animation(
-                chat.id, fid, caption=cap, parse_mode=parse_mode, reply_markup=kb,
-            )
-
+            return await ctx.bot.send_animation(chat.id, fid, caption=cap, parse_mode=parse_mode, reply_markup=kb)
         if kind == "document":
-            return await ctx.bot.send_document(
-                chat.id, fid, caption=cap, parse_mode=parse_mode, reply_markup=kb,
-            )
-
+            return await ctx.bot.send_document(chat.id, fid, caption=cap, parse_mode=parse_mode, reply_markup=kb)
         if kind == "sticker":
-            if sticker_msg is None:            # a retry must not send the sticker twice
+            if sticker_msg is None:
                 sticker_msg = await ctx.bot.send_sticker(chat.id, fid)
             if text:
-                await ctx.bot.send_message(
-                    chat.id, text, parse_mode=parse_mode, reply_markup=kb,
-                )
+                await ctx.bot.send_message(chat.id, text, parse_mode=parse_mode, reply_markup=kb)
             return sticker_msg
-
-        return await ctx.bot.send_message(
-            chat.id, text or "Welcome!", parse_mode=parse_mode, reply_markup=kb,
-        )
+        return await ctx.bot.send_message(chat.id, text or "Welcome!", parse_mode=parse_mode, reply_markup=kb)
 
     async def _attempt(kb):
         try:
@@ -363,362 +256,133 @@ async def send_welcome(ctx, chat, user, cfg):
                 return await _send(None, kb)
             raise
 
-    # full buttons -> without custom-emoji icons -> without icons/colours
     return await send_with_fallback(_attempt, rows)
 
 
-# --------------------------------------------------
-# SET WELCOME
-# --------------------------------------------------
-
 async def setwelcome_cmd(update, ctx):
-    msg = update.message
-    chat = update.effective_chat
-
-    if not msg:
-        return
-
-    if not await require_admin(update, ctx, "change_info"):
+    msg, chat = update.message, update.effective_chat
+    if not msg or not await require_admin(update, ctx, "change_info"):
         return
 
     data = extract(msg, "setwelcome")
-
     if not data:
-        await say(
-            ctx,
-            chat.id,
-            T(
-                "reply to a message with /setwelcome, "
-                "or write text after it.\n"
-                "photo / video / gif / sticker also work "
-                "(send media with caption /setwelcome).\n"
-                "fillings: {f}\n"
-                "buttons: [Label](buttonurl://link:same:danger)",
-                f=(
-                    "{first} {last} {fullname} {username} "
-                    "{mention} {id} {chatname} {count}"
-                ),
-            ),
-            reply_to=msg.message_id,
-        )
+        await say(ctx, chat.id, T(
+            "reply to a message with /setwelcome, or write text after it.\n"
+            "fillings: {f}\nbuttons: [Label](buttonurl://link:same:danger)",
+            f="{first} {last} {fullname} {username} {mention} {id} {chatname} {count}"
+        ), reply_to=msg.message_id)
         return
 
     await dbase.save_welcome(chat.id, data)
-
     cfg = await cfg_get(chat.id)
 
     try:
-        await send_welcome(
-            ctx,
-            chat,
-            msg.from_user,
-            cfg,
-        )
-
-        prev = T(
-            "✅ welcome saved (type: {t}). preview sent above.",
-            t=data["type"],
-        )
-
+        await send_welcome(ctx, chat, msg.from_user, cfg)
+        prev = T("✅ welcome saved (type: {t}). preview sent above.", t=data["type"])
     except TelegramError as e:
-        prev = (
-            T("⚠ saved, but preview failed:")
-            + f" {esc(e)}"
-        )
+        prev = T("⚠ saved, but preview failed:") + f" {esc(e)}"
 
-    bm = await get_member(
-        ctx,
-        chat.id,
-        ctx.bot.id,
-    )
-
+    bm = await get_member(ctx, chat.id, ctx.bot.id)
     extra = ""
-
     if not rights_of(bm)["delete_messages"]:
-        extra = "\n\n" + T(
-            "{m}, i don't have the {l} power. "
-            "/cleanwelcome will not work "
-            "until you give it.",
-            m=mention(msg.from_user),
-            l="<b>Delete Messages</b>",
-        )
+        extra = "\n\n" + T("{m}, i don't have the {l} power. /cleanwelcome will not work until you give it.",
+                           m=mention(msg.from_user), l="<b>Delete Messages</b>")
 
-    await say(
-        ctx,
-        chat.id,
-        prev + "\n\n" + await perm_report(ctx, chat) + extra,
-        reply_to=msg.message_id,
-    )
+    await say(ctx, chat.id, prev + "\n\n" + await perm_report(ctx, chat) + extra, reply_to=msg.message_id)
 
-
-# --------------------------------------------------
-# WELCOME STATUS
-# --------------------------------------------------
 
 async def welcome_cmd(update, ctx):
-    msg = update.message
-    chat = update.effective_chat
-
-    if not msg:
-        return
-
-    if not await require_admin(update, ctx, "change_info"):
+    msg, chat = update.message, update.effective_chat
+    if not msg or not await require_admin(update, ctx, "change_info"):
         return
 
     cfg = await cfg_get(chat.id)
-
     arg = ctx.args[0].lower() if ctx.args else ""
 
     if arg in ("on", "off", "yes", "no"):
         val = arg in ("on", "yes")
-
-        await cfg_set(
-            chat.id,
-            welcome_on=val,
-        )
-
-        await say(
-            ctx,
-            chat.id,
-            T(
-                "welcome messages are now {s}.",
-                s=(
-                    "<b>ON ✅</b>"
-                    if val else "<b>OFF ❌</b>"
-                ),
-            ),
-            reply_to=msg.message_id,
-        )
+        await cfg_set(chat.id, welcome_on=val)
+        await say(ctx, chat.id, T("welcome messages are now {s}.", s="<b>ON ✅</b>" if val else "<b>OFF ❌</b>"), reply_to=msg.message_id)
         return
 
     w = cfg.get("welcome") or DEFAULT_WELCOME
-
     status = T(
-        "<b>welcome settings</b>\n"
-        "welcome: {a}\n"
-        "clean welcome: {b}\n"
-        "message type: {t}",
-        a=(
-            "ON ✅"
-            if cfg.get("welcome_on", True)
-            else "OFF ❌"
-        ),
-        b=(
-            "ON ✅"
-            if cfg.get("clean_welcome")
-            else "OFF ❌"
-        ),
+        "<b>welcome settings</b>\nwelcome: {a}\nclean welcome: {b}\nmessage type: {t}",
+        a="ON ✅" if cfg.get("welcome_on", True) else "OFF ❌",
+        b="ON ✅" if cfg.get("clean_welcome") else "OFF ❌",
         t=w.get("type", "text"),
     )
-
-    await say(
-        ctx,
-        chat.id,
-        status + "\n\n" + await perm_report(ctx, chat),
-        reply_to=msg.message_id,
-    )
-
+    await say(ctx, chat.id, status + "\n\n" + await perm_report(ctx, chat), reply_to=msg.message_id)
     try:
-        await send_welcome(
-            ctx,
-            chat,
-            msg.from_user,
-            cfg,
-        )
-
+        await send_welcome(ctx, chat, msg.from_user, cfg)
     except TelegramError as e:
-        await say(
-            ctx,
-            chat.id,
-            T("preview failed:") + f" {esc(e)}",
-        )
+        await say(ctx, chat.id, T("preview failed:") + f" {esc(e)}")
 
-
-# --------------------------------------------------
-# RESET WELCOME
-# --------------------------------------------------
 
 async def resetwelcome_cmd(update, ctx):
-    msg = update.message
-    chat = update.effective_chat
-
-    if not msg:
+    msg, chat = update.message, update.effective_chat
+    if not msg or not await require_admin(update, ctx, "change_info"):
         return
-
-    if not await require_admin(update, ctx, "change_info"):
-        return
-
     await dbase.reset_welcome(chat.id)
+    await say(ctx, chat.id, T("welcome reset to default ✅"), reply_to=msg.message_id)
 
-    await say(
-        ctx,
-        chat.id,
-        T("welcome reset to default ✅"),
-        reply_to=msg.message_id,
-    )
-
-
-# --------------------------------------------------
-# CLEAN WELCOME
-# --------------------------------------------------
 
 async def _toggle(update, ctx, key, label, cmd):
-    msg = update.message
-    chat = update.effective_chat
-
-    if not msg:
-        return
-
-    if not await require_admin(update, ctx, "change_info"):
+    msg, chat = update.message, update.effective_chat
+    if not msg or not await require_admin(update, ctx, "change_info"):
         return
 
     arg = ctx.args[0].lower() if ctx.args else ""
-
     cfg = await cfg_get(chat.id)
 
     if arg not in ("on", "off", "yes", "no"):
-        cur = (
-            "ON ✅"
-            if cfg.get(key)
-            else "OFF ❌"
-        )
-
-        await say(
-            ctx,
-            chat.id,
-            T(
-                "{l} is currently {c}.\n"
-                "usage: /{cmd} on|off",
-                l=label,
-                c=cur,
-                cmd=cmd,
-            ),
-            reply_to=msg.message_id,
-        )
+        cur = "ON ✅" if cfg.get(key) else "OFF ❌"
+        await say(ctx, chat.id, T("{l} is currently {c}.\nusage: /{cmd} on|off", l=label, c=cur, cmd=cmd), reply_to=msg.message_id)
         return
 
     val = arg in ("on", "yes")
-
     if val:
-        bm = await get_member(
-            ctx,
-            chat.id,
-            ctx.bot.id,
-        )
-
+        bm = await get_member(ctx, chat.id, ctx.bot.id)
         if not rights_of(bm)["delete_messages"]:
-            await tag_missing(
-                ctx,
-                chat.id,
-                msg.from_user,
-                ["Delete Messages"],
-                msg.message_id,
-            )
+            await tag_missing(ctx, chat.id, msg.from_user, ["Delete Messages"], msg.message_id)
             return
 
-    await cfg_set(
-        chat.id,
-        **{key: val},
-    )
-
-    await say(
-        ctx,
-        chat.id,
-        T(
-            "{l} is now {s}.",
-            l=label,
-            s=(
-                "<b>ON ✅</b>"
-                if val else "<b>OFF ❌</b>"
-            ),
-        ),
-        reply_to=msg.message_id,
-    )
+    await cfg_set(chat.id, **{key: val})
+    await say(ctx, chat.id, T("{l} is now {s}.", l=label, s="<b>ON ✅</b>" if val else "<b>OFF ❌</b>"), reply_to=msg.message_id)
 
 
 async def cleanwelcome_cmd(update, ctx):
-    await _toggle(
-        update,
-        ctx,
-        "clean_welcome",
-        "clean welcome",
-        "cleanwelcome",
-    )
+    await _toggle(update, ctx, "clean_welcome", "clean welcome", "cleanwelcome")
 
-
-# --------------------------------------------------
-# RULES
-# --------------------------------------------------
 
 async def setrules_cmd(update, ctx):
-    msg = update.message
-    chat = update.effective_chat
-
-    if not msg:
-        return
-
-    if not await require_admin(update, ctx, "change_info"):
+    msg, chat = update.message, update.effective_chat
+    if not msg or not await require_admin(update, ctx, "change_info"):
         return
 
     data = extract(msg, "setrules")
-
     if not data or not data["text"]:
-        await say(
-            ctx,
-            chat.id,
-            T(
-                "reply to a text message with /setrules "
-                "or write the rules after it."
-            ),
-            reply_to=msg.message_id,
-        )
+        await say(ctx, chat.id, T("reply to a text message with /setrules or write the rules after it."), reply_to=msg.message_id)
         return
 
-    await cfg_set(
-        chat.id,
-        rules=data["text"],
-    )
-
-    await say(
-        ctx,
-        chat.id,
-        T(
-            "rules saved ✅ members can use /rules"
-        ),
-        reply_to=msg.message_id,
-    )
+    await cfg_set(chat.id, rules=data["text"])
+    await say(ctx, chat.id, T("rules saved ✅ members can use /rules"), reply_to=msg.message_id)
 
 
 async def rules_cmd(update, ctx):
-    msg = update.message
-    chat = update.effective_chat
-
+    msg, chat = update.message, update.effective_chat
     if not msg:
         return
-
     if chat.type == ChatType.PRIVATE:
-        await say(
-            ctx,
-            chat.id,
-            T("use this command in a group."),
-        )
+        await say(ctx, chat.id, T("use this command in a group."))
         return
 
     cfg = await cfg_get(chat.id)
-
     if not cfg.get("rules"):
-        await say(
-            ctx,
-            chat.id,
-            T(
-                "no rules set yet. admins can use /setrules."
-            ),
-            reply_to=msg.message_id,
-        )
+        await say(ctx, chat.id, T("no rules set yet. admins can use /setrules."), reply_to=msg.message_id)
         return
 
     text, rows = parse_button_rows(cfg["rules"])
-
     std_rows, rich_rows = split_button_rows(rows)
     if rich_rows:
         await send_rich(
@@ -730,191 +394,59 @@ async def rules_cmd(update, ctx):
 
     async def _send_rules(kb):
         return await ctx.bot.send_message(
-            chat.id,
-            q(text),
-            parse_mode=ParseMode.HTML,
-            reply_markup=kb,
-            reply_parameters=ReplyParameters(
-                message_id=msg.message_id,
-                allow_sending_without_reply=True,
-            ),
+            chat.id, q(text), parse_mode=ParseMode.HTML, reply_markup=kb,
+            reply_parameters=ReplyParameters(message_id=msg.message_id, allow_sending_without_reply=True),
         )
-
     await send_with_fallback(_send_rules, rows)
 
 
-# --------------------------------------------------
-# BOT PERMISSIONS
-# --------------------------------------------------
-
 async def botperms_cmd(update, ctx):
-    msg = update.message
-    chat = update.effective_chat
-
-    if not msg:
+    msg, chat = update.message, update.effective_chat
+    if not msg or not await require_admin(update, ctx):
         return
+    await say(ctx, chat.id, await perm_report(ctx, chat), reply_to=msg.message_id)
 
-    if not await require_admin(update, ctx):
-        return
-
-    await say(
-        ctx,
-        chat.id,
-        await perm_report(ctx, chat),
-        reply_to=msg.message_id,
-    )
-
-
-# --------------------------------------------------
-# COMMON WELCOME PROCESSOR
-# --------------------------------------------------
 
 async def process_new_member(ctx, chat, user):
-    """
-    Shared function for every new member.
-    Welcomes humans AND bots (if welcome is ON).
-    """
-    from common import log
-
     cfg = await cfg_get(chat.id)
 
     if not cfg.get("welcome_on", True):
-        log.info("Welcome disabled in chat %s", chat.id)
         return
-
     if already_processed(ctx, chat.id, user.id):
-        log.info(
-            "Duplicate welcome ignored: chat=%s user=%s",
-            chat.id,
-            user.id,
-        )
         return
 
-    if (
-        cfg.get("clean_welcome")
-        and cfg.get("last_welcome")
-    ):
+    if cfg.get("clean_welcome") and cfg.get("last_welcome"):
         try:
-            await ctx.bot.delete_message(
-                chat.id,
-                cfg["last_welcome"],
-            )
+            await ctx.bot.delete_message(chat.id, cfg["last_welcome"])
         except TelegramError:
             pass
 
     try:
-        sent = await send_welcome(
-            ctx,
-            chat,
-            user,
-            cfg,
-        )
-
-        await cfg_set(
-            chat.id,
-            last_welcome=sent.message_id,
-        )
-
-        log.info(
-            "Welcome sent successfully: chat=%s user=%s (bot=%s)",
-            chat.id,
-            user.id,
-            user.is_bot,
-        )
-
+        sent = await send_welcome(ctx, chat, user, cfg)
+        await cfg_set(chat.id, last_welcome=sent.message_id)
     except TelegramError as e:
         forget_processed(ctx, chat.id, user.id)
-        log.warning(
-            "Welcome failed in chat %s for user %s: %s",
-            chat.id,
-            user.id,
-            e,
-        )
+        log.warning("Welcome failed in chat %s for user %s: %s", chat.id, user.id, e)
 
-
-# --------------------------------------------------
-# 1. NEW CHAT MEMBERS SERVICE MESSAGE
-# --------------------------------------------------
 
 async def on_join(update, ctx):
-    msg = update.message
-    chat = update.effective_chat
-
+    msg, chat = update.message, update.effective_chat
     if not msg or not msg.new_chat_members:
         return
 
     for user in msg.new_chat_members:
-
-        from common import log as _jlog
-        _jlog.info(
-            "NEW MEMBER DETECTED BY SERVICE MESSAGE | chat=%s | user=%s",
-            chat.id,
-            user.id,
-        )
-
-        # Bot itself added
         if user.id == ctx.bot.id:
-            from common import log
-            log.info("ZOYA added to chat %s", chat.id)
-
-            await say(
-                ctx,
-                chat.id,
-                T(
-                    "thanks for adding me! ✨ "
-                    "make me admin so every feature works."
-                )
-                + "\n\n"
-                + await perm_report(ctx, chat),
-            )
+            await say(ctx, chat.id, T("thanks for adding me! ✨ make me admin so every feature works.") + "\n\n" + await perm_report(ctx, chat))
             continue
+        await process_new_member(ctx, chat, user)
 
-        # Humans AND bots both go through welcome
-        await process_new_member(
-            ctx,
-            chat,
-            user,
-        )
-
-
-# --------------------------------------------------
-# 2. JOIN REQUEST DETECTION
-# --------------------------------------------------
 
 async def on_join_request(update, ctx):
-    """
-    Detects pending join requests.
-    A pending request is NOT a group membership, so we just log it.
-    Welcome is sent when the user actually becomes a member.
-    """
-    request = update.chat_join_request
-    if not request:
-        return
+    if update.chat_join_request:
+        pass
 
-    from common import log
-    chat = request.chat
-    user = request.from_user
-
-    log.info(
-        "JOIN REQUEST RECEIVED | chat=%s | user=%s",
-        chat.id,
-        user.id,
-    )
-
-
-# --------------------------------------------------
-# 3. CHAT MEMBER UPDATE (manual add / approved request / link join)
-# --------------------------------------------------
 
 async def on_chat_member(update, ctx):
-    """
-    Detects membership status changes:
-    - Manual admin add
-    - Link join
-    - Approved join request
-    - Restriction changes (ignored)
-    - Promotions (ignored)
-    """
     member_update = update.chat_member
     if not member_update:
         return
@@ -923,41 +455,13 @@ async def on_chat_member(update, ctx):
     old_member = member_update.old_chat_member
     new_member = member_update.new_chat_member
 
-    old_status = old_member.status
-    new_status = new_member.status
-
-    was_member = is_inside_chat(old_member)
-    is_now_member = is_inside_chat(new_member)
-
-    # Only process transitions from non-member -> member
-    if was_member or not is_now_member:
+    if is_inside_chat(old_member) or not is_inside_chat(new_member):
         return
 
-    user = new_member.user
+    await process_new_member(ctx, chat, new_member.user)
 
-    from common import log
-    log.info(
-        "NEW MEMBER DETECTED BY CHAT_MEMBER | "
-        "chat=%s | user=%s | old=%s | new=%s",
-        chat.id,
-        user.id,
-        old_status,
-        new_status,
-    )
-
-    await process_new_member(ctx, chat, user)
-
-
-# --------------------------------------------------
-# 4. BOT ITSELF ADDED / PROMOTED (my_chat_member)
-# --------------------------------------------------
 
 async def on_my_chat_member(update, ctx):
-    """
-    Fires when THIS bot is added/removed/promoted in a chat.
-    'new_chat_members' does NOT always fire when a bot is added,
-    so this is the ONLY reliable way to detect bot being added.
-    """
     mcu = update.my_chat_member
     if not mcu:
         return
@@ -966,102 +470,29 @@ async def on_my_chat_member(update, ctx):
     old = mcu.old_chat_member
     new = mcu.new_chat_member
 
-    from common import log
-
     was_member = is_inside_chat(old)
     is_now_member = is_inside_chat(new)
 
-    log.info(
-        "MY_CHAT_MEMBER | chat=%s | old=%s | new=%s",
-        chat.id,
-        old.status,
-        new.status,
-    )
-
-    # Bot just got added
     if not was_member and is_now_member:
         try:
-            await say(
-                ctx,
-                chat.id,
-                T(
-                    "thanks for adding me! ✨ "
-                    "make me admin so every feature works."
-                )
-                + "\n\n"
-                + await perm_report(ctx, chat),
-            )
-        except TelegramError as e:
-            log.warning("Bot welcome failed in %s: %s", chat.id, e)
-        return
+            await say(ctx, chat.id, T("thanks for adding me! ✨ make me admin so every feature works.") + "\n\n" + await perm_report(ctx, chat))
+        except TelegramError:
+            pass
 
-    # Bot got promoted
-    if was_member and is_now_member and new.status in ("administrator", "creator"):
-        if old.status != new.status:
-            log.info("Bot promoted in chat %s", chat.id)
-
-
-# --------------------------------------------------
-# REGISTER HANDLERS
-# --------------------------------------------------
 
 def register(app):
-
     grp = filters.ChatType.GROUPS
 
-    # ---- Welcome commands ----
     dual_command(app, "setwelcome", setwelcome_cmd)
-
-    # Support media captions such as: photo + caption /setwelcome
-    app.add_handler(
-        MessageHandler(
-            filters.CaptionRegex(
-                re.compile(
-                    r"^[/.]setwelcome(@\w+)?(\s|$)",
-                    re.I,
-                )
-            ) & grp,
-            setwelcome_cmd,
-        )
-    )
-
+    app.add_handler(MessageHandler(filters.CaptionRegex(re.compile(r"^[/.]setwelcome(@\w+)?(\s|$)", re.I)) & grp, setwelcome_cmd))
     dual_command(app, "welcome", welcome_cmd)
     dual_command(app, "resetwelcome", resetwelcome_cmd)
     dual_command(app, "cleanwelcome", cleanwelcome_cmd)
-
-    # ---- Rules ----
     dual_command(app, "setrules", setrules_cmd)
     dual_command(app, "rules", rules_cmd, group_only=False)
-
-    # ---- Permissions ----
     dual_command(app, "botperms", botperms_cmd)
 
-    # ---- 1. Service message: new_chat_members ----
-    app.add_handler(
-        MessageHandler(
-            filters.StatusUpdate.NEW_CHAT_MEMBERS,
-            on_join,
-        )
-    )
-
-    # ---- 2. Join requests (pending) ----
-    app.add_handler(
-        ChatJoinRequestHandler(on_join_request)
-    )
-
-    # ---- 3. Membership status changes (manual add / link / approved request) ----
-    app.add_handler(
-        ChatMemberHandler(
-            on_chat_member,
-            ChatMemberHandler.CHAT_MEMBER,
-        )
-    )
-
-    # ---- 4. Bot itself added / promoted ----
-    app.add_handler(
-        ChatMemberHandler(
-            on_my_chat_member,
-            ChatMemberHandler.MY_CHAT_MEMBER,
-        )
-    )
-    
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_join))
+    app.add_handler(ChatJoinRequestHandler(on_join_request))
+    app.add_handler(ChatMemberHandler(on_chat_member, ChatMemberHandler.CHAT_MEMBER))
+    app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
