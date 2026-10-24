@@ -152,11 +152,19 @@ def _extract_buttons(text: str, entities: list):
     for kind, m in matches:
         if m.start() < last_end:
             continue
+            
+        e_id = None
         if kind == "rose":
-            # plain text (not HTML) -> from_html=False so literal "&amp;" etc. is left alone
-            btn, same = parse_button_match(m.group(1), m.group(2), from_html=False)
+            # Check for custom emoji inside the label entities
+            label_start, label_end = m.start(1), m.end(1)
+            for ent in entities:
+                if ent.get("type") == "custom_emoji" and ent.get("offset", 0) >= label_start and ent.get("offset", 0) + ent.get("length", 0) <= label_end:
+                    e_id = ent.get("custom_emoji_id")
+                    break
+            btn, same = parse_button_match(m.group(1), m.group(2), from_html=False, custom_emoji_id=e_id)
         else:
             btn, same = parse_button_match(m.group(1), m.group(2).strip(), from_html=False)
+            
         if not btn:
             continue          # invalid link -> leave the text as it is, never break the whole filter
         add_to_rows(rows, btn, same)      # ":same" only joins a row of the same kind
@@ -279,12 +287,9 @@ async def filter_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if rich:
         # Bot API 10.1+ Rich Message (dividers, pull-quotes, expandable quotes, ...).
-        # Isme .text / .caption nahi hota - isi wajah se pehle "Unsupported message type" aata tha.
-        # Poora raw object save karte hain + source message ka pointer (copy fallback ke liye).
         data.update(type="rich", content="", rich=rich,
                     src_chat=reply.chat_id, src_msg=reply.message_id)
     elif reply.text:
-        # Normal text, expandable blockquote ke saath bhi: entity "expandable_blockquote" as-it-is jati hai.
         data.update(type="text", content=reply.text, entities=ents_of(reply.entities))
         lpo = getattr(reply, "link_preview_options", None)
         if lpo is not None and getattr(lpo, "is_disabled", False):
@@ -469,9 +474,6 @@ async def _send_rich(msg, bot, row, kb, rich_rows=None, fallback_kb=None):
 async def _send_filter(msg, bot, row, icons=True, styles=True):
     ftype = row.get("type", "text")
     if ftype == "rich":
-        # Scan the text INSIDE the rich blocks for [Btn](buttonurl://...) -> remove it from the text.
-        #   ":style:" buttons -> {"type": "buttons"} block appended at the end (like admin.py)
-        #   other buttons     -> normal inline keyboard under the message
         rich_obj, found = extract_rich_buttons(row.get("rich") or {})
         std_rows, rich_rows = split_button_rows(found)
         log.warning("[rich-buttons] filter: found %d standard row(s), %d rich row(s) in rich text",
@@ -514,8 +516,6 @@ async def _send_filter(msg, bot, row, icons=True, styles=True):
     native_kb = _kb_from_stored(row.get("buttons"), icons, styles)
 
     if rich_rows and ftype == "text":
-        # ":style:" buttons in a plain text filter -> turn it into a Rich Message + buttons block.
-        # (Rich paragraphs are plain text, so bold/italic/custom emoji of the source are not kept.)
         rich_obj = text_to_rich(text_part, html_mode=not modern)
         kb = _merge_kb(markup_from_rows(std_rows, icons, styles), native_kb)
         fb = _merge_kb(kb, markup_from_rows(rich_rows, icons, styles))
@@ -534,7 +534,6 @@ async def _send_filter(msg, bot, row, icons=True, styles=True):
 
     if ftype == "text":
         if not (text_part or "").strip():
-            # buttons-only / emoji-only filter: Telegram refuses an empty text ("Message_empty")
             text_part, ents = BLANK, None
         if row.get("no_preview"):
             api_kwargs["link_preview_options"] = {"is_disabled": True}
@@ -546,7 +545,6 @@ async def _send_filter(msg, bot, row, icons=True, styles=True):
         try:
             await msg.reply_text(text_part, **kw)
         except BadRequest as e:
-            # Kuch clients/servers U+3164 ko empty maante hain (buttons-only filter) -> braille blank try karo.
             if text_part == BLANK and "empty" in str(e).lower():
                 await msg.reply_text("\u2800", **kw)
             else:
@@ -583,7 +581,6 @@ async def _send_filter(msg, bot, row, icons=True, styles=True):
         await getattr(msg, method)(content, **kw)
     except BadRequest as e:
         if "caption" in str(e).lower() and "long" in str(e).lower():
-            # Fallback truncate
             text_part = re.sub(r'<[^>]+>', '', text_part or "")[:1000] + "..."
             kw["caption"] = text_part
             kw.pop("caption_entities", None)
@@ -622,7 +619,6 @@ async def trigger_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             continue
 
         try:
-            # full buttons -> without custom-emoji icons -> without icons/colours (never fail silently)
             for i, (icons, styles) in enumerate(BUTTON_LADDER):
                 try:
                     await _send_filter(msg, ctx.bot, row, icons=icons, styles=styles)
