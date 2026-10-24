@@ -158,8 +158,8 @@ def parse_button_tail(tail: str) -> dict:
     }
 
 
-def parse_button_match(label: str, tail: str, from_html: bool = True):
-    emoji_id = None
+def parse_button_match(label: str, tail: str, from_html: bool = True, custom_emoji_id: str = None):
+    emoji_id = custom_emoji_id
     if from_html:
         # Extract custom emoji ID from label if present
         emoji_match = re.search(r'<tg-emoji[^>]+emoji-id=["\']?(\d+)["\']?', label)
