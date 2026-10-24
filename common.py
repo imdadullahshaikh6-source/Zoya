@@ -17,12 +17,6 @@ log = logging.getLogger("bot")
 OWNER, ADMIN = ChatMemberStatus.OWNER, ChatMemberStatus.ADMINISTRATOR
 
 # ───────────────────── QUOTE / STICKER CONFIG ─────────────────────
-# Env-driven — override on the VPS via .env (already in .env.example):
-#   QUOTE_API=http://127.0.0.1:3000/generate
-#   QUOTE_API_FALLBACKS=https://bot.lyo.su/quote/generate
-#   QUOTE_BG=#1b1429
-#   QUOTE_TIMEOUT=10
-#   QUOTE_TOTAL_TIMEOUT=22
 QUOTE_API = os.getenv("QUOTE_API", "http://127.0.0.1:3000/generate")
 QUOTE_API_FALLBACKS = os.getenv(
     "QUOTE_API_FALLBACKS",
@@ -35,7 +29,6 @@ QUOTE_TOTAL_TIMEOUT = float(os.getenv("QUOTE_TOTAL_TIMEOUT", "22"))
 # ───────────────────── FONT / STYLE ─────────────────────
 _SC = dict(zip("abcdefghijklmnopqrstuvwxyz", "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘǫʀꜱᴛᴜᴠᴡxʏᴢ"))
 assert len(_SC) == 26
-# tags, {placeholders}, /commands, .commands and @names are never converted
 _SKIP = re.compile(r"(<[^>]+>|\{[^}]*\}|(?<![\w./])[./][a-zA-Z_]+|@\w+)")
 
 
@@ -48,7 +41,6 @@ def sc(text: str) -> str:
 
 
 def T(text: str, **kw) -> str:
-    """Small-caps static text, then fill {placeholders} with pre-escaped values."""
     return sc(text).format(**kw)
 
 
@@ -57,7 +49,6 @@ def esc(t) -> str:
 
 
 def q(text: str) -> str:
-    """Every bot message goes inside a quote block."""
     return f"<blockquote>{text}</blockquote>"
 
 
@@ -78,15 +69,6 @@ def make_button(
     icon_custom_emoji_id=None,
     disabled=False,
 ) -> InlineKeyboardButton:
-    """
-    Single place where every InlineKeyboardButton of the bot is built.
-
-    Bot API fields that older python-telegram-bot builds don't know yet are sent
-    through `api_kwargs`, so this works on any PTB version:
-      style                 (API 9.4)  'primary' blue | 'success' green | 'danger' red
-      icon_custom_emoji_id  (API 9.4)  custom emoji shown before the label
-      disabled              (API 10.3) DisabledButton -> a greyed-out button that does nothing
-    """
     extra = {}
     style = str(style).lower() if style else None
     if style in _BTN_STYLES:
@@ -94,8 +76,6 @@ def make_button(
     if icon_custom_emoji_id:
         extra["icon_custom_emoji_id"] = str(icon_custom_emoji_id)
     if disabled:
-        # DisabledButton "currently holds no information" -> empty object.
-        # A disabled button must not carry any action field.
         url = callback_data = None
         extra["disabled"] = {}
     kw = {"api_kwargs": extra} if extra else {}
@@ -103,7 +83,6 @@ def make_button(
 
 
 def B(text, data=None, url=None, style=None, icon=None, disabled=False) -> InlineKeyboardButton:
-    """Backward-compatible shortcut. style: 'primary' | 'success' | 'danger'."""
     return make_button(
         text, url=url, callback_data=data, style=style,
         icon_custom_emoji_id=icon, disabled=disabled,
@@ -122,43 +101,21 @@ async def say(ctx, chat_id, text, kb=None, reply_to=None):
 
 
 # ───────────────────── ROSE-STYLE BUTTON PARSER ─────────────────────
-# ONE parser for filters.py, welcome.py (welcome + rules) — every format below works everywhere:
-#
-#   [Name](buttonurl://https://link.com)                              plain button
-#   [Name](buttonurl://https://link.com:success)                      colour  (primary | success | danger)
-#   [Name](buttonurl://https://link.com:6170217276621465566)          custom-emoji icon
-#   [Name](buttonurl://https://link.com:success:6170217276621465566)  colour + icon
-#   [Name](buttonurl://https://link.com:same:danger:6170...)          ":same" -> joins the previous row
-#   [Name](buttonurl://disabled)                                      disabled button (API 10.3)
-#
-# Modifiers are read from the END of the tail, in ANY order, so "https://host:8080/x" keeps its port.
-#
-# TWO button kinds, chosen by the literal word  :style:
-#   no ":style:"  -> standard InlineKeyboardMarkup button (style / icon via api_kwargs)
-#   with ":style:" -> RICH PANEL button, exactly like /promote in admin.py:
-#       [Name](buttonurl://https://link.com:primary:style:6170217276621465566)
-#       -> {"type": "buttons", "buttons": [{"text", "url", "style", "icon_custom_emoji_id"}]}
-# The parser flags those buttons with "rich": True. Also accepted: style=success, color=green,
-# icon=<id>, emoji=<id> (these do NOT make a rich button).
-BTN_RE = re.compile(r"\[([^\[\]\n]+?)\]\(\s*buttonurl:\s*/{0,2}\s*([^)\n]+?)\s*\)", re.I)
+# FIXED: Added re.S and removed \n from URL regex to support line breaks
+BTN_RE = re.compile(r"\[([^\[\]\n]+?)\]\(\s*buttonurl:\s*/{0,2}\s*([^)]+?)\s*\)", re.I | re.S)
 
 _STYLE_ALIASES = {
     "primary": "primary", "blue": "primary",
     "success": "success", "green": "success",
     "danger": "danger", "red": "danger",
 }
-_FILLER = {"icon", "emoji", "color", "colour", "id"}      # harmless words, ignored
-# the bare word "style" is NOT ignored: it switches the button to a Rich Panel button
+_FILLER = {"icon", "emoji", "color", "colour", "id"}
 _STYLE_KV_RE = re.compile(r"^(?:style|color|colour)\s*=\s*(\w+)$", re.I)
-# custom emoji ids are 64-bit numbers (19 digits in practice). A bare number counts as an emoji id
-# from 10 digits up (a port such as ":8080" can never be mistaken for one); icon=<id> / emoji=<id>
-# works for any length.
 _ICON_KV_RE = re.compile(r"^(?:icon|emoji|icon_custom_emoji_id|custom_emoji_id|id)\s*=\s*(\d+)$", re.I)
 _ICON_BARE_RE = re.compile(r"^\d{10,25}$")
 
 
 def normalize_url(url: str) -> str:
-    """'example.com' -> 'https://example.com'. tg://, mailto: and full URLs are kept."""
     url = (url or "").strip()
     if not url:
         return url
@@ -168,7 +125,6 @@ def normalize_url(url: str) -> str:
 
 
 def url_ok(url: str) -> bool:
-    """Cheap sanity check so ONE bad link can never make Telegram reject the whole message."""
     if not url or re.search(r"\s", url):
         return False
     m = re.match(r"^([a-zA-Z][\w+.-]*):(?://)?(.+)$", url)
@@ -181,10 +137,6 @@ def url_ok(url: str) -> bool:
 
 
 def parse_button_tail(tail: str) -> dict:
-    """
-    Parse everything after `buttonurl:` in  [Text](buttonurl://<tail>).
-    Returns {"url", "same", "style", "icon", "disabled"}.
-    """
     parts = (tail or "").strip().split(":")
     same, style, icon, rich = False, None, None, False
     while len(parts) > 1:
@@ -193,9 +145,9 @@ def parse_button_tail(tail: str) -> dict:
         kv_style = _STYLE_KV_RE.match(tok)
         kv_icon = _ICON_KV_RE.match(tok)
         if not tok or low in _FILLER:
-            pass                                    # trailing ":" or a filler word
+            pass
         elif low == "style":
-            rich = True                             # -> Rich Panel button (admin.py style)
+            rich = True
         elif low == "same":
             same = True
         elif low in _STYLE_ALIASES:
@@ -207,7 +159,7 @@ def parse_button_tail(tail: str) -> dict:
         elif _ICON_BARE_RE.match(tok):
             icon = icon or tok
         else:
-            break  # not a modifier -> it belongs to the URL (e.g. https://host:8080/x)
+            break
         parts.pop()
     url = ":".join(parts).strip()
     disabled = url.lower() == "disabled"
@@ -222,14 +174,8 @@ def parse_button_tail(tail: str) -> dict:
 
 
 def parse_button_match(label: str, tail: str, from_html: bool = True):
-    """
-    One regex match -> (button_dict | None, same_row).
-    button_dict = {"text", "url" | "disabled": True, ["style"], ["icon_custom_emoji_id"]}
-    from_html=True  : welcome / rules / legacy filters (text is stored as HTML)
-    from_html=False : entity-based filters (plain text, must not be un-escaped)
-    """
     if from_html:
-        label = html.unescape(re.sub(r"<[^>]*>", "", label))   # button labels can't carry tags
+        label = html.unescape(re.sub(r"<[^>]*>", "", label))
         tail = html.unescape(tail)
     label = label.strip()
     if not label:
@@ -253,7 +199,6 @@ def parse_button_match(label: str, tail: str, from_html: bool = True):
 
 
 def button_from_dict(d: dict, icons: bool = True, styles: bool = True):
-    """Stored/parsed button dict -> InlineKeyboardButton (style + icon go through api_kwargs)."""
     if not d.get("url") and not d.get("disabled"):
         return None
     return make_button(
@@ -266,7 +211,6 @@ def button_from_dict(d: dict, icons: bool = True, styles: bool = True):
 
 
 def markup_from_rows(rows, icons: bool = True, styles: bool = True):
-    """list[list[button_dict]] -> InlineKeyboardMarkup | None."""
     out = []
     for row in rows or []:
         r = [b for b in (button_from_dict(d, icons, styles) for d in row) if b]
@@ -276,7 +220,6 @@ def markup_from_rows(rows, icons: bool = True, styles: bool = True):
 
 
 def add_to_rows(rows, d, same):
-    """':same' joins the previous row, but only if that row is the same kind (standard / rich)."""
     if same and rows and bool(rows[-1][0].get("rich")) == bool(d.get("rich")):
         rows[-1].append(d)
     else:
@@ -284,14 +227,12 @@ def add_to_rows(rows, d, same):
 
 
 def split_button_rows(rows):
-    """-> (standard_rows, rich_rows). A row's kind is the kind of its buttons (':style:' = rich)."""
     std = [r for r in rows or [] if not r[0].get("rich")]
     rich = [r for r in rows or [] if r[0].get("rich")]
     return std, rich
 
 
 def parse_button_rows(raw: str, from_html: bool = True):
-    """Returns (clean_text_without_button_syntax, rows: list[list[button_dict]])."""
     if not raw:
         return raw, []
     rows = []
@@ -299,7 +240,7 @@ def parse_button_rows(raw: str, from_html: bool = True):
     def _sub(m):
         d, same = parse_button_match(m.group(1), m.group(2), from_html)
         if not d:
-            return m.group(0)          # invalid button -> leave the text visible
+            return m.group(0)
         add_to_rows(rows, d, same)
         return ""
 
@@ -309,16 +250,13 @@ def parse_button_rows(raw: str, from_html: bool = True):
 
 
 def parse_buttons(raw: str, icons: bool = True, styles: bool = True):
-    """Returns (clean_text, InlineKeyboardMarkup | None). Rich (':style:') buttons are shown as
-    normal inline buttons here; use parse_button_rows + split_button_rows to keep them rich."""
     clean, rows = parse_button_rows(raw)
     return clean, markup_from_rows(rows, icons, styles)
 
 
-# ───────────────────── RICH PANEL BUTTONS (':style:' buttons, like admin.py) ─────────────────────
+# ───────────────────── RICH PANEL BUTTONS ─────────────────────
 
 def rich_button_dict(d: dict, icons: bool = True, styles: bool = True) -> dict:
-    """{"text", "url", "style", "icon_custom_emoji_id"} — same keys admin.py uses in its panel."""
     out = {"text": d["text"]}
     if d.get("disabled"):
         out["disabled"] = {}
@@ -332,7 +270,6 @@ def rich_button_dict(d: dict, icons: bool = True, styles: bool = True) -> dict:
 
 
 def rich_button_blocks(rich_rows, icons: bool = True, styles: bool = True) -> list:
-    """One {"type": "buttons", "buttons": [...]} block per button row."""
     return [
         {"type": "buttons", "buttons": [rich_button_dict(d, icons, styles) for d in row]}
         for row in rich_rows or [] if row
@@ -340,7 +277,6 @@ def rich_button_blocks(rich_rows, icons: bool = True, styles: bool = True) -> li
 
 
 def with_rich_buttons(rich: dict, rich_rows, icons: bool = True, styles: bool = True) -> dict:
-    """Copy of a rich message with the button blocks appended at the END."""
     out = dict(rich or {})
     out["blocks"] = list(out.get("blocks") or []) + rich_button_blocks(rich_rows, icons, styles)
     return out
@@ -351,11 +287,11 @@ def html_to_plain(text: str) -> str:
     return html.unescape(re.sub(r"<[^>]*>", "", text)).strip()
 
 
-RICH_BLANK = "\u2800"      # invisible braille blank: keeps a rich message non-empty
+# FIXED: Use an invisible separator that Telegram actually accepts
+RICH_BLANK = "\u2063"      
 
 
 def ensure_rich_nonempty(rich: dict) -> dict:
-    """Telegram rejects a rich message without blocks ("Rich message must be non-empty")."""
     rich = dict(rich or {})
     if not rich.get("blocks"):
         rich["blocks"] = [{"type": "paragraph", "text": RICH_BLANK}]
@@ -363,23 +299,16 @@ def ensure_rich_nonempty(rich: dict) -> dict:
 
 
 def text_to_rich(text: str, html_mode: bool = False) -> dict:
-    """Plain/HTML text -> rich message (one paragraph block per blank-line-separated chunk).
-    Rich paragraphs are plain text, so bold/italic/custom-emoji entities of the source are lost."""
     if html_mode:
         text = html_to_plain(text)
     paras = [p.strip() for p in re.split(r"\n\s*\n", text or "") if p.strip()]
     return ensure_rich_nonempty({"blocks": [{"type": "paragraph", "text": p} for p in paras]})
 
 
-# Received Rich Messages keep their text as a RichText TREE: a string, a list of runs, or nodes like
-# {"type": "italic", "text": <RichText>}. So "[add me](buttonurl://...)" is usually split over many
-# runs (italic label, underlined link, plain tail ...). We therefore work on the VISIBLE text:
-# join every run, find the syntax there, then cut those characters out of the runs.
 _RT_KEYS = ("text", "caption", "credit", "summary", "title")
 
 
 def _rt_leaves(o, parent, key, out):
-    """Collect (container, key) of every plain-string run inside a RichText value."""
     if isinstance(o, str):
         out.append((parent, key))
     elif isinstance(o, list):
@@ -392,7 +321,6 @@ def _rt_leaves(o, parent, key, out):
 
 
 def _rt_prune(o):
-    """Drop empty runs (Telegram rejects empty text nodes). Returns None when nothing is left."""
     if isinstance(o, str):
         return o or None
     if isinstance(o, list):
@@ -435,7 +363,7 @@ def _rt_extract(container, key, rows) -> bool:
     for t in texts:
         new_texts.append("".join(ch for i, ch in enumerate(t, pos) if keep[i]))
         pos += len(t)
-    for i in range(len(new_texts) - 1, -1, -1):         # trim trailing blanks left behind
+    for i in range(len(new_texts) - 1, -1, -1):
         stripped = new_texts[i].rstrip()
         new_texts[i] = stripped
         if stripped:
@@ -451,20 +379,14 @@ def _rt_extract(container, key, rows) -> bool:
 
 
 def extract_rich_buttons(rich):
-    """
-    Scan the visible text of a Rich Message for [Label](buttonurl://...) syntax (even when it is
-    split over bold / italic / link runs). Returns (rich_without_syntax, rows). Blocks whose text
-    becomes empty are dropped. The input is not modified.
-    """
     rich = copy.deepcopy(rich or {})
     rows = []
 
     def walk(o):
-        """Returns True when `o` is a block that became empty because of the removal."""
         if isinstance(o, list):
             before = len(o)
             o[:] = [x for x in o if not walk(x)]
-            return before > 0 and not o          # a list emptied by the removal
+            return before > 0 and not o
         if isinstance(o, dict):
             had = False
             for k in list(o):
@@ -480,13 +402,11 @@ def extract_rich_buttons(rich):
 
     walk(rich)
     if rows and "blocks" in rich:
-        rich = ensure_rich_nonempty(rich)         # syntax was the only text -> keep a blank block
+        rich = ensure_rich_nonempty(rich)
     return rich, rows
 
 
-# Telegram refuses a custom-emoji icon unless the bot owner has Premium (or the bot owns Fragment
-# usernames). Rather than losing the whole message, we retry: full -> no icons -> no icons/colours.
-BUTTON_LADDER = ((True, True), (False, True), (False, False))      # (icons, styles)
+BUTTON_LADDER = ((True, True), (False, True), (False, False))
 
 
 def is_button_extra_error(e) -> bool:
@@ -495,7 +415,6 @@ def is_button_extra_error(e) -> bool:
 
 
 async def send_with_fallback(send, rows):
-    """`send(kb)` is an async callable. Tries the rich buttons first, then simpler versions."""
     variants, seen = [], set()
     for icons, styles in BUTTON_LADDER:
         kb = markup_from_rows(rows, icons, styles)
@@ -512,11 +431,7 @@ async def send_with_fallback(send, rows):
             log.warning("buttons rejected (%s) - retrying with simpler buttons", e)
 
 
-# ───────────────────── RICH MESSAGES (Bot API 10.1+) ─────────────────────
-# Shared by filters.py and welcome.py.
-
 def get_rich_message(message):
-    """Message.rich_message as a plain dict (older PTB keeps it in api_kwargs / to_dict())."""
     r = getattr(message, "rich_message", None)
     if r is not None:
         return r.to_dict() if hasattr(r, "to_dict") else (dict(r) if isinstance(r, dict) else None)
@@ -528,22 +443,19 @@ def get_rich_message(message):
 
 
 def scrub_rich(o):
-    """Received RichMessage -> sendable shape: media objects become bare file_id strings."""
     if isinstance(o, dict):
         if "file_id" in o:
             return o["file_id"]
         return {k: scrub_rich(v) for k, v in o.items() if k != "file_unique_id"}
     if isinstance(o, list):
-        if o and all(isinstance(x, dict) and "file_id" in x for x in o):   # PhotoSize[] -> biggest
+        if o and all(isinstance(x, dict) and "file_id" in x for x in o):
             return o[-1]["file_id"]
         return [scrub_rich(x) for x in o]
     return o
 
 
 def rich_plain_text(o) -> str:
-    """Last-resort fallback: join every 'text' string of a rich message."""
     out = []
-
     def walk(x, in_text=False):
         if isinstance(x, str):
             if in_text:
@@ -555,13 +467,11 @@ def rich_plain_text(o) -> str:
         elif isinstance(x, list):
             for i in x:
                 walk(i, in_text)
-
     walk(o)
     return "\n".join(t for t in out if t.strip())
 
 
 def map_strings(o, fn):
-    """Apply fn to every string inside a nested dict/list (used for {first}-style fillings)."""
     if isinstance(o, str):
         return fn(o)
     if isinstance(o, list):
@@ -572,15 +482,13 @@ def map_strings(o, fn):
 
 
 async def _raw_api(bot, method, payload):
-    """Raw Bot API call (PTB has no sendRichMessage wrapper yet)."""
     fn = getattr(bot, "do_api_request", None)
     if fn:
         return await fn(method, api_kwargs=payload)
-    return await bot._post(method, data=payload)          # very old PTB
+    return await bot._post(method, data=payload)
 
 
 def _as_message(res, bot):
-    """do_api_request may hand back the raw JSON dict; callers (e.g. cleanwelcome) need .message_id."""
     if isinstance(res, dict):
         try:
             return Message.de_json(res, bot)
@@ -592,21 +500,14 @@ def _as_message(res, bot):
 
 async def send_rich(bot, chat_id, row, kb=None, reply_to=None, thread_id=None,
                     rich_rows=None, fallback_kb=None):
-    """
-    Send a saved Rich Message (row["rich"] = raw object, row["src_chat"/"src_msg"] = original).
-    rich_rows : ':style:' buttons -> appended as {"type": "buttons"} blocks (like admin.py's panel);
-                tried with icons+colours, then without icons, then without colours.
-    kb        : normal inline keyboard (reply_markup).
-    fallback_kb: used only if sendRichMessage fails (copy / plain-text fallback), so buttons survive.
-    Order: 1) sendRichMessage  2) copyMessage of the original  3) plain text.
-    Never calls sendRichMessage with empty content.
-    """
     rich = scrub_rich(row.get("rich") or {})
     inp = {k: rich[k] for k in ("blocks", "is_rtl") if k in rich}
     if not inp.get("blocks"):
-        inp = rich            # unknown shape: send as received, API will tell us if it dislikes it
-    if rich_rows or ("blocks" in inp and not inp["blocks"]):
-        inp = ensure_rich_nonempty(inp)           # never send an empty rich message
+        inp = rich
+    
+    # FIXED: Force ensure_rich_nonempty on every call
+    inp = ensure_rich_nonempty(inp)
+    
     rp = (
         ReplyParameters(message_id=reply_to, allow_sending_without_reply=True)
         if reply_to else None
@@ -655,14 +556,12 @@ async def send_rich(bot, chat_id, row, kb=None, reply_to=None, thread_id=None,
         except Exception as e:
             log.warning("copyMessage failed (%s) - falling back to plain text", e)
 
-    # "\u3164" alone is rejected as empty by Telegram, so use a visible character here.
     txt = (rich_plain_text(row.get("rich")) or "✦")[:4096]
     return await bot.send_message(
         chat_id, txt, reply_markup=fb_kb, reply_parameters=rp, message_thread_id=thread_id,
     )
 
 
-# ───────────────────── PERMISSIONS ─────────────────────
 RIGHTS = [
     ("change_info", "Change Info"),
     ("delete_messages", "Delete Messages"),
@@ -711,7 +610,7 @@ async def require_admin(update, ctx, right=None) -> bool:
     if chat.type == ChatType.PRIVATE:
         await say(ctx, chat.id, T("this command works only in groups."))
         return False
-    if msg.sender_chat and msg.sender_chat.id == chat.id:  # anonymous admin
+    if msg.sender_chat and msg.sender_chat.id == chat.id:
         return True
     user = update.effective_user
     m = await get_member(ctx, chat.id, user.id)
@@ -750,7 +649,6 @@ def explain(e: Exception) -> str:
     return f"Telegram said: {esc(e)}"
 
 
-# ───────────────────── TARGET RESOLUTION (reply / @username / id) ─────────────────────
 async def resolve_target(update, ctx):
     msg, chat = update.effective_message, update.effective_chat
     args = list(ctx.args or [])
@@ -774,13 +672,11 @@ async def resolve_target(update, ctx):
                 if cchat.type == ChatType.PRIVATE:
                     uid = cchat.id
             except TelegramError as e:
-                # Fallback: Check if the user is a member of the current chat using the username
                 try:
                     member = await ctx.bot.get_chat_member(chat.id, a)
                     if member and member.user:
                         uid = member.user.id
                 except TelegramError as e2:
-                    # Both global and local lookups failed
                     log.warning(f"[Resolve] Failed to resolve {a} globally ({e}) or locally ({e2})")
                     pass
     if uid is None:
@@ -789,7 +685,6 @@ async def resolve_target(update, ctx):
     return (m.user if m else None), title
 
 
-# ───────────────────── DUAL /command AND .command SUPPORT ─────────────────────
 def _dotify(callback):
     async def wrapper(update, ctx):
         msg = update.effective_message
@@ -800,7 +695,6 @@ def _dotify(callback):
 
 
 def dual_command(app, names, callback, group_only=True):
-    """Registers callback for /name (and .name) — .name works alongside / everywhere it's added."""
     if isinstance(names, str):
         names = [names]
     f = filters.ChatType.GROUPS if group_only else filters.ALL
@@ -826,3 +720,4 @@ def human_delta(seconds: float) -> str:
     if not parts:
         parts.append(f"{seconds}s")
     return " ".join(parts[:2])
+    
