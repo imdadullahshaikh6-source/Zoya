@@ -146,6 +146,8 @@ async def _bot_can_guard(ctx, chat_id: int) -> bool:
     return ok
 
 
+# ─────────────────── DELAY COMMANDS ───────────────────
+
 async def _apply_delay(ctx, update: Update, mode: str):
     msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
     if chat.type == ChatType.PRIVATE:
@@ -178,6 +180,7 @@ async def _apply_delay(ctx, update: Update, mode: str):
             await say(ctx, chat.id, T("<blockquote>❌ invalid delay — use <code>1m</code> to <code>6h</code> or <code>off</code></blockquote>"), reply_to=msg.message_id)
             return
 
+    # 🔥 UNIVERSAL: har mode sirf apna field update kare, dusre ko touch na kare
     cfg = await _cached_guardian_get(chat.id, use_cache=False) or {}
 
     def _eff(key):
@@ -192,13 +195,21 @@ async def _apply_delay(ctx, update: Update, mode: str):
     if mode == "both":
         if delay == 0:
             await dbase.guardian_set(
-                chat.id, edit_delay_seconds=0, media_delay_seconds=0, delay_seconds=0, enabled=False,
+                chat.id,
+                edit_delay_seconds=0,
+                media_delay_seconds=0,
+                delay_seconds=0,
+                enabled=False,
             )
             _invalidate_cache(chat.id)
             await say(ctx, chat.id, T("<blockquote>✅ Guardian turned <b>OFF</b> — neither edits nor media will be deleted.</blockquote>"), reply_to=msg.message_id)
         else:
             await dbase.guardian_set(
-                chat.id, edit_delay_seconds=delay, media_delay_seconds=delay, delay_seconds=delay, enabled=True,
+                chat.id,
+                edit_delay_seconds=delay,
+                media_delay_seconds=delay,
+                delay_seconds=delay,
+                enabled=True,
             )
             _invalidate_cache(chat.id)
             log.info("[guardian] setdelay both=%ds for chat %s", delay, chat.id)
@@ -208,7 +219,11 @@ async def _apply_delay(ctx, update: Update, mode: str):
 
     elif mode == "edit":
         new_enabled = (delay > 0) or (cur_media > 0)
-        await dbase.guardian_set(chat.id, edit_delay_seconds=delay, enabled=new_enabled)
+        await dbase.guardian_set(
+            chat.id,
+            edit_delay_seconds=delay,
+            enabled=new_enabled,
+        )
         _invalidate_cache(chat.id)
         if delay == 0:
             await say(ctx, chat.id, T("<blockquote>✅ Edit deletion turned <b>OFF</b>.</blockquote>"), reply_to=msg.message_id)
@@ -220,7 +235,11 @@ async def _apply_delay(ctx, update: Update, mode: str):
 
     elif mode == "media":
         new_enabled = (delay > 0) or (cur_edit > 0)
-        await dbase.guardian_set(chat.id, media_delay_seconds=delay, enabled=new_enabled)
+        await dbase.guardian_set(
+            chat.id,
+            media_delay_seconds=delay,
+            enabled=new_enabled,
+        )
         _invalidate_cache(chat.id)
         if delay == 0:
             await say(ctx, chat.id, T("<blockquote>✅ Media deletion turned <b>OFF</b>.</blockquote>"), reply_to=msg.message_id)
@@ -276,6 +295,8 @@ async def guard_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await say(ctx, chat.id, T(f"<blockquote>✅ Guardian turned <b>{'ON' if enabled else 'OFF'}</b>.</blockquote>"), reply_to=msg.message_id)
 
 
+# ─────────────────── PERMIT COMMANDS ───────────────────
+
 async def permit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
     if chat.type == ChatType.PRIVATE:
@@ -293,7 +314,9 @@ async def permit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(
             chat.id,
             q(T("<b>⚠️ Anonymous Admin detected.</b>\nOnly the real group owner can approve permits. Please tap the button below to verify.")),
-            parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id, reply_markup=keyboard,
+            parse_mode=ParseMode.HTML,
+            reply_to_message_id=msg.message_id,
+            reply_markup=keyboard,
         )
         return
 
@@ -331,7 +354,9 @@ async def unpermit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(
             chat.id,
             q(T("<b>⚠️ Anonymous Admin detected.</b>\nOnly the real group owner can approve. Tap the button below to verify.")),
-            parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id, reply_markup=keyboard,
+            parse_mode=ParseMode.HTML,
+            reply_to_message_id=msg.message_id,
+            reply_markup=keyboard,
         )
         return
 
@@ -363,7 +388,9 @@ async def permitlist_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(
             chat.id,
             q(T("<b>⚠️ Anonymous Admin detected.</b>\nOnly the real group owner can view the permit list. Tap to verify.")),
-            parse_mode=ParseMode.HTML, reply_to_message_id=msg.message_id, reply_markup=keyboard,
+            parse_mode=ParseMode.HTML,
+            reply_to_message_id=msg.message_id,
+            reply_markup=keyboard,
         )
         return
 
@@ -472,6 +499,7 @@ async def _delete_after(ctx, chat_id: int, message_id: int, delay: int, note_tex
 
 
 async def _get_guard_delay(ctx, chat, user, is_edit: bool, is_media: bool) -> int:
+    """Returns delay in seconds (0 = don't delete)."""
     if not chat or chat.type == ChatType.PRIVATE:
         return 0
     me = ctx.application.bot_data.get("me")
@@ -496,6 +524,7 @@ async def _get_guard_delay(ctx, chat, user, is_edit: bool, is_media: bool) -> in
     edit_delay  = int(edit_delay)
     media_delay = int(media_delay)
 
+    # Permitted user check
     permitted = cfg.get("permitted_users", [])
     for u in permitted:
         if u.get("id") and u.get("id") == user.id:
@@ -508,6 +537,7 @@ async def _get_guard_delay(ctx, chat, user, is_edit: bool, is_media: bool) -> in
     if not await _bot_can_guard(ctx, chat.id):
         return 0
 
+    # 🔥 Dono applicable delays me se MIN use karo
     applicable = []
     if is_edit and edit_delay >= MIN_DELAY:
         applicable.append(edit_delay)
@@ -544,8 +574,7 @@ async def _guardian_watcher(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if is_edit:
             note = f"<blockquote>🗑️ {_safe_name(user)}'s <b>edited message</b> was deleted.</blockquote>"
 
-        # FIXED: Use PTB's app.create_task to automatically handle shutdown
-        ctx.application.create_task(_delete_after(ctx, chat.id, msg.message_id, delay, note))
+        asyncio.create_task(_delete_after(ctx, chat.id, msg.message_id, delay, note))
     except Exception as e:
         log.exception("[guardian] watcher error: %s", e)
 
